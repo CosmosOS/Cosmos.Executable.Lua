@@ -4,7 +4,6 @@
 
 
 using System;
-using System.Text;
 using System.Collections.Generic;
 
 namespace Cosmos.Executable.Lua
@@ -16,6 +15,9 @@ namespace Cosmos.Executable.Lua
 	}
 
 	public delegate DumpStatus LuaWriter( byte[] bytes, int start, int length );
+
+	// ldump.c: a function as the precompiled chunk of the reference Lua 5.3
+	// writes on a 64-bit machine, little endian
 	internal class DumpState
 	{
 		public static DumpStatus Dump(
@@ -27,7 +29,8 @@ namespace Cosmos.Executable.Lua
 			d.Status	= DumpStatus.OK;
 
 			d.DumpHeader();
-			d.DumpFunction( proto );
+			d.DumpByte( proto.Upvalues.Count );
+			d.DumpFunction( proto, null );
 
 			return d.Status;
 		}
@@ -36,50 +39,49 @@ namespace Cosmos.Executable.Lua
 		private bool		Strip;
 		private DumpStatus	Status;
 
-		private const string LUAC_TAIL = "\u0019\u0093\r\n\u001a\n";
-		private static int VERSION = (LuaDef.LUA_VERSION_MAJOR[0]-'0') * 16 + 
-			(LuaDef.LUA_VERSION_MINOR[0]-'0');
-		private static int LUAC_HEADERSIZE = LuaConf.LUA_SIGNATURE.Length +
-			2 + 6 + LUAC_TAIL.Length;
-		private const int FORMAT = 0;
-		private const int ENDIAN = 1;
+		public const string LUAC_DATA = "\u0019\u0093\r\n\u001a\n";
+		public const int LUAC_VERSION = 5 * 16 + 3;
+		public const int LUAC_FORMAT = 0; // this is the official format
+		public const long LUAC_INT = 0x5678;
+		public const double LUAC_NUM = 370.5;
+
+		// the sizes of int, size_t, Instruction, lua_Integer and lua_Number
+		public const int SIZEOF_INT = 4;
+		public const int SIZEOF_SIZET = 8;
+		public const int SIZEOF_INSTRUCTION = 4;
+		public const int SIZEOF_INTEGER = 8;
+		public const int SIZEOF_NUMBER = 8;
 
 		private DumpState()
 		{
 		}
 
-		private byte[] BuildHeader()
+		private void DumpLiteral( string s )
 		{
-			var bytes = new byte[LUAC_HEADERSIZE];
-			int i = 0;
-
-			for(var j=0; j<LuaConf.LUA_SIGNATURE.Length; ++j)
-				bytes[i++] = (byte)LuaConf.LUA_SIGNATURE[j];
-
-			bytes[i++] = (byte)VERSION;
-			bytes[i++] = (byte)FORMAT;
-			bytes[i++] = (byte)ENDIAN;
-			bytes[i++] = (byte)4; // sizeof(int)
-			bytes[i++] = (byte)4; // sizeof(size_t)
-			bytes[i++] = (byte)4; // sizeof(Instruction)
-			bytes[i++] = (byte)sizeof(double); // sizeof(lua_Number)
-			bytes[i++] = (byte)0; // is lua_Number integral?
-
-			for(var j=0; j<LUAC_TAIL.Length; ++j)
-				bytes[i++] = (byte)LUAC_TAIL[j];
-
-			return bytes;
+			var bytes = new byte[s.Length];
+			for( int i=0; i<s.Length; ++i )
+				bytes[i] = (byte)s[i];
+			DumpBlock( bytes );
 		}
 
 		private void DumpHeader()
 		{
-			var bytes = BuildHeader();
-			DumpBlock( bytes );
+			DumpLiteral( LuaConf.LUA_SIGNATURE );
+			DumpByte( LUAC_VERSION );
+			DumpByte( LUAC_FORMAT );
+			DumpLiteral( LUAC_DATA );
+			DumpByte( SIZEOF_INT );
+			DumpByte( SIZEOF_SIZET );
+			DumpByte( SIZEOF_INSTRUCTION );
+			DumpByte( SIZEOF_INTEGER );
+			DumpByte( SIZEOF_NUMBER );
+			DumpInteger( LUAC_INT );
+			DumpNumber( LUAC_NUM );
 		}
 
-		private void DumpBool( bool value )
+		private void DumpByte( int value )
 		{
-			DumpByte( value ? (byte)1 : (byte) 0 );
+			DumpBlock( new byte[] { (byte)value } );
 		}
 
 		private void DumpInt( int value )
@@ -87,139 +89,140 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( BitConverter.GetBytes( value ) );
 		}
 
-		private void DumpUInt( uint value )
+		private void DumpInteger( long value )
 		{
 			DumpBlock( BitConverter.GetBytes( value ) );
 		}
 
+		private void DumpNumber( double value )
+		{
+			DumpBlock( BitConverter.GetBytes( value ) );
+		}
+
+		// a string, one byte per character: its size plus one, in a byte
+		// below 0xFF or else after 0xFF as a size_t, then its bytes
 		private void DumpString( string value )
 		{
 			if( value == null )
 			{
-				DumpUInt(0);
+				DumpByte( 0 );
+				return;
 			}
+
+			long size = (long)value.Length + 1; // include trailing '\0'
+			if( size < 0xFF )
+				DumpByte( (int)size );
 			else
 			{
-				// UTF-8, as Undump reads it: a character above \255 survives,
-				// where one byte per character dropped its high byte
-				var bytes = System.Text.Encoding.UTF8.GetBytes( value );
-				DumpUInt( (uint)(bytes.Length + 1) );
-				DumpBlock( bytes );
-				DumpByte( (byte)'\0' );
+				DumpByte( 0xFF );
+				DumpBlock( BitConverter.GetBytes( (ulong)size ) );
 			}
-		}
-
-		private void DumpByte( byte value )
-		{
-			var bytes = new byte[] { value };
-			DumpBlock( bytes );
+			var bytes = new byte[value.Length];
+			for( int i=0; i<value.Length; ++i )
+				bytes[i] = (byte)value[i];
+			DumpBlock( bytes ); // no need to save '\0'
 		}
 
 		private void DumpCode( LuaProto proto )
 		{
-			DumpVector( proto.Code, (ins) => {
+			DumpInt( proto.Code.Count );
+			foreach( var ins in proto.Code )
 				DumpBlock( BitConverter.GetBytes( (uint)ins ) );
-			});
 		}
 
 		private void DumpConstants( LuaProto proto )
 		{
-			DumpVector( proto.K, (k) => {
+			DumpInt( proto.K.Count );
+			foreach( var k in proto.K )
+			{
 				var t = k.V.Tt;
-				DumpByte( (byte)t );
+				DumpByte( t );
 				switch( t )
 				{
 					case (int)LuaType.LUA_TNIL:
 						break;
 					case (int)LuaType.LUA_TBOOLEAN:
-						DumpBool(k.V.BValue());
+						DumpByte( k.V.BValue() ? 1 : 0 );
 						break;
-					case (int)LuaType.LUA_TNUMBER:
-						DumpBlock( BitConverter.GetBytes(k.V.NValue) );
+					case TValue.LUA_TNUMFLT:
+						DumpNumber( k.V.FltValue );
+						break;
+					case TValue.LUA_TNUMINT:
+						DumpInteger( k.V.IValue() );
 						break;
 					case (int)LuaType.LUA_TSTRING:
-						DumpString(k.V.SValue());
+						DumpString( k.V.SValue() );
 						break;
 					default:
 						Utl.Assert(false);
 						break;
 				}
-			});
+			}
+		}
 
-			DumpVector( proto.P, (p) => {
-				DumpFunction( p );
-			});
+		private void DumpProtos( LuaProto proto )
+		{
+			DumpInt( proto.P.Count );
+			foreach( var p in proto.P )
+				DumpFunction( p, proto.Source );
 		}
 
 		private void DumpUpvalues( LuaProto proto )
 		{
-			DumpVector( proto.Upvalues, (upval) => {
-				DumpByte( upval.InStack ? (byte)1 : (byte)0 );
-				DumpByte( (byte)upval.Index );
-			});
+			DumpInt( proto.Upvalues.Count );
+			foreach( var upval in proto.Upvalues )
+			{
+				DumpByte( upval.InStack ? 1 : 0 );
+				DumpByte( upval.Index );
+			}
 		}
 
 		private void DumpDebug( LuaProto proto )
 		{
-			DumpString( Strip ? null : proto.Source );
+			int n = Strip ? 0 : proto.LineInfo.Count;
+			DumpInt( n );
+			for( int i=0; i<n; ++i )
+				DumpInt( proto.LineInfo[i] );
 
-			DumpVector( (Strip ? null : proto.LineInfo), (line) => {
-				DumpInt(line);
-			});
+			n = Strip ? 0 : proto.LocVars.Count;
+			DumpInt( n );
+			for( int i=0; i<n; ++i )
+			{
+				DumpString( proto.LocVars[i].VarName );
+				DumpInt( proto.LocVars[i].StartPc );
+				DumpInt( proto.LocVars[i].EndPc );
+			}
 
-			DumpVector( (Strip ? null : proto.LocVars), (locvar) => {
-				DumpString( locvar.VarName );
-				DumpInt( locvar.StartPc );
-				DumpInt( locvar.EndPc );
-			});
-
-			DumpVector( (Strip ? null : proto.Upvalues), (upval) => {
-				DumpString( upval.Name );
-			});
+			n = Strip ? 0 : proto.Upvalues.Count;
+			DumpInt( n );
+			for( int i=0; i<n; ++i )
+				DumpString( proto.Upvalues[i].Name );
 		}
 
-		private void DumpFunction( LuaProto proto )
+		private void DumpFunction( LuaProto proto, string psource )
 		{
+			if( Strip || proto.Source == psource )
+				DumpString( null ); // no debug info or same source as its parent
+			else
+				DumpString( proto.Source );
 			DumpInt( proto.LineDefined );
 			DumpInt( proto.LastLineDefined );
-			DumpByte( (byte)proto.NumParams );
-			DumpByte( proto.IsVarArg ? (byte)1 : (byte)0 );
-			DumpByte( (byte)proto.MaxStackSize );
+			DumpByte( proto.NumParams );
+			DumpByte( proto.IsVarArg ? 1 : 0 );
+			DumpByte( proto.MaxStackSize );
 			DumpCode( proto );
 			DumpConstants( proto );
 			DumpUpvalues( proto );
+			DumpProtos( proto );
 			DumpDebug( proto );
-		}
-
-		private delegate void DumpItemDelegate<T>( T item );
-		private void DumpVector<T>( IList<T> list, DumpItemDelegate<T> dumpItem )
-		{
-			if( list == null )
-			{
-				DumpInt( 0 );
-			}
-			else
-			{
-				DumpInt( list.Count );
-				for( var i=0; i<list.Count; ++i )
-				{
-					dumpItem( list[i] );
-				}
-			}
 		}
 
 		private void DumpBlock( byte[] bytes )
 		{
-			DumpBlock( bytes, 0, bytes.Length );
-		}
-
-		private void DumpBlock( byte[] bytes, int start, int length )
-		{
-			if( Status == DumpStatus.OK )
+			if( Status == DumpStatus.OK && bytes.Length > 0 )
 			{
-				Status = Writer(bytes, start, length);
+				Status = Writer(bytes, 0, bytes.Length);
 			}
 		}
 	}
 }
-

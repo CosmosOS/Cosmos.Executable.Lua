@@ -8,7 +8,7 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>io</c> library of Lua 5.2 on <see cref="System.IO"/>, where UniLua
+/// The <c>io</c> library of Lua 5.3 on <see cref="System.IO"/>, where UniLua
 /// had stubs. Files are userdata with the <c>FILE*</c> metatable; the
 /// standard ones are the host's console, so in a console session they are
 /// the session's terminal. Relative names start from the state's working
@@ -33,6 +33,9 @@ internal static class LuaIOLib
 
     /// <summary>The most numbers <c>read("*n")</c> takes in, as the reference implementation's buffer.</summary>
     private const int MaxNumberLength = 200;
+
+    /// <summary>MAXARGLINE: how many formats lines() takes at most.</summary>
+    private const int MaxLinesFormats = 250;
 
     public static int OpenLib(ILuaState lua)
     {
@@ -134,7 +137,7 @@ internal static class LuaIOLib
         {
             FileNotFoundException or DirectoryNotFoundException => "No such file or directory",
             UnauthorizedAccessException => "Permission denied",
-            _ => error.Message,
+            _ => LuaText.Encode(error.Message),
         };
     }
 
@@ -176,7 +179,7 @@ internal static class LuaIOLib
         {
             FileStream stream = new(LuaHost.Of(lua).ResolvePath(fileName), fileMode, access, FileShare.ReadWrite);
             error = null;
-            return new LuaFileHandle(LuaHost.Of(lua), stream, binary, append);
+            return new LuaFileHandle(LuaHost.Of(lua), stream, append);
         }
         catch (Exception e) when (LuaFile.IsFileError(e))
         {
@@ -355,7 +358,7 @@ internal static class LuaIOLib
     private static int IO_Tmpfile(ILuaState lua)
     {
         // A file that lives in memory, as long as the script holds it
-        PushFile(lua, new LuaFileHandle(LuaHost.Of(lua), new MemoryStream(), binary: true, append: false));
+        PushFile(lua, new LuaFileHandle(LuaHost.Of(lua), new MemoryStream(), append: false));
         return 1;
     }
 
@@ -421,7 +424,7 @@ internal static class LuaIOLib
     {
         LuaFileHandle file = ToFile(lua, 1);
         string whence = lua.L_OptString(2, "cur");
-        double offset = lua.L_Opt(lua.L_CheckNumber, 3, 0.0);
+        long offset = lua.L_OptInteger(3, 0);
         SeekOrigin origin;
         switch (whence)
         {
@@ -440,7 +443,7 @@ internal static class LuaIOLib
 
         try
         {
-            lua.PushNumber(file.Seek(origin, (long)offset));
+            lua.PushInteger(file.Seek(origin, offset));
             return 1;
         }
         catch (Exception e) when (LuaFile.IsFileError(e))
@@ -451,8 +454,34 @@ internal static class LuaIOLib
 
     private static int F_Setvbuf(ILuaState lua)
     {
-        // Buffering is the stream's business: accepted, and ignored
-        ToFile(lua, 1);
+        LuaFileHandle file = ToFile(lua, 1);
+        LuaFileHandle.BufferMode mode;
+        string option = lua.L_CheckString(2);
+        switch (option)
+        {
+            case "no":
+                mode = LuaFileHandle.BufferMode.No;
+                break;
+            case "full":
+                mode = LuaFileHandle.BufferMode.Full;
+                break;
+            case "line":
+                mode = LuaFileHandle.BufferMode.Line;
+                break;
+            default:
+                return lua.L_ArgError(2, "invalid option '" + option + "'");
+        }
+
+        long size = lua.L_OptInteger(3, LuaFileHandle.DefaultBufferSize);
+        try
+        {
+            file.SetBuffering(mode, (int)Math.Clamp(size, 1, int.MaxValue));
+        }
+        catch (Exception e) when (LuaFile.IsFileError(e))
+        {
+            return PushResult(lua, e, null);
+        }
+
         lua.PushBoolean(true);
         return 1;
     }
@@ -484,6 +513,7 @@ internal static class LuaIOLib
     {
         // The formats lines() was given, read again on every call
         int formatCount = Math.Max(0, lua.GetTop() - firstFormat + 1);
+        lua.L_ArgCheck(formatCount <= MaxLinesFormats, MaxLinesFormats + 2, "too many arguments");
         string[] formats = new string[formatCount];
         double[] counts = new double[formatCount];
         for (int i = 0; i < formatCount; i++)
@@ -506,6 +536,7 @@ internal static class LuaIOLib
             }
 
             int top = iterator.GetTop();
+            iterator.L_CheckStack(formatCount, "too many arguments");
             for (int i = 0; i < formatCount; i++)
             {
                 if (formats[i] is null)
@@ -573,12 +604,13 @@ internal static class LuaIOLib
             bool success;
             if (lua.Type(n) == LuaType.LUA_TNUMBER)
             {
-                success = ReadCount(lua, file, (long)lua.ToNumber(n));
+                success = ReadCount(lua, file, lua.L_CheckInteger(n));
             }
             else
             {
                 string format = lua.L_CheckString(n);
-                char kind = format.Length > 1 && format[0] == '*' ? format[1] : format.Length > 0 ? format[0] : '\0';
+                int p = format.Length > 0 && format[0] == '*' ? 1 : 0; // skip optional '*' (for compatibility)
+                char kind = p < format.Length ? format[p] : '\0';
                 switch (kind)
                 {
                     case 'n':
@@ -657,54 +689,110 @@ internal static class LuaIOLib
             return file.PeekByte() != -1;
         }
 
-        int c = 0;
+        int c;
         while (text.Length < count && (c = file.ReadChar()) != -1)
         {
             text.Append((char)c);
-            if (char.IsHighSurrogate((char)c))
-            {
-                // the pair is one character: not split between two reads
-                int low = file.ReadChar();
-                if (low != -1)
-                {
-                    text.Append((char)low);
-                }
-            }
         }
 
         lua.PushString(text.ToString());
         return text.Length > 0;
     }
 
+    /// <summary>
+    /// read_number: reads what follows the lexer's rules for a numeral, at
+    /// most 200 characters, and converts it as tonumber does; a numeral
+    /// that is not valid reads as a failure.
+    /// </summary>
     private static bool ReadNumber(ILuaState lua, LuaFileHandle file)
     {
-        // Like fscanf("%lf"): skip white space, then take what can be part of a number
-        int c;
-        while ((c = file.PeekByte()) != -1 && char.IsWhiteSpace((char)c))
+        NumeralReader rn = new(file);
+        int count = 0;
+        bool hex = false;
+        do
         {
-            file.SkipByte();
+            rn.Current = file.ReadChar();
+        }
+        while (Utl.IsSpace(rn.Current)); // skip spaces
+
+        rn.Test2("-+"); // optional signal
+        if (rn.Test2("00"))
+        {
+            if (rn.Test2("xX"))
+            {
+                hex = true; // numeral is hexadecimal
+            }
+            else
+            {
+                count = 1; // count initial '0' as a valid digit
+            }
         }
 
-        StringBuilder number = new();
-        while (number.Length < MaxNumberLength && (c = file.PeekByte()) != -1 && IsNumberChar((char)c))
+        count += rn.ReadDigits(hex); // integral part
+        if (rn.Test2(".."))
         {
-            number.Append((char)c);
-            file.SkipByte();
+            count += rn.ReadDigits(hex); // fractional part
         }
 
-        if (LuaState.O_Str2Decimal(number.ToString(), out double value))
+        if (count > 0 && rn.Test2(hex ? "pP" : "eE")) // exponent mark?
         {
-            lua.PushNumber(value);
+            rn.Test2("-+"); // exponent signal
+            rn.ReadDigits(false); // exponent digits
+        }
+
+        if (rn.Current != -1)
+        {
+            file.Unread(rn.Current); // unread look-ahead char
+        }
+
+        string numeral = rn.Overflowed ? string.Empty : rn.Buffer.ToString();
+        if (lua.StringToNumber(numeral) != 0)
+        {
+            return true; // ok
+        }
+
+        lua.PushNil(); // "result" to be removed
+        return false; // read fails
+    }
+
+    /// <summary>The state of <see cref="ReadNumber"/>: the characters read, and the one looked at.</summary>
+    private sealed class NumeralReader(LuaFileHandle file)
+    {
+        public StringBuilder Buffer { get; } = new();
+
+        public int Current { get; set; }
+
+        public bool Overflowed { get; private set; }
+
+        /// <summary>nextc: keeps the current character, and reads the next one.</summary>
+        public bool Next()
+        {
+            if (Buffer.Length >= MaxNumberLength) // buffer overflow?
+            {
+                Overflowed = true; // invalidate result
+                return false; // fail
+            }
+
+            Buffer.Append((char)Current); // save current char
+            Current = file.ReadChar(); // read next one
             return true;
         }
 
-        lua.PushNil();
-        return false;
-    }
+        public bool Test2(string set)
+        {
+            return (Current == set[0] || Current == set[1]) && Next();
+        }
 
-    private static bool IsNumberChar(char c)
-    {
-        return char.IsAsciiHexDigit(c) || c is '.' or '+' or '-' or 'x' or 'X' or 'p' or 'P';
+        public int ReadDigits(bool hex)
+        {
+            int count = 0;
+            while ((hex ? Utl.IsXDigit(Current) : Utl.IsDigit(Current)) && Next())
+            {
+                count++;
+            }
+
+            return count;
+        }
     }
 
     private static int Write(ILuaState lua, LuaFileHandle file, int first)
@@ -714,7 +802,17 @@ internal static class LuaIOLib
         {
             for (int i = first; i <= last; i++)
             {
-                file.Write(lua.L_CheckString(i));
+                if (lua.Type(i) == LuaType.LUA_TNUMBER)
+                {
+                    // as fprintf writes them: a float with %.14g, so that 1.0 is 1
+                    file.Write(lua.IsInteger(i)
+                        ? LuaNumber.ToString(lua.ToInteger(i))
+                        : LuaNumber.Format(lua.ToNumber(i), 14, alternate: false));
+                }
+                else
+                {
+                    file.Write(lua.L_CheckString(i));
+                }
             }
         }
         catch (Exception e) when (LuaFile.IsFileError(e))

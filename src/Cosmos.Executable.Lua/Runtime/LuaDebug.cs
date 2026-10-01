@@ -350,6 +350,11 @@ namespace Cosmos.Executable.Lua
 			var pc = ci.CurrentPc; // calling instruction index
 			var ins = proto.Code[pc]; // calling instruction
 
+			if( (ci.CallStatus & CallStatus.CIST_HOOKED) != 0 ) { // was it called inside a hook?
+				name = "?";
+				return "hook";
+			}
+
 			TMS tm;
 			switch( ins.GET_OPCODE() )
 			{
@@ -370,15 +375,16 @@ namespace Cosmos.Executable.Lua
 				case OpCode.OP_SETTABUP:
 				case OpCode.OP_SETTABLE: tm = TMS.TM_NEWINDEX; break;
 
-				case OpCode.OP_EQ: tm = TMS.TM_EQ; break;
-				case OpCode.OP_ADD: tm = TMS.TM_ADD; break;
-				case OpCode.OP_SUB: tm = TMS.TM_SUB; break;
-				case OpCode.OP_MUL: tm = TMS.TM_MUL; break;
-				case OpCode.OP_DIV: tm = TMS.TM_DIV; break;
-				case OpCode.OP_MOD: tm = TMS.TM_MOD; break;
-				case OpCode.OP_POW: tm = TMS.TM_POW; break;
+				case OpCode.OP_ADD: case OpCode.OP_SUB: case OpCode.OP_MUL: case OpCode.OP_MOD:
+				case OpCode.OP_POW: case OpCode.OP_DIV: case OpCode.OP_IDIV: case OpCode.OP_BAND:
+				case OpCode.OP_BOR: case OpCode.OP_BXOR: case OpCode.OP_SHL: case OpCode.OP_SHR:
+					// ORDER OP, ORDER TM
+					tm = (TMS)((int)TMS.TM_ADD + (int)(ins.GET_OPCODE() - OpCode.OP_ADD));
+					break;
 				case OpCode.OP_UNM: tm = TMS.TM_UNM; break;
+				case OpCode.OP_BNOT: tm = TMS.TM_BNOT; break;
 				case OpCode.OP_LEN: tm = TMS.TM_LEN; break;
+				case OpCode.OP_EQ: tm = TMS.TM_EQ; break;
 				case OpCode.OP_LT: tm = TMS.TM_LT; break;
 				case OpCode.OP_LE: tm = TMS.TM_LE; break;
 				case OpCode.OP_CONCAT: tm = TMS.TM_CONCAT; break;
@@ -519,9 +525,16 @@ namespace Cosmos.Executable.Lua
 			name = "?"; // no reasonable name found
 		}
 
+		// filterpc: code inside a jump cannot tell who sets the register
+		private static int FilterPc( int pc, int jmptarget )
+		{
+			return pc < jmptarget ? -1 : pc;
+		}
+
 		private int FindSetReg( LuaProto proto, int lastpc, int reg )
 		{
 			var setreg = -1; // keep last instruction that changed `reg'
+			var jmptarget = 0; // any code before this address is conditional
 			for( int pc=0; pc<lastpc; ++pc ) {
 				var ins = proto.Code[pc];
 				var op  = ins.GET_OPCODE();
@@ -531,45 +544,40 @@ namespace Cosmos.Executable.Lua
 						var b = ins.GETARG_B();
 						// set registers from `a' to `a+b'
 						if( a <= reg && reg <= a + b )
-							setreg = pc;
+							setreg = FilterPc( pc, jmptarget );
 						break;
 					}
 
 					case OpCode.OP_TFORCALL: {
-						// effect all regs above its base
+						// affect all regs above its base
 						if( reg >= a+2 )
-							setreg = pc;
+							setreg = FilterPc( pc, jmptarget );
 						break;
 					}
 
 					case OpCode.OP_CALL:
 					case OpCode.OP_TAILCALL: {
-						// effect all registers above base
+						// affect all registers above base
 						if( reg >= a )
-							setreg = pc;
-						break;
-					}
-					
-					case OpCode.OP_JMP: {
-						var b = ins.GETARG_sBx();
-						var dest = pc + 1 + b;
-						// jump is forward and do not skip `lastpc'
-						if( pc < dest && dest <= lastpc )
-							pc += b; // do the jump
+							setreg = FilterPc( pc, jmptarget );
 						break;
 					}
 
-					case OpCode.OP_TEST: {
-						// jumped code can change `a'
-						if( reg == a )
-							setreg = pc;
+					case OpCode.OP_JMP: {
+						var b = ins.GETARG_sBx();
+						var dest = pc + 1 + b;
+						// jump is forward and do not skip `lastpc'?
+						if( pc < dest && dest <= lastpc ) {
+							if( dest > jmptarget )
+								jmptarget = dest; // update 'jmptarget'
+						}
 						break;
 					}
 
 					default: {
 						// any instruction that set A
 						if( Coder.TestAMode( op ) && reg == a ) {
-							setreg = pc;
+							setreg = FilterPc( pc, jmptarget );
 						}
 						break;
 					}
@@ -655,36 +663,48 @@ namespace Cosmos.Executable.Lua
 			G_RunError( "attempt to {0} a {1} value", op, t );
 		}
 
-		private void G_TypeError( StkId o, string op )
+		// varinfo: " (kind 'name')" for a value with a name in the code
+		private string VarInfo( StkId o )
 		{
 			CallInfo ci = CI;
 			string name = null;
 			string kind = null;
-			string t = ObjTypeName(ref o.V);
 			if( ci.IsLua )
 			{
-				kind = GetUpvalueName( ci, o, out name);
-				if( kind == null && IsInStack( ci, o ) )
+				kind = GetUpvalueName( ci, o, out name); // check whether 'o' is an upvalue
+				if( kind == null && IsInStack( ci, o ) ) // no? try a register
 				{
 					var lcl = Stack[ci.FuncIndex].V.ClLValue();
 					kind = GetObjName( lcl.Proto, ci.CurrentPc,
 						(o.Index - ci.BaseIndex), out name );
 				}
 			}
-			if( kind != null )
-				G_RunError( "attempt to {0} {1} '{2}' (a {3} value)",
-					op, kind, name, t );
-			else
-				G_RunError( "attempt to {0} a {1} value", op, t );
+			return kind != null ? string.Format( " ({0} '{1}')", kind, name ) : "";
 		}
 
-		private void G_ArithError( StkId p1, StkId p2 )
+		private void G_TypeError( StkId o, string op )
 		{
-			var n = new TValue();
-			if( !V_ToNumber( p1, ref n ) )
-				{ p2 = p1; } // first operand is wrong
+			string t = ObjTypeName(ref o.V);
+			G_RunError( "attempt to {0} a {1} value{2}", op, t, VarInfo( o ) );
+		}
 
-			G_TypeError( p2, "perform arithmetic on" );
+		// luaG_opinterror: an operation on a value that is not a number
+		private void G_OpIntError( StkId p1, StkId p2, string msg )
+		{
+			double temp;
+			if( !V_ToNumber( ref p1.V, out temp ) ) // first operand is wrong?
+				{ p2 = p1; } // now second is wrong too
+
+			G_TypeError( p2, msg );
+		}
+
+		// luaG_tointerror: a bitwise operation on a float with no integer value
+		private void G_ToIntError( StkId p1, StkId p2 )
+		{
+			long temp;
+			if( !V_ToInteger( ref p1.V, out temp, 0 ) )
+				{ p2 = p1; }
+			G_RunError( "number{0} has no integer representation", VarInfo( p2 ) );
 		}
 
 		private void G_OrderError( StkId p1, StkId p2 )

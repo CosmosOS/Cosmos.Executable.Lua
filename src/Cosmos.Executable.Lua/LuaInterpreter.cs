@@ -6,7 +6,7 @@ using System.IO;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// A Lua 5.2 interpreter: a state with the standard libraries open, which
+/// A Lua 5.3 interpreter: a state with the standard libraries open, which
 /// runs chunks, files and an interactive prompt, as the reference
 /// <c>lua</c> does.
 /// </summary>
@@ -16,7 +16,9 @@ namespace Cosmos.Executable.Lua;
 /// session of the thread that runs the script. An interpreter is not
 /// thread-safe; interpreters on different threads are independent.</para>
 /// <para><see cref="State"/> is the UniLua API, for what this class does
-/// not wrap, such as registering C# functions for scripts to call.</para>
+/// not wrap, such as registering C# functions for scripts to call. Lua
+/// strings hold bytes there; this class takes and gives text, which
+/// <see cref="LuaText"/> converts to and from UTF-8.</para>
 /// <para>Nothing collects the files a script opened and forgot:
 /// <see cref="Dispose"/> closes them.</para>
 /// </remarks>
@@ -101,8 +103,9 @@ public sealed class LuaInterpreter : IDisposable
     public void DoString(string chunk, string? chunkName = null)
     {
         ArgumentNullException.ThrowIfNull(chunk);
+        string code = LuaText.Encode(chunk);
         int top = State.GetTop();
-        ThrowIfFailed(State.L_LoadBuffer(chunk, chunkName ?? chunk), top);
+        ThrowIfFailed(State.L_LoadBuffer(code, chunkName is null ? code : LuaText.Encode(chunkName)), top);
         Call(top, 0);
     }
 
@@ -118,22 +121,23 @@ public sealed class LuaInterpreter : IDisposable
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(arguments);
 
+        string fileName = LuaText.Encode(path);
         State.CreateTable(arguments.Length, 1);
-        State.PushString(path);
+        State.PushString(fileName);
         State.RawSetI(-2, 0);
         for (int i = 0; i < arguments.Length; i++)
         {
-            State.PushString(arguments[i]);
+            State.PushString(LuaText.Encode(arguments[i]));
             State.RawSetI(-2, i + 1);
         }
 
         State.SetGlobal("arg");
 
         int top = State.GetTop();
-        ThrowIfFailed(State.L_LoadFile(path), top);
+        ThrowIfFailed(State.L_LoadFile(fileName), top);
         foreach (string argument in arguments)
         {
-            State.PushString(argument);
+            State.PushString(LuaText.Encode(argument));
         }
 
         Call(top, arguments.Length);
@@ -152,7 +156,7 @@ public sealed class LuaInterpreter : IDisposable
         while (true)
         {
             _host.Out.Write(Prompt);
-            string? line = _host.In.ReadLine();
+            string? line = ReadPromptLine();
             if (line is null)
             {
                 _host.Out.WriteLine();
@@ -173,7 +177,7 @@ public sealed class LuaInterpreter : IDisposable
                     return 0; // the input ended in the middle of a statement
                 }
 
-                _host.Err.WriteLine(syntaxError);
+                _host.WriteErr(syntaxError + "\n");
                 continue;
             }
 
@@ -239,7 +243,7 @@ public sealed class LuaInterpreter : IDisposable
             }
 
             _host.Out.Write(ContinuationPrompt);
-            string? next = _host.In.ReadLine();
+            string? next = ReadPromptLine();
             if (next is null)
             {
                 return false;
@@ -247,6 +251,13 @@ public sealed class LuaInterpreter : IDisposable
 
             chunk += "\n" + next;
         }
+    }
+
+    /// <summary>A line typed at the prompt, as a Lua string; null at the end of the input.</summary>
+    private string? ReadPromptLine()
+    {
+        string? line = _host.In.ReadLine();
+        return line is null ? null : LuaText.Encode(line);
     }
 
     /// <summary>Prints what a statement at the prompt returned, with print, as the reference lua does.</summary>
@@ -262,7 +273,7 @@ public sealed class LuaInterpreter : IDisposable
         State.Insert(top + 1);
         if (State.PCall(count, 0, 0) != ThreadStatus.LUA_OK)
         {
-            _host.Err.WriteLine("error calling 'print' (" + State.ToString(-1) + ")");
+            _host.WriteErr("error calling 'print' (" + State.ToString(-1) + ")\n");
         }
 
         State.SetTop(top);
@@ -301,10 +312,10 @@ public sealed class LuaInterpreter : IDisposable
             State.SetTop(top);
             if (_errorMessage is null)
             {
-                throw new LuaException(error);
+                throw new LuaException(LuaText.Decode(error));
             }
 
-            throw new LuaException(_errorMessage, error);
+            throw new LuaException(LuaText.Decode(_errorMessage), LuaText.Decode(error));
         }
 
         if (!keepResults)
@@ -346,6 +357,6 @@ public sealed class LuaInterpreter : IDisposable
 
         string message = State.ToString(-1) ?? "(error object is not a string)";
         State.SetTop(top);
-        throw new LuaException(message);
+        throw new LuaException(LuaText.Decode(message));
     }
 }

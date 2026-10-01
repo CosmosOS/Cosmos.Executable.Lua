@@ -18,9 +18,9 @@
     <ProjectReference Include="../../src/Cosmos.Executable.Lua/Cosmos.Executable.Lua.csproj" />
   </ItemGroup>
 
-  <!-- The files of the official Lua 5.2 test suite that LuaTestSuiteTests runs -->
+  <!-- The files of the official Lua 5.3 test suite that LuaTestSuiteTests runs -->
   <ItemGroup>
-    <None Include="lua-5.2-tests/*.lua" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="lua-5.3-tests/*.lua" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

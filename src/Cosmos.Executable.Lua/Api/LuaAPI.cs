@@ -20,7 +20,7 @@ namespace Cosmos.Executable.Lua
 		ILuaState NewThread();
 
 		ThreadStatus Load( ILoadInfo loadinfo, string name, string mode );
-		DumpStatus Dump( LuaWriter writeFunc );
+		DumpStatus Dump( LuaWriter writeFunc, bool strip );
 
 		ThreadStatus GetContext( out int context );
 		void Call( int numArgs, int numResults );
@@ -34,6 +34,7 @@ namespace Cosmos.Executable.Lua
 		int Yield( int numResults );
 		int YieldK( int numResults,
 			int context, CSharpFunctionDelegate continueFunc );
+		bool IsYieldable();
 
 		int  AbsIndex( int index );
 		int  GetTop();
@@ -56,16 +57,21 @@ namespace Cosmos.Executable.Lua
 		void CreateTable( int narray, int nrec );
 		void NewTable();
 		bool Next( int index );
-		void RawGetI( int index, int n );
-		void RawSetI( int index, int n );
-		void RawGet( int index );
+		LuaType RawGetI( int index, long n );
+		void RawSetI( int index, long n );
+		LuaType RawGet( int index );
 		void RawSet( int index );
-		void GetField( int index, string key );
+		LuaType GetField( int index, string key );
 		void SetField( int index, string key );
-		void GetTable( int index );
+		LuaType GetTable( int index );
 		void SetTable( int index );
+		LuaType GetI( int index, long n );
+		void SetI( int index, long n );
 
 		void Concat( int n );
+		void Arith( LuaOp op );
+		void Rotate( int index, int n );
+		int StringToNumber( string s );
 
 		LuaType Type( int index );
 		string TypeName( LuaType t );
@@ -73,6 +79,8 @@ namespace Cosmos.Executable.Lua
 		bool IsNone( int index );
 		bool IsNoneOrNil( int index );
 		bool IsString( int index );
+		bool IsNumber( int index );
+		bool IsInteger( int index );
 		bool IsTable( int index );
 		bool IsFunction( int index );
 
@@ -84,8 +92,7 @@ namespace Cosmos.Executable.Lua
 		void PushNil();
 		void PushBoolean( bool b );
 		void PushNumber( double n );
-		void PushInteger( int n );
-		void PushUnsigned( uint n );
+		void PushInteger( long n );
 		string PushString( string s );
 		void PushCSharpFunction( CSharpFunctionDelegate f );
 		void PushCSharpClosure( CSharpFunctionDelegate f, int n );
@@ -93,7 +100,6 @@ namespace Cosmos.Executable.Lua
 		void PushGlobalTable();
 		void PushLightUserData( object o );
 		void NewUserData( object o );
-		void PushUInt64( UInt64 o );
 		bool PushThread();
 
 		void Pop( int n );
@@ -101,19 +107,15 @@ namespace Cosmos.Executable.Lua
 		bool GetMetaTable( int index );
 		bool SetMetaTable( int index );
 
-		void GetGlobal( string name );
+		LuaType GetGlobal( string name );
 		void SetGlobal( string name );
 
 		string 	ToString( int index );
 		double 	ToNumberX( int index, out bool isnum );
 		double 	ToNumber( int index );
-		int		ToIntegerX( int index, out bool isnum );
-		int		ToInteger( int index );
-		uint	ToUnsignedX( int index, out bool isnum );
-		uint	ToUnsigned( int index );
+		long	ToIntegerX( int index, out bool isnum );
+		long	ToInteger( int index );
 		bool   	ToBoolean( int index );
-		UInt64	ToUInt64( int index );
-		UInt64	ToUInt64X( int index, out bool isnum );
 		object 	ToObject( int index );
 		object  ToUserData( int index );
 		ILuaState	ToThread( int index );
@@ -259,7 +261,7 @@ namespace Cosmos.Executable.Lua
 			return status;
 		}
 
-		DumpStatus ILuaAPI.Dump( LuaWriter writeFunc )
+		DumpStatus ILuaAPI.Dump( LuaWriter writeFunc, bool strip )
 		{
 			Utl.ApiCheckNumElems( this, 1 );
 
@@ -271,7 +273,7 @@ namespace Cosmos.Executable.Lua
 			if(o == null)
 				return DumpStatus.ERROR;
 
-			return DumpState.Dump(o.Proto, writeFunc, false);
+			return DumpState.Dump(o.Proto, writeFunc, strip);
 		}
 
 		ThreadStatus ILuaAPI.GetContext( out int context )
@@ -433,7 +435,7 @@ namespace Cosmos.Executable.Lua
 			int n = ci.ContinueFunc( this ); // call
 			Utl.ApiCheckNumElems( this, n );
 			// finish `D_PreCall'
-			D_PosCall( Top.Index-n );
+			D_PosCall( Top.Index-n, n );
 		}
 
 		private void Unroll()
@@ -461,12 +463,14 @@ namespace Cosmos.Executable.Lua
 		}
 		private static PFuncDelegate<UnrollParam> DG_Unroll = UnrollWrap;
 
-		private void ResumeError( string msg, int firstArg )
+		// an error of 'lua_resume' itself, before the thread runs: the
+		// arguments give way to the message
+		private ThreadStatus ResumeError( string msg, int numArgs )
 		{
-			Top = Stack[firstArg];
+			Top = Stack[Top.Index - numArgs];
 			Top.V.SetSValue(msg);
 			IncrTop();
-			D_Throw( ThreadStatus.LUA_RESUME_ERROR );
+			return ThreadStatus.LUA_ERRRUN;
 		}
 
 		// check whether thread has suspended protected call
@@ -503,25 +507,16 @@ namespace Cosmos.Executable.Lua
 		{
 			int numCSharpCalls = NumCSharpCalls;
 			CallInfo ci = CI;
-			if( numCSharpCalls >= LuaLimits.LUAI_MAXCCALLS )
-				ResumeError( "C stack overflow", firstArg );
-			if( Status == ThreadStatus.LUA_OK ) // may be starting a coroutine
+			if( Status == ThreadStatus.LUA_OK ) // starting a coroutine?
 			{
-				if( ci.Index > 0 ) // not in base level
-				{
-					ResumeError( "cannot resume non-suspended coroutine", firstArg );
-				}
 				if( !D_PreCall( Stack[firstArg-1], LuaDef.LUA_MULTRET ) ) // Lua function?
 				{
 					V_Execute(); // call it
 				}
 			}
-			else if( Status != ThreadStatus.LUA_YIELD )
+			else // resuming from previous yield
 			{
-				ResumeError( "cannot resume dead coroutine", firstArg );
-			}
-			else // resume from previous yield
-			{
+				Utl.Assert( Status == ThreadStatus.LUA_YIELD );
 				Status = ThreadStatus.LUA_OK;
 				ci.FuncIndex = ci.ExtraIndex;
 				if( ci.IsLua ) // yielded inside a hook?
@@ -538,7 +533,7 @@ namespace Cosmos.Executable.Lua
 						Utl.ApiCheckNumElems( this, n );
 						firstArg = Top.Index - n; // yield results come from continuation
 					}
-					D_PosCall(firstArg);
+					D_PosCall(firstArg, Top.Index - firstArg);
 				}
 				Unroll();
 			}
@@ -558,9 +553,17 @@ namespace Cosmos.Executable.Lua
 		ThreadStatus ILuaAPI.Resume( ILuaState from, int numArgs )
 		{
 			LuaState fromState = from as LuaState;
-			// restored after: resuming the running thread, an error, leaves it as it was
-			int oldNumNonYieldable = NumNonYieldable;
+			int oldNumNonYieldable = NumNonYieldable; // save "number of non-yieldable" calls
+			if( Status == ThreadStatus.LUA_OK ) // may be starting a coroutine
+			{
+				if( CI.Index > 0 ) // not in base level?
+					return ResumeError( "cannot resume non-suspended coroutine", numArgs );
+			}
+			else if( Status != ThreadStatus.LUA_YIELD )
+				return ResumeError( "cannot resume dead coroutine", numArgs );
 			NumCSharpCalls = (fromState != null) ? fromState.NumCSharpCalls + 1 : 1;
+			if( NumCSharpCalls >= LuaLimits.LUAI_MAXCCALLS )
+				return ResumeError( "C stack overflow", numArgs );
 			NumNonYieldable = 0; // allow yields
 
 			Utl.ApiCheckNumElems( this, (Status == ThreadStatus.LUA_OK) ? numArgs + 1 : numArgs );
@@ -569,36 +572,35 @@ namespace Cosmos.Executable.Lua
 			resumeParam.L = this;
 			resumeParam.firstArg = Top.Index-numArgs;
 			ThreadStatus status = D_RawRunProtected( DG_Resume, ref resumeParam );
-			if( status == ThreadStatus.LUA_RESUME_ERROR ) // error calling `lua_resume'?
+			// continue running after recoverable errors
+			while( status != ThreadStatus.LUA_OK && status != ThreadStatus.LUA_YIELD ) // error?
 			{
-				status = ThreadStatus.LUA_ERRRUN;
-			}
-			else // yield or regular error
-			{
-				while( status != ThreadStatus.LUA_OK && status != ThreadStatus.LUA_YIELD ) // error?
+				// recover point? (none for os.exit, which ends the script)
+				if( !G.Host.ExitCode.HasValue && Recover( status ) )
 				{
-					// recover point? (none for os.exit, which ends the script)
-					if( !G.Host.ExitCode.HasValue && Recover( status ) )
-					{
-						var unrollParam = new UnrollParam();
-						unrollParam.L = this;
-						status = D_RawRunProtected( DG_Unroll, ref unrollParam );
-					}
-					else // unrecoverable error
-					{
-						Status = status; // mark thread as `dead'
-						SetErrorObj( status, Top );
-						CI.TopIndex = Top.Index;
-						break;
-					}
+					var unrollParam = new UnrollParam();
+					unrollParam.L = this;
+					status = D_RawRunProtected( DG_Unroll, ref unrollParam );
 				}
-				Utl.Assert( status == Status );
+				else // unrecoverable error
+				{
+					Status = status; // mark thread as `dead'
+					SetErrorObj( status, Top );
+					CI.TopIndex = Top.Index;
+					break;
+				}
 			}
+			Utl.Assert( status == Status );
 
 			NumNonYieldable = oldNumNonYieldable;
 			NumCSharpCalls--;
 			Utl.Assert( NumCSharpCalls == ((fromState != null) ? fromState.NumCSharpCalls : 0) );
 			return status;
+		}
+
+		bool ILuaAPI.IsYieldable()
+		{
+			return NumNonYieldable == 0;
 		}
 
 		int ILuaAPI.Yield( int numResults )
@@ -801,7 +803,7 @@ namespace Cosmos.Executable.Lua
 					return null;
 				val = f.Upvals[n-1].V;
 				var name = p.Upvalues[n-1].Name;
-				return (name == null) ? "" : name;
+				return (name == null) ? "(*no name)" : name;
 			}
 			else if(addr.V.ClIsCsClosure()) {
 				var f = addr.V.ClCsValue();
@@ -884,7 +886,7 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		void ILuaAPI.RawGetI( int index, int n )
+		LuaType ILuaAPI.RawGetI( int index, long n )
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
@@ -895,6 +897,7 @@ namespace Cosmos.Executable.Lua
 
 			Top.V.SetObj(ref tbl.GetInt(n).V);
 			ApiIncrTop();
+			return (LuaType)Stack[Top.Index-1].V.BaseTt();
 		}
 
 		// void ILuaAPI.DebugRawGetI( int index, int n )
@@ -928,7 +931,7 @@ namespace Cosmos.Executable.Lua
 #endif
 		}
 
-		void ILuaAPI.RawGet( int index )
+		LuaType ILuaAPI.RawGet( int index )
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
@@ -940,9 +943,10 @@ namespace Cosmos.Executable.Lua
 			var tbl = addr.V.HValue();
 			var below = Stack[Top.Index-1];
 			below.V.SetObj( ref tbl.Get( ref below.V ).V );
+			return (LuaType)below.V.BaseTt();
 		}
 
-		void ILuaAPI.RawSetI( int index, int n )
+		void ILuaAPI.RawSetI( int index, long n )
 		{
 			Utl.ApiCheckNumElems( this, 1 );
 			StkId addr;
@@ -966,7 +970,7 @@ namespace Cosmos.Executable.Lua
 			Top = Stack[Top.Index-2];
 		}
 
-		void ILuaAPI.GetField( int index, string key )
+		LuaType ILuaAPI.GetField( int index, string key )
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
@@ -976,6 +980,7 @@ namespace Cosmos.Executable.Lua
 			var below = Top;
 			ApiIncrTop();
 			V_GetTable( addr, below, below );
+			return (LuaType)Stack[Top.Index-1].V.BaseTt();
 		}
 
 		void ILuaAPI.SetField( int index, string key )
@@ -989,7 +994,7 @@ namespace Cosmos.Executable.Lua
 			Top = Stack[Top.Index-2];
 		}
 
-		void ILuaAPI.GetTable( int index )
+		LuaType ILuaAPI.GetTable( int index )
 		{
 			StkId addr;
 			if(! Index2Addr( index, out addr ) )
@@ -997,6 +1002,32 @@ namespace Cosmos.Executable.Lua
 
 			var below = Stack[Top.Index - 1];
 			V_GetTable( addr, below, below );
+			return (LuaType)below.V.BaseTt();
+		}
+
+		LuaType ILuaAPI.GetI( int index, long n )
+		{
+			StkId addr;
+			if(! Index2Addr( index, out addr ) )
+				Utl.InvalidIndex();
+
+			Top.V.SetIValue(n);
+			var below = Top;
+			ApiIncrTop();
+			V_GetTable( addr, below, below );
+			return (LuaType)below.V.BaseTt();
+		}
+
+		void ILuaAPI.SetI( int index, long n )
+		{
+			StkId addr;
+			Utl.ApiCheckNumElems( this, 1 );
+			if(! Index2Addr( index, out addr ) )
+				Utl.InvalidIndex();
+
+			StkId.inc(ref Top).V.SetIValue( n );
+			V_SetTable( addr, Stack[Top.Index-1], Stack[Top.Index-2] );
+			Top = Stack[Top.Index-2];
 		}
 
 		void ILuaAPI.SetTable( int index )
@@ -1026,13 +1057,67 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		void ILuaAPI.Arith( LuaOp op )
+		{
+			if( op != LuaOp.LUA_OPUNM && op != LuaOp.LUA_OPBNOT )
+				Utl.ApiCheckNumElems( this, 2 ); // all other operations expect two operands
+			else
+			{ // for unary operations, add fake 2nd operand
+				Utl.ApiCheckNumElems( this, 1 );
+				Top.V.SetObj( ref Stack[Top.Index-1].V );
+				ApiIncrTop();
+			}
+			// first operand at top - 2, second at top - 1; result go to top - 2
+			var p1 = Stack[Top.Index-2];
+			var p2 = Stack[Top.Index-1];
+			V_Arith( p1, p1, p2, (TMS)((int)TMS.TM_ADD + (int)op) );
+			Top = Stack[Top.Index-1]; // remove second operand
+		}
+
+		// lua_rotate: rotates the 'n' elements from 'index' to the top
+		void ILuaAPI.Rotate( int index, int n )
+		{
+			StkId addr;
+			if( !Index2Addr( index, out addr ) )
+				Utl.InvalidIndex();
+			int t = Top.Index - 1; // end of stack segment being rotated
+			int p = addr.Index; // start of segment
+			int m = n >= 0 ? t - n : p - n - 1; // end of prefix
+			Reverse( p, m ); // reverse the prefix with length 'n'
+			Reverse( m + 1, t ); // reverse the suffix
+			Reverse( p, t ); // reverse the entire segment
+		}
+
+		private void Reverse( int from, int to )
+		{
+			for( ; from < to; from++, to-- )
+			{
+				var temp = new TValue();
+				temp.SetObj( ref Stack[from].V );
+				Stack[from].V.SetObj( ref Stack[to].V );
+				Stack[to].V.SetObj( ref temp );
+			}
+		}
+
+		// lua_stringtonumber: pushes the number 's' is the numeral of, and
+		// returns the length of 's' plus one, or 0 if it is no numeral
+		int ILuaAPI.StringToNumber( string s )
+		{
+			TValue o;
+			if( !O_Str2Num( s, out o ) )
+				return 0;
+			Top.V.SetObj( ref o );
+			ApiIncrTop();
+			return s.Length + 1;
+		}
+
 		LuaType ILuaAPI.Type( int index )
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
 				return LuaType.LUA_TNONE;
 
-			return (LuaType)addr.V.Tt;
+			return (LuaType)addr.V.BaseTt();
 		}
 
 		internal static string TypeName( LuaType t )
@@ -1047,9 +1132,6 @@ namespace Cosmos.Executable.Lua
 
 				case LuaType.LUA_TLIGHTUSERDATA:
 					return "userdata";
-
-				case LuaType.LUA_TUINT64:
-					return "UInt64";
 
 				case LuaType.LUA_TNUMBER:
 					return "number";
@@ -1085,11 +1167,6 @@ namespace Cosmos.Executable.Lua
 			return TypeName(t);
 		}
 
-		internal string ObjTypeName( ref TValue v )
-		{
-			return TypeName((LuaType)v.Tt);
-		}
-
 		// 用于内部使用 不会因为 ApiIncrTop() 检查 Top 超过 CI.Top 报错
 		internal void O_PushString( string s )
 		{
@@ -1118,6 +1195,23 @@ namespace Cosmos.Executable.Lua
 		{
 			LuaType t = API.Type( index );
 			return( t == LuaType.LUA_TSTRING || t == LuaType.LUA_TNUMBER );
+		}
+
+		bool ILuaAPI.IsNumber( int index )
+		{
+			StkId addr;
+			if( !Index2Addr( index, out addr ) )
+				return false;
+			double n;
+			return V_ToNumber( ref addr.V, out n );
+		}
+
+		bool ILuaAPI.IsInteger( int index )
+		{
+			StkId addr;
+			if( !Index2Addr( index, out addr ) )
+				return false;
+			return addr.V.TtIsInteger();
 		}
 
 		bool ILuaAPI.IsTable( int index )
@@ -1213,19 +1307,13 @@ namespace Cosmos.Executable.Lua
 
 		void ILuaAPI.PushNumber( double n )
 		{
-			Top.V.SetNValue( n );
+			Top.V.SetFltValue( n );
 			ApiIncrTop();
 		}
 
-		void ILuaAPI.PushInteger( int n )
+		void ILuaAPI.PushInteger( long n )
 		{
-			Top.V.SetNValue( (double)n );
-			ApiIncrTop();
-		}
-
-		void ILuaAPI.PushUnsigned( uint n )
-		{
-			Top.V.SetNValue( (double)n );
+			Top.V.SetIValue( n );
 			ApiIncrTop();
 		}
 
@@ -1299,12 +1387,6 @@ namespace Cosmos.Executable.Lua
 			ApiIncrTop();
 		}
 
-		void ILuaAPI.PushUInt64( UInt64 o )
-		{
-			Top.V.SetUInt64Value( o );
-			ApiIncrTop();
-		}
-
 		bool ILuaAPI.PushThread()
 		{
 			Top.V.SetThValue(this);
@@ -1340,7 +1422,7 @@ namespace Cosmos.Executable.Lua
 				}
 				default:
 				{
-					mt = G.MetaTables[addr.V.Tt];
+					mt = G.MetaTables[addr.V.BaseTt()];
 					break;
 				}
 			}
@@ -1388,7 +1470,7 @@ namespace Cosmos.Executable.Lua
 				}
 				default:
 				{
-					G.MetaTables[addr.V.Tt] = mt;
+					G.MetaTables[addr.V.BaseTt()] = mt;
 					break;
 				}
 			}
@@ -1396,11 +1478,12 @@ namespace Cosmos.Executable.Lua
 			return true;
 		}
 
-		void ILuaAPI.GetGlobal( string name )
+		LuaType ILuaAPI.GetGlobal( string name )
 		{
 			var gt = G.Registry.V.HValue().GetInt( LuaDef.LUA_RIDX_GLOBALS );
 			StkId.inc(ref Top).V.SetSValue(name);
 			V_GetTable(gt, Stack[Top.Index-1], Stack[Top.Index-1]);
+			return (LuaType)Stack[Top.Index-1].V.BaseTt();
 		}
 
 		void ILuaAPI.SetGlobal( string name )
@@ -1435,27 +1518,9 @@ namespace Cosmos.Executable.Lua
 		double ILuaAPI.ToNumberX( int index, out bool isnum )
 		{
 			StkId addr;
-			if( !Index2Addr( index, out addr ) )
-			{
-				isnum = false;
-				return 0.0;
-			}
-
-			if(addr.V.TtIsNumber()) {
-				isnum = true;
-				return addr.V.NValue;
-			}
-
-			if(addr.V.TtIsString()) {
-				var n = new TValue();
-				if(V_ToNumber(addr, ref n)) {
-					isnum = true;
-					return n.NValue;
-				}
-			}
-
-			isnum = false;
-			return 0;
+			double n = 0.0;
+			isnum = Index2Addr( index, out addr ) && V_ToNumber( ref addr.V, out n );
+			return isnum ? n : 0.0;
 		}
 
 		double ILuaAPI.ToNumber( int index )
@@ -1464,78 +1529,18 @@ namespace Cosmos.Executable.Lua
 			return API.ToNumberX( index, out isnum );
 		}
 
-		int ILuaAPI.ToIntegerX( int index, out bool isnum )
+		long ILuaAPI.ToIntegerX( int index, out bool isnum )
 		{
 			StkId addr;
-			if( !Index2Addr( index, out addr ) )
-			{
-				isnum = false;
-				return 0;
-			}
-
-			if(addr.V.TtIsNumber()) {
-				isnum = true;
-				return (int)addr.V.NValue;
-			}
-
-			if(addr.V.TtIsString()) {
-				var n = new TValue();
-				if(V_ToNumber(addr, ref n)) {
-					isnum = true;
-					return (int)n.NValue;
-				}
-			}
-
-			isnum = false;
-			return 0;
+			long n = 0;
+			isnum = Index2Addr( index, out addr ) && V_ToInteger( ref addr.V, out n, 0 );
+			return isnum ? n : 0;
 		}
 
-		int ILuaAPI.ToInteger( int index )
+		long ILuaAPI.ToInteger( int index )
 		{
 			bool isnum;
 			return API.ToIntegerX( index, out isnum );
-		}
-
-		uint ILuaAPI.ToUnsignedX( int index, out bool isnum )
-		{
-			StkId addr;
-			if( !Index2Addr( index, out addr ) ) {
-				isnum = false;
-				return 0;
-			}
-
-			if( addr.V.TtIsNumber() ) {
-				isnum = true;
-				return Number2Unsigned( addr.V.NValue );
-			}
-
-			if( addr.V.TtIsString() ) {
-				var n = new TValue();
-				if(V_ToNumber(addr, ref n)) {
-					isnum = true;
-					return Number2Unsigned( n.NValue );
-				}
-			}
-
-			isnum = false;
-			return 0;
-		}
-
-		// lua_number2unsigned: modulo 2^32 and rounded to even, so that
-		// bit32.band(2^33-1) and bit32.band(-1) are 0xffffffff (a cast saturates)
-		private static uint Number2Unsigned( double n )
-		{
-			const double SUPUNSIGNED = 4294967296.0;
-			double m = n % SUPUNSIGNED;
-			if( m < 0 ) m += SUPUNSIGNED;
-			m = System.Math.Round( m, System.MidpointRounding.ToEven );
-			return unchecked( (uint)(ulong)m );
-		}
-
-		uint ILuaAPI.ToUnsigned( int index )
-		{
-			bool isnum;
-			return API.ToUnsignedX( index, out isnum );
 		}
 
 		bool ILuaAPI.ToBoolean( int index )
@@ -1545,29 +1550,6 @@ namespace Cosmos.Executable.Lua
 				return false;
 
 			return !IsFalse(ref addr.V);
-		}
-
-		UInt64 ILuaAPI.ToUInt64X( int index, out bool isnum )
-		{
-			StkId addr;
-			if( !Index2Addr( index, out addr ) ) {
-				isnum = false;
-				return 0;
-			}
-
-			if( !addr.V.TtIsUInt64() ) {
-				isnum = false;
-				return 0;
-			}
-
-			isnum = true;
-			return addr.V.UInt64Value;
-		}
-
-		UInt64 ILuaAPI.ToUInt64( int index )
-		{
-			bool isnum;
-			return API.ToUInt64X( index, out isnum );
 		}
 
 		object ILuaAPI.ToObject( int index )
@@ -1588,7 +1570,6 @@ namespace Cosmos.Executable.Lua
 			switch(addr.V.Tt) {
 				case (int)LuaType.LUA_TUSERDATA: { return addr.V.RawUValue().Value; }
 				case (int)LuaType.LUA_TLIGHTUSERDATA: { return addr.V.OValue; }
-				case (int)LuaType.LUA_TUINT64: { return addr.V.UInt64Value; }
 				default: return null;
 			}
 		}

@@ -21,13 +21,17 @@ namespace Cosmos.Executable.Lua
 
 		public StkId Get(ref TValue key)
 		{
-			if(key.Tt == (int)LuaType.LUA_TNIL) { return TheNilValue; }
-
-			if(IsPositiveInteger(ref key))
-				{ return GetInt((int)key.NValue); }
-
-			if(key.Tt == (int)LuaType.LUA_TSTRING)
-				{ return GetStr(key.SValue()); }
+			switch(key.Tt) {
+				case (int)LuaType.LUA_TNIL: return TheNilValue;
+				case (int)LuaType.LUA_TSTRING: return GetStr(key.SValue());
+				case TValue.LUA_TNUMINT: return GetInt(key.IValue());
+				case TValue.LUA_TNUMFLT: {
+					long k;
+					if(LuaState.FloatToInteger(key.FltValue, out k, 0)) // index is an integral float?
+						{ return GetInt(k); } // use specialized version
+					break;
+				}
+			}
 
 			var h = key.GetHashCode();
 			for(var node = GetHashNode(h); node != null; node = node.Next) {
@@ -39,15 +43,14 @@ namespace Cosmos.Executable.Lua
 			return TheNilValue;
 		}
 
-		public StkId GetInt(int key)
+		public StkId GetInt(long key)
 		{
-			if(0 < key && key-1 < ArrayPart.Length)
+			// (1 <= key && key <= ArrayPart.Length)
+			if(unchecked((ulong)key - 1UL) < (ulong)ArrayPart.Length)
 				{ return ArrayPart[key-1]; }
 
-			var k = new TValue();
-			k.SetNValue(key);
-			for(var node = GetHashNode(ref k); node != null; node = node.Next) {
-				if(node.Key.V.TtIsNumber() && node.Key.V.NValue == (double)key) {
+			for(var node = GetHashNode(IntHash(key)); node != null; node = node.Next) {
+				if(node.Key.V.TtIsInteger() && node.Key.V.IValue() == key) {
 					return node.Val;
 				}
 			}
@@ -77,17 +80,15 @@ namespace Cosmos.Executable.Lua
 			cell.V.SetObj(ref val);
 		}
 
-		public void SetInt(int key, ref TValue val)
+		public void SetInt(long key, ref TValue val)
 		{
 			var cell = GetInt(key);
 			if(cell == TheNilValue) {
 				var k = new TValue();
-				k.SetNValue(key);
+				k.SetIValue(key);
 				cell = NewTableKey(ref k);
 			}
 			cell.V.SetObj(ref val);
-			// ULDebug.Log(string.Format("---------------- SetInt {0} -> {1}", key, val));
-			// DumpParts();
 		}
 
 		/*
@@ -125,7 +126,7 @@ namespace Cosmos.Executable.Lua
 			// try first array part
 			for(i++; i<ArrayPart.Length; ++i) {
 				if(!ArrayPart[i].V.TtIsNil()) {
-					key.V.SetNValue(i+1);
+					key.V.SetIValue(i+1);
 					val.V.SetObj(ref ArrayPart[i].V);
 					return true;
 				}
@@ -270,9 +271,9 @@ namespace Cosmos.Executable.Lua
 			SetNodeVector(0);
 		}
 
-		private bool IsPositiveInteger(ref TValue v)
+		private static int IntHash(long key)
 		{
-			return (v.TtIsNumber() && v.NValue > 0 && (v.NValue % 1) == 0 && v.NValue <= int.MaxValue); //fix large number key bug
+			return unchecked((int)(key ^ (key >> 32)));
 		}
 
 		private HNode GetHashNode(int hashcode)
@@ -281,9 +282,11 @@ namespace Cosmos.Executable.Lua
 			return HashPart[n % HashPart.Length];
 		}
 
+		// mainposition: the node a key hashes to, an integral float key
+		// having been made an integer
 		private HNode GetHashNode(ref TValue v)
 		{
-			if(IsPositiveInteger(ref v)) { return GetHashNode((int)v.NValue); }
+			if(v.TtIsInteger()) { return GetHashNode(IntHash(v.IValue())); }
 
 			if(v.TtIsString()) { return GetHashNode(v.SValue().GetHashCode()); }
 
@@ -341,10 +344,12 @@ namespace Cosmos.Executable.Lua
 		*/
 		private int ArrayIndex(ref TValue k)
 		{
-			if(IsPositiveInteger(ref k))
-				return (int)k.NValue;
-			else
-				return -1;
+			if(k.TtIsInteger()) {
+				long i = k.IValue();
+				if(0 < i && i <= MAXASIZE)
+					return (int)i; // 'key' is an appropriate array index
+			}
+			return -1;
 		}
 
 		private static readonly byte[] Log2_ = new byte[] {
@@ -465,12 +470,19 @@ namespace Cosmos.Executable.Lua
 			System.Diagnostics.Debug.WriteLine("++++++++++++++++++ [DumpParts] leave +++++++++++++++++++++++");
 		}
 
-		private StkId NewTableKey(ref TValue k)
+		private StkId NewTableKey(ref TValue key)
 		{
-			if(k.TtIsNil()) { L.G_RunError("table index is nil"); }
+			if(key.TtIsNil()) { L.G_RunError("table index is nil"); }
 
-			if(k.TtIsNumber() && System.Double.IsNaN(k.NValue))
-				{ L.G_RunError("table index is NaN"); }
+			// an integral float key is the integer it equals
+			var k = key;
+			if(k.TtIsFloat()) {
+				long i;
+				if(LuaState.FloatToInteger(k.FltValue, out i, 0))
+					{ k.SetIValue(i); }
+				else if(System.Double.IsNaN(k.FltValue))
+					{ L.G_RunError("table index is NaN"); }
+			}
 
 			var mp = GetHashNode(ref k);
 
@@ -509,24 +521,24 @@ namespace Cosmos.Executable.Lua
 
 		private int UnboundSearch(uint j)
 		{
-			uint i = j;
-			j++;
-			while(!GetInt((int)j).V.TtIsNil()) {
-				i = j;
-				j *= 2;
+			long i = j;
+			long jj = (long)j + 1;
+			while(!GetInt(jj).V.TtIsNil()) {
+				i = jj;
+				jj *= 2;
 
 				// overflow?
-				if(j > LuaLimits.MAX_INT) {
+				if(jj > LuaLimits.MAX_INT) {
 					/* table was built with bad purposes: resort to linear search */
 					i = 1;
-					while(!GetInt((int)i).V.TtIsNil()) { i++; }
+					while(!GetInt(i).V.TtIsNil()) { i++; }
 					return (int)(i-1);
 				}
 			}
 			/* now do a binary search between them */
-			while(j - i > 1) {
-				uint m = (i + j) / 2;
-				if(GetInt((int)m).V.TtIsNil()) { j = m; }
+			while(jj - i > 1) {
+				long m = (i + jj) / 2;
+				if(GetInt(m).V.TtIsNil()) { jj = m; }
 				else { i = m; }
 			}
 			return (int)i;

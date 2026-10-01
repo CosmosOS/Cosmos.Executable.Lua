@@ -43,17 +43,21 @@ namespace Cosmos.Executable.Lua
 		UNTIL,
 		WHILE,
 		// other terminal symbols
+        IDIV,
         CONCAT,
         DOTS,
         EQ,
         GE,
         LE,
         NE,
+        SHL,
+        SHR,
 		DBCOLON,
-        NUMBER,
-        STRING,
-        NAME,
         EOS,
+        FLT,
+        INT,
+        NAME,
+        STRING,
     }
 
     internal abstract class Token
@@ -147,7 +151,7 @@ namespace Cosmos.Executable.Lua
     {
         public double SemInfo;
 
-        public NumberToken( double seminfo ) : base( TK.NUMBER )
+        public NumberToken( double seminfo ) : base( TK.FLT )
         {
             SemInfo = seminfo;
         }
@@ -155,6 +159,21 @@ namespace Cosmos.Executable.Lua
         public override string ToString()
         {
             return string.Format( "NumberToken: {0}", SemInfo );
+        }
+    }
+
+    internal class IntegerToken : TypedToken
+    {
+        public long SemInfo;
+
+        public IntegerToken( long seminfo ) : base( TK.INT )
+        {
+            SemInfo = seminfo;
+        }
+
+        public override string ToString()
+        {
+            return string.Format( "IntegerToken: {0}", SemInfo );
         }
     }
 
@@ -367,46 +386,94 @@ namespace Cosmos.Executable.Lua
             return r.Substring( 2+sep, r.Length - 2*(2+sep) );
         }
 
-		// the error shows the escape sequence read so far, as `near '\x4''
-		private void _EscapeError( int[] c, int n, string msg )
+		// luaZ_buffremove: drops the last 'n' saved characters
+		private void _RemoveSaved( int n )
 		{
-			_ClearSaved();
-			_Save( '\\' );
-			for( int i=0; i<n && c[i] != EOZ; ++i )
-				_Save( (char)c[i] );
-			_LexError( msg, (int)TK.STRING );
+			Saved.Length -= n;
 		}
 
-		private int _ReadHexEscape()
+		// esccheck: an error in an escape sequence, which shows the string
+		// read so far, with the current character
+		private void _EscCheck( bool c, string msg )
 		{
-			int r = 0;
-			var c = new int[3] { 'x', 0, 0 };
-			// read two hex digits
-			for( int i=1; i<3; ++i )
+			if( !c )
 			{
-				_Next();
-				c[i] = Current;
-				if( !_CurrentIsXDigit() )
-					_EscapeError( c, i+1, "hexadecimal digit expected" );
-				r = (r << 4) + Utl.HexaValue( Current );
+				if( Current != EOZ )
+					_SaveAndNext(); // add current to buffer for error message
+				_LexError( msg, (int)TK.STRING );
 			}
+		}
+
+		private int _GetHexa()
+		{
+			_SaveAndNext();
+			_EscCheck( _CurrentIsXDigit(), "hexadecimal digit expected" );
+			return Utl.HexaValue( Current );
+		}
+
+		private int _ReadHexaEsc()
+		{
+			int r = _GetHexa();
+			r = (r << 4) + _GetHexa();
+			_RemoveSaved( 2 ); // remove saved chars from buffer
 			return r;
 		}
 
-		private int _ReadDecEscape()
+		private long _ReadUtf8Esc()
 		{
-			int r = 0;
-			var c = new int[3];
-			// read up to 3 digits
-			int i = 0;
-			for( i=0; i<3 && _CurrentIsDigit(); ++i )
+			long r;
+			int i = 4; // chars to be removed: '\', 'u', '{', and first digit
+			_SaveAndNext(); // skip 'u'
+			_EscCheck( Current == '{', "missing '{'" );
+			r = _GetHexa(); // must have at least one digit
+			while( true )
 			{
-				c[i] = Current;
-				r = r*10 + Current - '0';
-				_Next();
+				_SaveAndNext();
+				if( !_CurrentIsXDigit() )
+					break;
+				i++;
+				r = (r << 4) + Utl.HexaValue( Current );
+				_EscCheck( r <= 0x10FFFF, "UTF-8 value too large" );
 			}
-			if( r > Byte.MaxValue )
-				_EscapeError( c, i, "decimal escape too large" );
+			_EscCheck( Current == '}', "missing '}'" );
+			_Next(); // skip '}'
+			_RemoveSaved( i ); // remove saved chars from buffer
+			return r;
+		}
+
+		// utf8esc: a code point as its UTF-8 bytes, one per character
+		private void _Utf8Esc()
+		{
+			long x = _ReadUtf8Esc();
+			if( x < 0x80 ) // ascii?
+			{
+				_Save( (char)x );
+				return;
+			}
+			var buff = new char[8];
+			int n = 1; // number of bytes put in buffer (backwards)
+			long mfb = 0x3f; // maximum that fits in first byte
+			do { // add continuation bytes
+				buff[8 - (n++)] = (char)(0x80 | (x & 0x3f));
+				x >>= 6; // remove added bits
+				mfb >>= 1; // now there is one less bit available in first byte
+			} while( x > mfb ); // still needs continuation byte?
+			buff[8 - n] = (char)(((~mfb << 1) | x) & 0xFF); // add first byte
+			for( ; n > 0; n-- )
+				_Save( buff[8 - n] );
+		}
+
+		private int _ReadDecEsc()
+		{
+			int i;
+			int r = 0; // result accumulator
+			for( i=0; i<3 && _CurrentIsDigit(); ++i ) // read up to 3 digits
+			{
+				r = 10*r + Current - '0';
+				_SaveAndNext();
+			}
+			_EscCheck( r <= Byte.MaxValue, "decimal escape too large" );
+			_RemoveSaved( i ); // remove read digits from buffer
 			return r;
 		}
 
@@ -414,7 +481,7 @@ namespace Cosmos.Executable.Lua
         private string _ReadString()
         {
             var del = Current;
-            _SaveAndNext();
+            _SaveAndNext(); // keep delimiter (for error messages)
             while( Current != del )
             {
                 switch( Current )
@@ -428,67 +495,59 @@ namespace Cosmos.Executable.Lua
                         _LexError( "unfinished string", (int)TK.STRING );
                         continue;
 
-                    case '\\':
+                    case '\\': // escape sequences
                     {
-                        int c;
-                        _Next(); // do not save the `\'
+                        int c; // final character to be saved
+                        _SaveAndNext(); // keep '\\' for error messages
                         switch( Current )
                         {
-                            case 'a': c='\a'; break;
-                            case 'b': c='\b'; break;
-                            case 'f': c='\f'; break;
-                            case 'n': c='\n'; break;
-                            case 'r': c='\r'; break;
-                            case 't': c='\t'; break;
-                            case 'v': c='\v'; break;
-							case 'x': c=_ReadHexEscape(); break;
+                            case 'a': c='\a'; goto read_save;
+                            case 'b': c='\b'; goto read_save;
+                            case 'f': c='\f'; goto read_save;
+                            case 'n': c='\n'; goto read_save;
+                            case 'r': c='\r'; goto read_save;
+                            case 't': c='\t'; goto read_save;
+                            case 'v': c='\v'; goto read_save;
+                            case 'x': c=_ReadHexaEsc(); goto read_save;
+                            case 'u': _Utf8Esc(); goto no_save;
 
                             case '\n':
-                            case '\r': _IncLineNumber(); _Save('\n'); continue;
+                            case '\r':
+                                _IncLineNumber(); c='\n'; goto only_save;
 
-							case '\\':
-							case '\"':
-							case '\'': c=Current; break;
+                            case '\\':
+                            case '\"':
+                            case '\'': c=Current; goto read_save;
 
-                            case EOZ: continue; // will raise an error next loop
+                            case EOZ: goto no_save; // will raise an error next loop
 
-							// zap following span of spaces
-							case 'z': {
-								_Next(); // skip `z'
-								while( _CurrentIsSpace() )
-								{
-									if( _CurrentIsNewLine() )
-										_IncLineNumber();
-									else
-										_Next();
-								}
-								continue;
-							}
+                            // zap following span of spaces
+                            case 'z': {
+                                _RemoveSaved( 1 ); // remove '\\'
+                                _Next(); // skip the 'z'
+                                while( _CurrentIsSpace() )
+                                {
+                                    if( _CurrentIsNewLine() )
+                                        _IncLineNumber();
+                                    else
+                                        _Next();
+                                }
+                                goto no_save;
+                            }
 
                             default:
                             {
-                                if( !_CurrentIsDigit() )
-									_EscapeError( new int[] { Current }, 1,
-										"invalid escape sequence" );
-
-								// digital escape \ddd
-								c = _ReadDecEscape();
-								_Save( (char)c );
-								continue;
-                                // {
-                                //     c = (char)0;
-                                //     for(int i=0; i<3 && _CurrentIsDigit(); ++i)
-                                //     {
-                                //         c = (char)(c*10 + Current - '0');
-                                //         _Next();
-                                //     }
-                                //     _Save( c );
-                                // }
-                                // continue;
+                                _EscCheck( _CurrentIsDigit(), "invalid escape sequence" );
+                                c = _ReadDecEsc(); // digital escape \ddd
+                                goto only_save;
                             }
                         }
-                        _Save( (char)c );
+                    read_save:
                         _Next();
+                    only_save:
+                        _RemoveSaved( 1 ); // remove '\\'
+                        _Save( (char)c );
+                    no_save:
                         continue;
                     }
 
@@ -502,7 +561,9 @@ namespace Cosmos.Executable.Lua
             return r.Substring( 1, r.Length - 2 );
         }
 
-        private double _ReadNumber()
+        // read_numeral: quite liberal in what it accepts, as O_Str2Num
+        // rejects ill-formed numerals
+        private Token _ReadNumber()
         {
 			var expo = new char[] { 'E', 'e' };
 			Utl.Assert( _CurrentIsDigit() );
@@ -527,38 +588,16 @@ namespace Cosmos.Executable.Lua
 					break;
             }
 
-            double ret;
-			var str = _GetSavedString();
-			if( LuaState.O_Str2Decimal( str, out ret ) )
+			TValue obj;
+			if( !LuaState.O_Str2Num( _GetSavedString(), out obj ) )
 			{
-				return ret;
+                _LexError( "malformed number", (int)TK.FLT );
+				return null;
 			}
-			else
-			{
-                _LexError( "malformed number", (int)TK.NUMBER );
-				return 0.0;
-			}
+			if( obj.TtIsInteger() )
+				return new IntegerToken( obj.IValue() );
+			return new NumberToken( obj.FltValue );
         }
-
-        // private float _ReadNumber()
-        // {
-        //     do
-        //     {
-        //         _SaveAndNext();
-        //     } while( _CurrentIsDigit() || Current == '.' );
-        //     if( Current == 'E' || Current == 'e' )
-        //     {
-        //         _SaveAndNext();
-        //         if( Current == '+' || Current == '-' )
-        //             _SaveAndNext();
-        //     }
-        //     while( _CurrentIsAlpha() || _CurrentIsDigit() || Current == '_' )
-        //         _SaveAndNext();
-        //     float ret;
-        //     if( !Single.TryParse( _GetSavedString(), out ret ) )
-        //         _Error( "malformed number" );
-        //     return ret;
-        // }
 
         private void _Error( string error )
         {
@@ -571,18 +610,22 @@ namespace Cosmos.Executable.Lua
 			if( token < FIRST_RESERVED ) // single-byte symbols?
 				return Utl.IsPrint( token )
 					? string.Format( "'{0}'", (char)token )
-					: string.Format( "char({0})", token );
+					: string.Format( "'<\\{0}>'", token );
 			switch( (TK)token )
 			{
+				case TK.IDIV: return "'//'";
 				case TK.CONCAT: return "'..'";
 				case TK.DOTS: return "'...'";
 				case TK.EQ: return "'=='";
 				case TK.GE: return "'>='";
 				case TK.LE: return "'<='";
 				case TK.NE: return "'~='";
+				case TK.SHL: return "'<<'";
+				case TK.SHR: return "'>>'";
 				case TK.DBCOLON: return "'::'";
 				case TK.EOS: return "<eof>";
-				case TK.NUMBER: return "<number>";
+				case TK.FLT: return "<number>";
+				case TK.INT: return "<integer>";
 				case TK.STRING: return "<string>";
 				case TK.NAME: return "<name>";
 				default: return "'" + ReservedWords[token - FIRST_RESERVED] + "'";
@@ -601,7 +644,8 @@ namespace Cosmos.Executable.Lua
 			{
 				case (int)TK.NAME:
 				case (int)TK.STRING:
-				case (int)TK.NUMBER:
+				case (int)TK.FLT:
+				case (int)TK.INT:
 					return "'" + _GetSavedString() + "'";
 				default:
 					return Token2Str( token );
@@ -699,16 +743,23 @@ namespace Cosmos.Executable.Lua
 
                     case '<': {
                         _Next();
-                        if( Current != '=' ) return new LiteralToken('<');
-                        _Next();
-                        return new TypedToken( TK.LE );
+                        if( Current == '=' ) { _Next(); return new TypedToken( TK.LE ); }
+                        if( Current == '<' ) { _Next(); return new TypedToken( TK.SHL ); }
+                        return new LiteralToken('<');
                     }
 
                     case '>': {
                         _Next();
-                        if( Current != '=' ) return new LiteralToken('>');
+                        if( Current == '=' ) { _Next(); return new TypedToken( TK.GE ); }
+                        if( Current == '>' ) { _Next(); return new TypedToken( TK.SHR ); }
+                        return new LiteralToken('>');
+                    }
+
+                    case '/': {
                         _Next();
-                        return new TypedToken( TK.GE );
+                        if( Current != '/' ) return new LiteralToken('/');
+                        _Next();
+                        return new TypedToken( TK.IDIV );
                     }
 
                     case '~': {
@@ -748,7 +799,7 @@ namespace Cosmos.Executable.Lua
                         else if( !_CurrentIsDigit() )
                             return new LiteralToken('.');
                         else
-                            return new NumberToken( _ReadNumber() );
+                            return _ReadNumber();
                     }
 
                     case EOZ: {
@@ -766,7 +817,7 @@ namespace Cosmos.Executable.Lua
                     default: {
                         if( _CurrentIsDigit() )
                         {
-                            return new NumberToken( _ReadNumber() );
+                            return _ReadNumber();
                         }
                         else if( _CurrentIsAlpha() || Current == '_' )
                         {

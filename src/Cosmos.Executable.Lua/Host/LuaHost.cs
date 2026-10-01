@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 
 namespace Cosmos.Executable.Lua;
 
@@ -42,6 +43,58 @@ internal sealed class LuaHost
 
     /// <inheritdoc cref="In"/>
     public TextWriter Err => Error ?? Out;
+
+    /// <summary>
+    /// Writes the Lua string <paramref name="luaString"/> to <see cref="Out"/>,
+    /// decoding its bytes from UTF-8 (a sequence may be split between writes).
+    /// </summary>
+    public void WriteOut(string luaString)
+    {
+        Write(Out, luaString);
+    }
+
+    /// <summary>Writes the Lua string <paramref name="luaString"/> to <see cref="Err"/>; see <see cref="WriteOut"/>.</summary>
+    public void WriteErr(string luaString)
+    {
+        Write(Err, luaString);
+    }
+
+    /// <summary>A line of <see cref="In"/>, with its end, as a Lua string; null at the end of the input.</summary>
+    public string? ReadInLine()
+    {
+        string? line = In.ReadLine();
+        return line is null ? null : LuaText.Encode(line + "\n");
+    }
+
+    /// <summary>The writers the bytes went to last, with the UTF-8 sequences they left unfinished.</summary>
+    private TextWriter? _writer1, _writer2;
+    private Decoder? _decoder1, _decoder2;
+
+    private void Write(TextWriter writer, string luaString)
+    {
+        Decoder decoder;
+        if (ReferenceEquals(writer, _writer1))
+        {
+            decoder = _decoder1!;
+        }
+        else if (ReferenceEquals(writer, _writer2))
+        {
+            decoder = _decoder2!;
+        }
+        else
+        {
+            // A writer the host just set: the older one goes
+            _writer2 = _writer1;
+            _decoder2 = _decoder1;
+            _writer1 = writer;
+            _decoder1 = decoder = Encoding.UTF8.GetDecoder();
+        }
+
+        byte[] bytes = LuaText.ToBytes(luaString);
+        char[] chars = new char[decoder.GetCharCount(bytes, 0, bytes.Length, flush: false)];
+        decoder.GetChars(bytes, 0, bytes.Length, chars, 0, flush: false);
+        writer.Write(chars);
+    }
 
     /// <summary>Runs a command for <c>os.execute</c> and returns its exit status; null when there is no shell.</summary>
     public Func<string, int>? ExecuteCommand { get; set; }
@@ -98,9 +151,14 @@ internal sealed class LuaHost
         return ((LuaState)lua).G.Host;
     }
 
-    /// <summary>Makes <paramref name="path"/> absolute against <see cref="WorkingDirectory"/>, if set.</summary>
-    public string ResolvePath(string path)
+    /// <summary>
+    /// The path of the file a script names: the Lua string
+    /// <paramref name="fileName"/> decoded from UTF-8, and made absolute
+    /// against <see cref="WorkingDirectory"/>, if set.
+    /// </summary>
+    public string ResolvePath(string fileName)
     {
+        string path = LuaText.Decode(fileName);
         return WorkingDirectory is null || Path.IsPathRooted(path) ? path : Path.Combine(WorkingDirectory, path);
     }
 }

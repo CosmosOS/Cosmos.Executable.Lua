@@ -3,135 +3,11 @@
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
 
-// #define DEBUG_BINARY_READER
-// #define DEBUG_UNDUMP
-
 using System;
 
 
 namespace Cosmos.Executable.Lua
 {
-	internal class BinaryBytesReader
-	{
-		private ILoadInfo LoadInfo;
-		public int SizeOfSizeT;
-
-
-		public BinaryBytesReader( ILoadInfo loadinfo )
-		{
-			LoadInfo = loadinfo;
-			SizeOfSizeT = 0;
-		}
-
-		public byte[] ReadBytes( int count )
-		{
-			byte[] ret = new byte[count];
-			for( int i=0; i<count; ++i )
-			{
-				var c = LoadInfo.ReadByte();
-				if( c == -1 )
-					throw new UndumpException("truncated");
-				ret[i] = (byte)c;
-			}
-#if DEBUG_BINARY_READER
-			var sb = new System.Text.StringBuilder();
-			sb.Append("ReadBytes:");
-			for( var i=0; i<ret.Length; ++i )
-			{
-				sb.Append( string.Format(" {0:X02}", ret[i]) );
-			}
-			System.Diagnostics.Debug.WriteLine( sb.ToString() );
-#endif
-			return ret;
-		}
-
-		public int ReadInt()
-		{
-			var bytes = ReadBytes( 4 );
-			int ret = BitConverter.ToInt32( bytes, 0 );
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadInt: " + ret );
-#endif
-			return ret;
-		}
-
-		public uint ReadUInt()
-		{
-			var bytes = ReadBytes( 4 );
-			uint ret = BitConverter.ToUInt32( bytes, 0 );
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadUInt: " + ret );
-#endif
-			return ret;
-		}
-
-		public int ReadSizeT()
-		{
-			if( SizeOfSizeT <= 0) {
-				throw new Exception("sizeof(size_t) is not valid:" + SizeOfSizeT);
-			}
-
-			var bytes = ReadBytes( SizeOfSizeT );
-			UInt64 ret;
-			switch( SizeOfSizeT ) {
-				case 4:
-					ret = BitConverter.ToUInt32( bytes, 0 );
-					break;
-				case 8:
-					ret = BitConverter.ToUInt64( bytes, 0 );
-					break;
-				default:
-					throw new NotImplementedException();
-			}
-
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadSizeT: " + ret );
-#endif
-
-			if( ret > Int32.MaxValue )
-				throw new NotImplementedException();
-
-			return (int)ret;
-		}
-
-		public double ReadDouble()
-		{
-			var bytes = ReadBytes( 8 );
-			double ret = BitConverter.ToDouble( bytes, 0 );
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadDouble: " + ret );
-#endif
-			return ret;
-		}
-
-		public byte ReadByte()
-		{
-			var c = LoadInfo.ReadByte();
-			if( c == -1 )
-				throw new UndumpException("truncated");
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadBytes: " + c );
-#endif
-			return (byte)c;
-		}
-
-		public string ReadString()
-		{
-			var n = ReadSizeT();
-			if( n == 0 )
-				return null;
-
-			var bytes = ReadBytes( n );
-
-			// n=1: removing trailing '\0'
-			string ret = System.Text.Encoding.UTF8.GetString( bytes, 0, n-1 );
-#if DEBUG_BINARY_READER
-			System.Diagnostics.Debug.WriteLine( "ReadString n:" + n + " ret:" + ret );
-#endif
-			return ret;
-		}
-	}
-
 	class UndumpException : Exception
 	{
 		public string Why;
@@ -142,20 +18,25 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
+	// lundump.c: loads a precompiled chunk as DumpState writes it
 	internal class Undump
 	{
-		private BinaryBytesReader Reader;
-
+		private ILoadInfo LoadInfo;
 
 		public static LuaProto LoadBinary( ILuaState lua,
 			ILoadInfo loadinfo, string name )
 		{
+			if( name.Length > 0 && (name[0] == '@' || name[0] == '=') )
+				name = name.Substring( 1 );
+			else if( name.Length > 0 && name[0] == LuaConf.LUA_SIGNATURE[0] )
+				name = "binary string";
+
 			try
 			{
-				var reader = new BinaryBytesReader( loadinfo );
-				var undump = new Undump( reader );
-				undump.LoadHeader();
-				return undump.LoadFunction();
+				var undump = new Undump( loadinfo );
+				undump.CheckHeader();
+				undump.LoadByte(); // number of upvalues of the main function
+				return undump.LoadFunction( null );
 			}
 			catch( UndumpException e )
 			{
@@ -167,160 +48,159 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private Undump( BinaryBytesReader reader )
+		private Undump( ILoadInfo loadinfo )
 		{
-			Reader 	= reader;
+			LoadInfo = loadinfo;
+		}
+
+		private byte[] LoadBlock( int count )
+		{
+			var ret = new byte[count];
+			for( int i=0; i<count; ++i )
+			{
+				var c = LoadInfo.ReadByte();
+				if( c == -1 )
+					throw new UndumpException( "truncated" );
+				ret[i] = (byte)c;
+			}
+			return ret;
+		}
+
+		private int LoadByte()
+		{
+			return LoadBlock( 1 )[0];
 		}
 
 		private int LoadInt()
 		{
-			return Reader.ReadInt();
+			return BitConverter.ToInt32( LoadBlock( DumpState.SIZEOF_INT ), 0 );
 		}
 
-		private byte LoadByte()
+		private long LoadInteger()
 		{
-			return Reader.ReadByte();
-		}
-
-		private byte[] LoadBytes( int count )
-		{
-			return Reader.ReadBytes( count );
-		}
-
-		private string LoadString()
-		{
-			return Reader.ReadString();
-		}
-
-		private bool LoadBoolean()
-		{
-			return LoadByte() != 0;
+			return BitConverter.ToInt64( LoadBlock( DumpState.SIZEOF_INTEGER ), 0 );
 		}
 
 		private double LoadNumber()
 		{
-			return Reader.ReadDouble();
+			return BitConverter.ToDouble( LoadBlock( DumpState.SIZEOF_NUMBER ), 0 );
 		}
 
-		private void LoadHeader()
+		private string LoadString()
 		{
-			byte[] header = LoadBytes( 4 // Signature
-				+ 8 // version, format version, size of int ... etc
-				+ 6 // Tail
-			);
-			byte v = header[ 4 /* skip signature */
-						   + 4 /* offset of sizeof(size_t) */
-						   ];
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine(string.Format("sizeof(size_t): {0}", v));
-#endif
-			Reader.SizeOfSizeT = v ;
+			ulong size = (ulong)LoadByte();
+			if( size == 0xFF )
+				size = BitConverter.ToUInt64( LoadBlock( DumpState.SIZEOF_SIZET ), 0 );
+			if( size == 0 )
+				return null;
+			if( --size > int.MaxValue )
+				throw new UndumpException( "truncated" );
+			var bytes = LoadBlock( (int)size );
+			var chars = new char[bytes.Length];
+			for( int i=0; i<bytes.Length; ++i )
+				chars[i] = (char)bytes[i];
+			return new string( chars );
 		}
 
-		private Instruction LoadInstruction()
+		private void CheckLiteral( string s, string msg )
 		{
-			return (Instruction)Reader.ReadUInt();
+			var bytes = LoadBlock( s.Length );
+			for( int i=0; i<s.Length; ++i )
+			{
+				if( bytes[i] != (byte)s[i] )
+					throw new UndumpException( msg );
+			}
 		}
 
-		private LuaProto LoadFunction()
+		private void CheckSize( int size, string tname )
 		{
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "LoadFunction enter" );
-#endif
+			if( LoadByte() != size )
+				throw new UndumpException( tname + " size mismatch in" );
+		}
 
+		private void CheckHeader()
+		{
+			CheckLiteral( LuaConf.LUA_SIGNATURE, "not a" );
+			if( LoadByte() != DumpState.LUAC_VERSION )
+				throw new UndumpException( "version mismatch in" );
+			if( LoadByte() != DumpState.LUAC_FORMAT )
+				throw new UndumpException( "format mismatch in" );
+			CheckLiteral( DumpState.LUAC_DATA, "corrupted" );
+			CheckSize( DumpState.SIZEOF_INT, "int" );
+			CheckSize( DumpState.SIZEOF_SIZET, "size_t" );
+			CheckSize( DumpState.SIZEOF_INSTRUCTION, "Instruction" );
+			CheckSize( DumpState.SIZEOF_INTEGER, "lua_Integer" );
+			CheckSize( DumpState.SIZEOF_NUMBER, "lua_Number" );
+			if( LoadInteger() != DumpState.LUAC_INT )
+				throw new UndumpException( "endianness mismatch in" );
+			if( LoadNumber() != DumpState.LUAC_NUM )
+				throw new UndumpException( "float format mismatch in" );
+		}
+
+		private LuaProto LoadFunction( string psource )
+		{
 			LuaProto proto = new LuaProto();
+			proto.Source = LoadString();
+			if( proto.Source == null ) // no source in dump?
+				proto.Source = psource; // reuse parent's source
 			proto.LineDefined = LoadInt();
 			proto.LastLineDefined = LoadInt();
 			proto.NumParams = LoadByte();
-			proto.IsVarArg  = LoadBoolean();
-			proto.MaxStackSize = LoadByte();
+			proto.IsVarArg = LoadByte() != 0;
+			proto.MaxStackSize = (byte)LoadByte();
 
-			LoadCode(proto);
-			LoadConstants(proto);
-			LoadUpvalues(proto);
-			LoadDebug(proto);
+			LoadCode( proto );
+			LoadConstants( proto );
+			LoadUpvalues( proto );
+			LoadProtos( proto );
+			LoadDebug( proto );
 			return proto;
 		}
 
 		private void LoadCode( LuaProto proto )
 		{
 			var n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "LoadCode n:" + n );
-#endif
 			proto.Code.Clear();
 			for( int i=0; i<n; ++i )
-			{
-				proto.Code.Add( LoadInstruction() );
-#if DEBUG_UNDUMP
-				System.Diagnostics.Debug.WriteLine( "Count:" + proto.Code.Count );
-				System.Diagnostics.Debug.WriteLine( "LoadInstruction:" + proto.Code[proto.Code.Count-1] );
-#endif
-			}
+				proto.Code.Add( (Instruction)BitConverter.ToUInt32( LoadBlock( 4 ), 0 ) );
 		}
 
 		private void LoadConstants( LuaProto proto )
 		{
 			var n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "Load Constants:" + n );
-#endif
 			proto.K.Clear();
 			for( int i=0; i<n; ++i )
 			{
-				int t = (int)LoadByte();
-#if DEBUG_UNDUMP
-				System.Diagnostics.Debug.WriteLine( "Constant Type:" + t );
-#endif
+				int t = LoadByte();
 				var v = new StkId();
 				switch( t )
 				{
 					case (int)LuaType.LUA_TNIL:
 						v.V.SetNilValue();
-						proto.K.Add( v );
 						break;
-
 					case (int)LuaType.LUA_TBOOLEAN:
-						v.V.SetBValue(LoadBoolean());
-						proto.K.Add( v );
+						v.V.SetBValue( LoadByte() != 0 );
 						break;
-
-					case (int)LuaType.LUA_TNUMBER:
-						v.V.SetNValue(LoadNumber());
-						proto.K.Add( v );
+					case TValue.LUA_TNUMFLT:
+						v.V.SetFltValue( LoadNumber() );
 						break;
-
+					case TValue.LUA_TNUMINT:
+						v.V.SetIValue( LoadInteger() );
+						break;
 					case (int)LuaType.LUA_TSTRING:
-#if DEBUG_UNDUMP
-						System.Diagnostics.Debug.WriteLine( "LuaType.LUA_TSTRING" );
-#endif
-						v.V.SetSValue(LoadString());
-						proto.K.Add( v );
+					case (int)LuaType.LUA_TSTRING | (1 << 4): // a long string
+						v.V.SetSValue( LoadString() );
 						break;
-
 					default:
-						throw new UndumpException(
-							"LoadConstants unknown type: " + t );
+						throw new UndumpException( "bad constant in" );
 				}
-			}
-
-			n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "Load Functions:" + n );
-#endif
-			proto.P.Clear();
-			for( int i=0; i<n; ++i )
-			{
-				proto.P.Add( LoadFunction() );
+				proto.K.Add( v );
 			}
 		}
 
 		private void LoadUpvalues( LuaProto proto )
 		{
 			var n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "Load Upvalues:" + n );
-#endif
 			proto.Upvalues.Clear();
 			for( int i=0; i<n; ++i )
 			{
@@ -328,33 +208,28 @@ namespace Cosmos.Executable.Lua
 					new UpvalDesc()
 					{
 						Name = null,
-						InStack = LoadBoolean(),
-						Index = (int)LoadByte()
+						InStack = LoadByte() != 0,
+						Index = LoadByte(),
 					} );
 			}
 		}
 
+		private void LoadProtos( LuaProto proto )
+		{
+			var n = LoadInt();
+			proto.P.Clear();
+			for( int i=0; i<n; ++i )
+				proto.P.Add( LoadFunction( proto.Source ) );
+		}
+
 		private void LoadDebug( LuaProto proto )
 		{
-			int n;
-			proto.Source = LoadString();
-
-			// LineInfo
-			n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "Load LineInfo:" + n );
-#endif
+			int n = LoadInt();
 			proto.LineInfo.Clear();
 			for( int i=0; i<n; ++i )
-			{
 				proto.LineInfo.Add( LoadInt() );
-			}
 
-			// LocalVar
 			n = LoadInt();
-#if DEBUG_UNDUMP
-			System.Diagnostics.Debug.WriteLine( "Load LocalVar:" + n );
-#endif
 			proto.LocVars.Clear();
 			for( int i=0; i<n; ++i )
 			{
@@ -367,14 +242,10 @@ namespace Cosmos.Executable.Lua
 					} );
 			}
 
-			// Upvalues' name
 			n = LoadInt();
 			for( int i=0; i<n; ++i )
-			{
 				proto.Upvalues[i].Name = LoadString();
-			}
 		}
 	}
 
 }
-

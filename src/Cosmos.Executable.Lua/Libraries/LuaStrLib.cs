@@ -12,9 +12,8 @@ namespace Cosmos.Executable.Lua
 	using StringComparison = System.StringComparison;
 	using CultureInfo = System.Globalization.CultureInfo;
 
-	// lstrlib.c of Lua 5.2. Characters stand for bytes: a string holds the
-	// UTF-16 code units of its text, and character classes are those of the
-	// "C" locale (ASCII).
+	// lstrlib.c of Lua 5.3. A string holds bytes, one per character, and
+	// character classes are those of the "C" locale (ASCII).
 	internal static class LuaStrLib
 	{
 		public const string LIB_NAME = "string";
@@ -50,6 +49,9 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "lower", 		Str_Lower ),
 				new NameFuncPair( "match", 		Str_Match ),
 				new NameFuncPair( "rep", 		Str_Rep ),
+				new NameFuncPair( "pack", 		Str_Pack ),
+				new NameFuncPair( "packsize", 	Str_PackSize ),
+				new NameFuncPair( "unpack", 	Str_Unpack ),
 				new NameFuncPair( "reverse", 	Str_Reverse ),
 				new NameFuncPair( "sub", 		Str_Sub ),
 				new NameFuncPair( "upper", 		Str_Upper ),
@@ -74,10 +76,10 @@ namespace Cosmos.Executable.Lua
 		}
 
 		// translate a relative string position: negative means back from end
-		private static int PosRelative( int pos, int len )
+		private static long PosRelative( long pos, int len )
 		{
 			if( pos >= 0 ) return pos;
-			else if( -(long)pos > len ) return 0;
+			else if( 0u - (ulong)pos > (ulong)len ) return 0;
 			else return len + pos + 1;
 		}
 
@@ -91,12 +93,12 @@ namespace Cosmos.Executable.Lua
 		private static int Str_Sub( ILuaState lua )
 		{
 			string s = lua.L_CheckString(1);
-			int start = PosRelative( lua.L_CheckInteger(2), s.Length );
-			int end = PosRelative( lua.L_OptInt(3, -1), s.Length );
+			long start = PosRelative( lua.L_CheckInteger(2), s.Length );
+			long end = PosRelative( lua.L_OptInteger(3, -1), s.Length );
 			if( start < 1 ) start = 1;
 			if( end > s.Length ) end = s.Length;
 			if( start <= end )
-				lua.PushString( s.Substring(start-1, end-start+1) );
+				lua.PushString( s.Substring((int)start-1, (int)(end-start)+1) );
 			else
 				lua.PushString( "" );
 			return 1;
@@ -135,15 +137,15 @@ namespace Cosmos.Executable.Lua
 		private static int Str_Rep( ILuaState lua )
 		{
 			string s = lua.L_CheckString(1);
-			int n = lua.L_CheckInteger(2);
+			long n = lua.L_CheckInteger(2);
 			string sep = lua.L_OptString(3, "");
 			if( n <= 0 )
 				lua.PushString( "" );
-			else if( (long)s.Length * n + (long)sep.Length * (n - 1) > MAXSIZE )
+			else if( (long)s.Length + sep.Length > MAXSIZE / n ) // may overflow?
 				return lua.L_Error( "resulting string too large" );
 			else
 			{
-				StringBuilder sb = new StringBuilder( s.Length * n + sep.Length * (n - 1) );
+				StringBuilder sb = new StringBuilder( (int)(s.Length * n + sep.Length * (n - 1)) );
 				while( n-- > 1 ) // first n-1 copies (followed by separator)
 				{
 					sb.Append( s );
@@ -158,27 +160,28 @@ namespace Cosmos.Executable.Lua
 		private static int Str_Byte( ILuaState lua )
 		{
 			string s = lua.L_CheckString(1);
-			int posi = PosRelative( lua.L_OptInt(2, 1), s.Length );
-			int pose = PosRelative( lua.L_OptInt(3, posi), s.Length );
+			long posi = PosRelative( lua.L_OptInteger(2, 1), s.Length );
+			long pose = PosRelative( lua.L_OptInteger(3, posi), s.Length );
 			if( posi < 1 ) posi = 1;
 			if( pose > s.Length ) pose = s.Length;
 			if( posi > pose ) return 0; // empty interval; return no values
-			int n = pose - posi + 1;
+			if( pose - posi >= int.MaxValue ) // arithmetic overflow?
+				return lua.L_Error( "string slice too long" );
+			int n = (int)(pose - posi) + 1;
 			lua.L_CheckStack(n, "string slice too long");
 			for( int i=0; i<n; ++i )
-				lua.PushInteger( s[posi+i-1] );
+				lua.PushInteger( s[(int)posi+i-1] );
 			return n;
 		}
 
-		// any UTF-16 code unit, so that string.char(s:byte(1, -1)) == s
 		private static int Str_Char( ILuaState lua )
 		{
 			int n = lua.GetTop();
 			StringBuilder sb = new StringBuilder(n);
 			for( int i=1; i<=n; ++i )
 			{
-				int c = lua.L_CheckInteger(i);
-				lua.L_ArgCheck( (char)c == c, i, "value out of range" );
+				long c = lua.L_CheckInteger(i);
+				lua.L_ArgCheck( (ulong)c <= byte.MaxValue, i, "value out of range" );
 				sb.Append( (char)c );
 			}
 			lua.PushString( sb.ToString() );
@@ -187,6 +190,7 @@ namespace Cosmos.Executable.Lua
 
 		private static int Str_Dump( ILuaState lua )
 		{
+			bool strip = lua.ToBoolean( 2 );
 			lua.L_CheckType( 1, LuaType.LUA_TFUNCTION );
 			lua.SetTop( 1 );
 			var bsb = new ByteStringBuilder();
@@ -196,7 +200,7 @@ namespace Cosmos.Executable.Lua
 				bsb.Append(bytes, start, length);
 				return DumpStatus.OK;
 			};
-			if( lua.Dump( writeFunc ) != DumpStatus.OK )
+			if( lua.Dump( writeFunc, strip ) != DumpStatus.OK )
 				return lua.L_Error( "unable to dump given function" );
 			lua.PushString( bsb.ToString() );
 			return 1;
@@ -565,7 +569,7 @@ namespace Cosmos.Executable.Lua
 				if( i == 0 ) // ms.Level == 0, too
 					lua.PushString( ms.Src.Substring( s, e-s ) ); // add whole match
 				else
-					lua.L_Error( "invalid capture index" );
+					lua.L_Error( "invalid capture index %{0}", i + 1 );
 			}
 			else
 			{
@@ -612,13 +616,14 @@ namespace Cosmos.Executable.Lua
 		{
 			string s = lua.L_CheckString( 1 );
 			string p = lua.L_CheckString( 2 );
-			int init = PosRelative( lua.L_OptInt(3, 1), s.Length );
-			if( init < 1 ) init = 1;
-			else if( init > s.Length + 1 ) // start after string's end?
+			long linit = PosRelative( lua.L_OptInteger(3, 1), s.Length );
+			if( linit < 1 ) linit = 1;
+			else if( linit > (long)s.Length + 1 ) // start after string's end?
 			{
 				lua.PushNil(); // cannot find anything
 				return 1;
 			}
+			int init = (int)linit;
 			// explicit request or no special characters?
 			if( find && (lua.ToBoolean(4) || NoSpecials(p)) )
 			{
@@ -670,23 +675,27 @@ namespace Cosmos.Executable.Lua
 			return StrFindAux( lua, false );
 		}
 
+		// GMatchState: where the iteration is, and where the last match ended
+		// (a match may not end where the last one did)
+		private sealed class GMatchState
+		{
+			public int Src; // current position
+			public int LastMatch = -1; // end of last match
+		}
+
 		private static int GmatchAux( ILuaState lua )
 		{
 			string src = lua.ToString( lua.UpvalueIndex(1) );
 			string pattern = lua.ToString( lua.UpvalueIndex(2) );
+			var gm = (GMatchState)lua.ToUserData( lua.UpvalueIndex(3) );
 			MatchState ms = NewMatchState( lua, src, pattern );
-			for( int s = lua.ToInteger( lua.UpvalueIndex(3) )
-			   ; s <= ms.SrcEnd
-			   ; s++ )
+			for( int s = gm.Src; s <= ms.SrcEnd; s++ )
 			{
 				ms.Level = 0;
 				int e = Match( ms, s, 0 );
-				if( e != -1 )
+				if( e != -1 && e != gm.LastMatch )
 				{
-					int newStart = e;
-					if( e == s ) newStart++; // empty match? go at least one position
-					lua.PushInteger( newStart );
-					lua.Replace( lua.UpvalueIndex(3) );
+					gm.Src = gm.LastMatch = e;
 					return PushCaptures( ms, s, e );
 				}
 			}
@@ -697,8 +706,8 @@ namespace Cosmos.Executable.Lua
 		{
 			lua.L_CheckString(1);
 			lua.L_CheckString(2);
-			lua.SetTop(2);
-			lua.PushInteger(0);
+			lua.SetTop(2); // keep them on closure
+			lua.NewUserData( new GMatchState() );
 			lua.PushCSharpClosure( GmatchAux, 3 );
 			return 1;
 		}
@@ -725,8 +734,9 @@ namespace Cosmos.Executable.Lua
 					else
 					{
 						PushOneCapture( ms, c - '1', s, e );
+						ms.Lua.L_ToString( -1 ); // if number, convert it to string
 						b.Append( ms.Lua.ToString(-1) ); // add capture to accumulated result
-						ms.Lua.Pop( 1 );
+						ms.Lua.Pop( 2 ); // remove the capture and its string
 					}
 				}
 			}
@@ -770,11 +780,11 @@ namespace Cosmos.Executable.Lua
 			string src = lua.L_CheckString(1);
 			string p = lua.L_CheckString(2);
 			LuaType tr = lua.Type(3);
-			// a negative maximum is no maximum, as for C's size_t
-			uint max_s = (uint)lua.L_OptInt(4, src.Length + 1);
+			long max_s = lua.L_OptInteger(4, src.Length + 1); // max replacements
 			int ppos = 0;
 			bool anchor = p.Length > 0 && p[0] == '^';
-			uint n = 0;
+			long n = 0; // replacement count
+			int lastmatch = -1; // end of last match
 			lua.L_ArgCheck( tr == LuaType.LUA_TNUMBER || tr == LuaType.LUA_TSTRING ||
 				tr == LuaType.LUA_TFUNCTION || tr == LuaType.LUA_TTABLE, 3,
 				"string/function/table expected" );
@@ -785,23 +795,22 @@ namespace Cosmos.Executable.Lua
 			int s = 0;
 			while( n < max_s )
 			{
-				ms.Level = 0;
+				ms.Level = 0; // (re)prepare state for new match
 				int e = Match( ms, s, ppos );
-				if( e != -1 )
+				if( e != -1 && e != lastmatch ) // match?
 				{
 					n++;
-					Add_Value( ms, b, s, e, tr );
+					Add_Value( ms, b, s, e, tr ); // add replacement to buffer
+					s = lastmatch = e;
 				}
-				if( e != -1 && e > s ) // non empty match?
-					s = e; // skip it
-				else if( s < ms.SrcEnd )
+				else if( s < ms.SrcEnd ) // otherwise, skip one character
 					b.Append( src[s++] );
-				else break;
+				else break; // end of subject
 				if( anchor ) break;
 			}
 			b.Append( src, s, ms.SrcEnd - s );
 			lua.PushString( b.ToString() );
-			lua.PushNumber( n ); // number of substitutions
+			lua.PushInteger( n ); // number of substitutions
 			return 2;
 		}
 
@@ -893,11 +902,7 @@ namespace Cosmos.Executable.Lua
 
 		private static void FormatInteger( ILuaState lua, StringBuilder sb, FormatSpec spec, int arg )
 		{
-			double n = lua.L_CheckNumber( arg );
-			// the range of C's long long, which Lua 5.2 formats with
-			lua.L_ArgCheck( n >= -9223372036854775808.0 && n < 9223372036854775808.0, arg,
-				"not a number in proper range" );
-			long ni = (long)n;
+			long ni = lua.L_CheckInteger( arg );
 			bool negative = ni < 0;
 			ulong mag = negative ? (ulong)(-(ni + 1)) + 1 : (ulong)ni;
 			string digits = IntDigits( mag.ToString( CultureInfo.InvariantCulture ), spec, mag == 0 );
@@ -907,10 +912,8 @@ namespace Cosmos.Executable.Lua
 		private static void FormatUnsigned( ILuaState lua, StringBuilder sb, FormatSpec spec,
 			int arg, char conv )
 		{
-			double n = lua.L_CheckNumber( arg );
-			lua.L_ArgCheck( n > -1.0 && n < 18446744073709551616.0, arg,
-				"not a non-negative number in proper range" );
-			ulong ni = n <= 0 ? 0 : (ulong)n;
+			// the bits of the integer, as C prints a long long with %llx
+			ulong ni = unchecked( (ulong)lua.L_CheckInteger( arg ) );
 			string digits;
 			switch( conv )
 			{
@@ -1019,9 +1022,49 @@ namespace Cosmos.Executable.Lua
 			AddPadded( sb, spec, prefix, body, finite );
 		}
 
-		private static void AddQuoted( ILuaState lua, StringBuilder sb, int arg )
+		// addliteral: a value as Lua code reads it back
+		private static void AddLiteral( ILuaState lua, StringBuilder sb, int arg )
 		{
-			var s = lua.L_CheckString(arg);
+			switch( lua.Type( arg ) )
+			{
+				case LuaType.LUA_TSTRING:
+					AddQuoted( lua.ToString( arg ), sb );
+					break;
+				case LuaType.LUA_TNUMBER:
+					if( !lua.IsInteger( arg ) ) // float?
+					{
+						double n = lua.ToNumber( arg ); // write as hexa ('%a')
+						if( double.IsNaN( n ) || double.IsInfinity( n ) )
+							sb.Append( double.IsNaN( n ) ? (double.IsNegative( n ) ? "-nan" : "nan")
+								: (n > 0 ? "inf" : "-inf") );
+						else
+						{
+							if( double.IsNegative( n ) )
+								sb.Append( '-' );
+							sb.Append( "0x" ).Append( FormatHexFloat( Math.Abs( n ), -1, false ) );
+						}
+					}
+					else // integers
+					{
+						long n = lua.ToInteger( arg );
+						sb.Append( n == long.MinValue // corner case?
+							? "0x8000000000000000" // use hexa
+							: n.ToString( CultureInfo.InvariantCulture ) );
+					}
+					break;
+				case LuaType.LUA_TNIL:
+				case LuaType.LUA_TBOOLEAN:
+					sb.Append( lua.L_ToString( arg ) );
+					lua.Pop( 1 );
+					break;
+				default:
+					lua.L_ArgError( arg, "value has no literal form" );
+					break;
+			}
+		}
+
+		private static void AddQuoted( string s, StringBuilder sb )
+		{
 			sb.Append('"');
 			for( var i=0; i<s.Length; ++i )
 			{
@@ -1078,9 +1121,9 @@ namespace Cosmos.Executable.Lua
 				{
 					case 'c':
 					{
-						// a UTF-16 code unit, or the byte C would take of other values
-						int c = lua.L_CheckInteger(arg);
-						AddPadded( sb, spec, "", ((char)((char)c == c ? c : c & 0xFF)).ToString(), false );
+						// the byte C takes of the int
+						long c = lua.L_CheckInteger(arg);
+						AddPadded( sb, spec, "", ((char)(c & 0xFF)).ToString(), false );
 						break;
 					}
 					case 'd': case 'i':
@@ -1093,8 +1136,8 @@ namespace Cosmos.Executable.Lua
 						FormatUnsigned( lua, sb, spec, arg, conv );
 						break;
 					}
-					case 'e': case 'E': case 'f':
 					case 'a': case 'A':
+					case 'e': case 'E': case 'f':
 					case 'g': case 'G':
 					{
 						FormatFloat( lua, sb, spec, arg, conv );
@@ -1102,14 +1145,20 @@ namespace Cosmos.Executable.Lua
 					}
 					case 'q':
 					{
-						AddQuoted( lua, sb, arg );
+						AddLiteral( lua, sb, arg );
 						break;
 					}
 					case 's':
 					{
 						string str = lua.L_ToString( arg );
 						lua.Pop( 1 );
-						if( spec.Precision < 0 && str.Length >= 100 )
+						bool modifiers = spec.Left || spec.Plus || spec.Space || spec.Alt || spec.Zero
+							|| spec.Width >= 0 || spec.Precision >= 0;
+						if( !modifiers ) // no modifiers?
+							sb.Append( str ); // keep entire string
+						else if( str.IndexOf( '\0' ) >= 0 )
+							lua.L_ArgError( arg, "string contains zeros" );
+						else if( spec.Precision < 0 && str.Length >= 100 )
 						{
 							// no precision and string is too long to be formatted;
 							// keep original string
@@ -1131,6 +1180,365 @@ namespace Cosmos.Executable.Lua
 			}
 			lua.PushString( sb.ToString() );
 			return 1;
+		}
+
+
+		// ======================================================
+		// PACK/UNPACK
+		// ======================================================
+
+		private const char LUAL_PACKPADBYTE = '\0';
+		private const int MAXINTSIZE = 16; // maximum size for the binary representation of an integer
+		private const int NB = 8; // number of bits in a character
+		private const int MC = (1 << NB) - 1; // mask for one character (NB 1's)
+		private const int SZINT = 8; // size of a lua_Integer
+		private const int MAXALIGN = 8; // native alignment requirements
+
+		// the MAXSIZE of C, for the sizes formats give: a string here holds
+		// less, as .NET's do
+		private const int PACK_MAXSIZE = int.MaxValue;
+
+		// the sizes of C's types on the 64-bit machines the reference runs on
+		private const int SIZEOF_SHORT = 2;
+		private const int SIZEOF_INT = 4;
+		private const int SIZEOF_LONG = 8;
+		private const int SIZEOF_SIZET = 8;
+
+		// information to pack/unpack stuff
+		private sealed class PackHeader
+		{
+			public ILuaState L;
+			public bool IsLittle = true; // little endian, as the machine
+			public int MaxAlign = 1;
+			public string Fmt;
+			public int Pos;
+
+			public char Current { get { return Pos < Fmt.Length ? Fmt[Pos] : '\0'; } }
+		}
+
+		// options for pack/unpack
+		private enum KOption
+		{
+			Kint,		// signed integers
+			Kuint,		// unsigned integers
+			Kfloat,		// floating-point numbers
+			Kchar,		// fixed-length strings
+			Kstring,	// strings with prefixed length
+			Kzstr,		// zero-terminated strings
+			Kpadding,	// padding
+			Kpaddalign,	// padding for alignment
+			Knop		// no-op (configuration or spaces)
+		}
+
+		// getnum: an integer numeral from the format, or 'df' if there is none
+		private static int GetNum( PackHeader h, int df )
+		{
+			if( !Utl.IsDigit( h.Current ) ) // no number?
+				return df; // return default value
+			int a = 0;
+			do {
+				a = a*10 + (h.Fmt[h.Pos++] - '0');
+			} while( Utl.IsDigit( h.Current ) && a <= (PACK_MAXSIZE - 9)/10 );
+			return a;
+		}
+
+		// getnumlimit: a numeral, which must be a size of integers
+		private static int GetNumLimit( PackHeader h, int df )
+		{
+			int sz = GetNum( h, df );
+			if( sz > MAXINTSIZE || sz <= 0 )
+				return h.L.L_Error( "integral size ({0}) out of limits [1,{1}]", sz, MAXINTSIZE );
+			return sz;
+		}
+
+		// getoption: reads and classifies the next option, and its size
+		private static KOption GetOption( PackHeader h, out int size )
+		{
+			char opt = h.Fmt[h.Pos++];
+			size = 0; // default
+			switch( opt )
+			{
+				case 'b': size = 1; return KOption.Kint;
+				case 'B': size = 1; return KOption.Kuint;
+				case 'h': size = SIZEOF_SHORT; return KOption.Kint;
+				case 'H': size = SIZEOF_SHORT; return KOption.Kuint;
+				case 'l': size = SIZEOF_LONG; return KOption.Kint;
+				case 'L': size = SIZEOF_LONG; return KOption.Kuint;
+				case 'j': size = SZINT; return KOption.Kint;
+				case 'J': size = SZINT; return KOption.Kuint;
+				case 'T': size = SIZEOF_SIZET; return KOption.Kuint;
+				case 'f': size = 4; return KOption.Kfloat;
+				case 'd': size = 8; return KOption.Kfloat;
+				case 'n': size = 8; return KOption.Kfloat;
+				case 'i': size = GetNumLimit( h, SIZEOF_INT ); return KOption.Kint;
+				case 'I': size = GetNumLimit( h, SIZEOF_INT ); return KOption.Kuint;
+				case 's': size = GetNumLimit( h, SIZEOF_SIZET ); return KOption.Kstring;
+				case 'c':
+					size = GetNum( h, -1 );
+					if( size == -1 )
+						h.L.L_Error( "missing size for format option 'c'" );
+					return KOption.Kchar;
+				case 'z': return KOption.Kzstr;
+				case 'x': size = 1; return KOption.Kpadding;
+				case 'X': return KOption.Kpaddalign;
+				case ' ': break;
+				case '<': h.IsLittle = true; break;
+				case '>': h.IsLittle = false; break;
+				case '=': h.IsLittle = true; break; // native endianness
+				case '!': h.MaxAlign = GetNumLimit( h, MAXALIGN ); break;
+				default: h.L.L_Error( "invalid format option '{0}'", opt ); break;
+			}
+			return KOption.Knop;
+		}
+
+		// getdetails: the next option, its size and the padding it needs to
+		// be aligned
+		private static KOption GetDetails( PackHeader h, long totalsize, out int size, out int ntoalign )
+		{
+			KOption opt = GetOption( h, out size );
+			int align = size; // usually, alignment follows size
+			if( opt == KOption.Kpaddalign ) // 'X' gets alignment from following option
+			{
+				if( h.Pos >= h.Fmt.Length || GetOption( h, out align ) == KOption.Kchar || align == 0 )
+					h.L.L_ArgError( 1, "invalid next option for option 'X'" );
+			}
+			if( align <= 1 || opt == KOption.Kchar ) // need no alignment?
+				ntoalign = 0;
+			else
+			{
+				if( align > h.MaxAlign ) // enforce maximum alignment
+					align = h.MaxAlign;
+				if( (align & (align - 1)) != 0 ) // is 'align' not a power of 2?
+					h.L.L_ArgError( 1, "format asks for alignment not power of 2" );
+				ntoalign = (align - (int)(totalsize & (align - 1))) & (align - 1);
+			}
+			return opt;
+		}
+
+		// packint: an integer in 'size' bytes, sign-extended past a Lua integer
+		private static void PackInt( StringBuilder b, ulong n, bool islittle, int size, bool neg )
+		{
+			var buff = new char[size];
+			buff[islittle ? 0 : size - 1] = (char)(n & MC); // first byte
+			for( int i = 1; i < size; i++ )
+			{
+				n >>= NB;
+				buff[islittle ? i : size - 1 - i] = (char)(n & MC);
+			}
+			if( neg && size > SZINT ) // negative number need sign extension?
+			{
+				for( int i = SZINT; i < size; i++ ) // correct extra bytes
+					buff[islittle ? i : size - 1 - i] = (char)MC;
+			}
+			b.Append( buff ); // add result to buffer
+		}
+
+		// the bytes of a float, in the given endianness
+		private static void PackFloat( StringBuilder b, double n, int size, bool islittle )
+		{
+			byte[] bytes = size == 4 ? BitConverter.GetBytes( (float)n ) : BitConverter.GetBytes( n );
+			if( BitConverter.IsLittleEndian != islittle )
+				System.Array.Reverse( bytes );
+			foreach( byte x in bytes )
+				b.Append( (char)x );
+		}
+
+		private static int Str_Pack( ILuaState lua )
+		{
+			var b = new StringBuilder();
+			var h = new PackHeader { L = lua, Fmt = lua.L_CheckString( 1 ) }; // format string
+			int arg = 1; // current argument to pack
+			long totalsize = 0; // accumulate total size of result
+			while( h.Pos < h.Fmt.Length )
+			{
+				int size, ntoalign;
+				KOption opt = GetDetails( h, totalsize, out size, out ntoalign );
+				totalsize += ntoalign + size;
+				while( ntoalign-- > 0 )
+					b.Append( LUAL_PACKPADBYTE ); // fill alignment
+				arg++;
+				switch( opt )
+				{
+					case KOption.Kint: // signed integers
+					{
+						long n = lua.L_CheckInteger( arg );
+						if( size < SZINT ) // need overflow check?
+						{
+							long lim = 1L << ((size * NB) - 1);
+							lua.L_ArgCheck( -lim <= n && n < lim, arg, "integer overflow" );
+						}
+						PackInt( b, unchecked( (ulong)n ), h.IsLittle, size, n < 0 );
+						break;
+					}
+					case KOption.Kuint: // unsigned integers
+					{
+						long n = lua.L_CheckInteger( arg );
+						if( size < SZINT ) // need overflow check?
+							lua.L_ArgCheck( unchecked( (ulong)n ) < (1UL << (size * NB)),
+								arg, "unsigned overflow" );
+						PackInt( b, unchecked( (ulong)n ), h.IsLittle, size, false );
+						break;
+					}
+					case KOption.Kfloat: // floating-point options
+					{
+						double n = lua.L_CheckNumber( arg ); // get argument
+						PackFloat( b, n, size, h.IsLittle );
+						break;
+					}
+					case KOption.Kchar: // fixed-size string
+					{
+						string str = lua.L_CheckString( arg );
+						int len = str.Length;
+						lua.L_ArgCheck( len <= size, arg, "string longer than given size" );
+						b.Append( str ); // add string
+						while( len++ < size ) // pad extra space
+							b.Append( LUAL_PACKPADBYTE );
+						break;
+					}
+					case KOption.Kstring: // strings with length count
+					{
+						string str = lua.L_CheckString( arg );
+						int len = str.Length;
+						lua.L_ArgCheck( size >= SIZEOF_SIZET || (ulong)len < (1UL << (size * NB)),
+							arg, "string length does not fit in given size" );
+						PackInt( b, (ulong)len, h.IsLittle, size, false ); // pack length
+						b.Append( str );
+						totalsize += len;
+						break;
+					}
+					case KOption.Kzstr: // zero-terminated string
+					{
+						string str = lua.L_CheckString( arg );
+						lua.L_ArgCheck( str.IndexOf( '\0' ) < 0, arg, "string contains zeros" );
+						b.Append( str );
+						b.Append( '\0' ); // add zero at the end
+						totalsize += str.Length + 1;
+						break;
+					}
+					case KOption.Kpadding:
+						b.Append( LUAL_PACKPADBYTE );
+						arg--; // undo increment
+						break;
+					case KOption.Kpaddalign: case KOption.Knop:
+						arg--; // undo increment
+						break;
+				}
+			}
+			lua.PushString( b.ToString() );
+			return 1;
+		}
+
+		private static int Str_PackSize( ILuaState lua )
+		{
+			var h = new PackHeader { L = lua, Fmt = lua.L_CheckString( 1 ) }; // format string
+			long totalsize = 0; // accumulate total size of result
+			while( h.Pos < h.Fmt.Length )
+			{
+				int size, ntoalign;
+				KOption opt = GetDetails( h, totalsize, out size, out ntoalign );
+				size += ntoalign; // total space used by option
+				lua.L_ArgCheck( totalsize <= PACK_MAXSIZE - size, 1, "format result too large" );
+				totalsize += size;
+				if( opt == KOption.Kstring || opt == KOption.Kzstr )
+					lua.L_ArgError( 1, "variable-length format" );
+			}
+			lua.PushInteger( totalsize );
+			return 1;
+		}
+
+		// unpackint: an integer of 'size' bytes, which must fit in a Lua integer
+		private static long UnpackInt( ILuaState lua, string str, int pos, bool islittle, int size, bool issigned )
+		{
+			ulong res = 0;
+			int limit = (size <= SZINT) ? size : SZINT;
+			for( int i = limit - 1; i >= 0; i-- )
+			{
+				res <<= NB;
+				res |= (uint)(str[pos + (islittle ? i : size - 1 - i)] & MC);
+			}
+			if( size < SZINT ) // real size smaller than lua_Integer?
+			{
+				if( issigned ) // needs sign extension?
+				{
+					ulong mask = 1UL << (size*NB - 1);
+					res = unchecked( (res ^ mask) - mask ); // do sign extension
+				}
+			}
+			else if( size > SZINT ) // must check unread bytes
+			{
+				int mask = (!issigned || unchecked( (long)res ) >= 0) ? 0 : MC;
+				for( int i = limit; i < size; i++ )
+				{
+					if( (str[pos + (islittle ? i : size - 1 - i)] & MC) != mask )
+						lua.L_Error( "{0}-byte integer does not fit into Lua Integer", size );
+				}
+			}
+			return unchecked( (long)res );
+		}
+
+		private static int Str_Unpack( ILuaState lua )
+		{
+			var h = new PackHeader { L = lua, Fmt = lua.L_CheckString( 1 ) };
+			string data = lua.L_CheckString( 2 );
+			int ld = data.Length;
+			long lpos = PosRelative( lua.L_OptInteger( 3, 1 ), ld ) - 1;
+			int n = 0; // number of results
+			lua.L_ArgCheck( 0 <= lpos && lpos <= ld, 3, "initial position out of string" );
+			int pos = (int)lpos;
+			while( h.Pos < h.Fmt.Length )
+			{
+				int size, ntoalign;
+				KOption opt = GetDetails( h, pos, out size, out ntoalign );
+				if( (long)pos + ntoalign + size > ld )
+					lua.L_ArgError( 2, "data string too short" );
+				pos += ntoalign; // skip alignment
+				// stack space for item + next position
+				lua.L_CheckStack( 2, "too many results" );
+				n++;
+				switch( opt )
+				{
+					case KOption.Kint:
+					case KOption.Kuint:
+						lua.PushInteger( UnpackInt( lua, data, pos, h.IsLittle, size, opt == KOption.Kint ) );
+						break;
+					case KOption.Kfloat:
+					{
+						var bytes = new byte[size];
+						for( int i = 0; i < size; i++ )
+							bytes[i] = (byte)data[pos + i];
+						if( BitConverter.IsLittleEndian != h.IsLittle )
+							System.Array.Reverse( bytes );
+						lua.PushNumber( size == 4 ? BitConverter.ToSingle( bytes, 0 ) : BitConverter.ToDouble( bytes, 0 ) );
+						break;
+					}
+					case KOption.Kchar:
+						lua.PushString( data.Substring( pos, size ) );
+						break;
+					case KOption.Kstring:
+					{
+						ulong len = unchecked( (ulong)UnpackInt( lua, data, pos, h.IsLittle, size, false ) );
+						lua.L_ArgCheck( len <= (ulong)(ld - pos - size), 2, "data string too short" );
+						lua.PushString( data.Substring( pos + size, (int)len ) );
+						pos += (int)len; // skip string
+						break;
+					}
+					case KOption.Kzstr:
+					{
+						int end = data.IndexOf( '\0', pos );
+						if( end < 0 ) end = ld;
+						int len = end - pos;
+						lua.PushString( data.Substring( pos, len ) );
+						pos += len + 1; // skip string plus final '\0'
+						break;
+					}
+					case KOption.Kpaddalign: case KOption.Kpadding: case KOption.Knop:
+						n--; // undo increment
+						break;
+				}
+				pos += size;
+			}
+			lua.PushInteger( (long)pos + 1 ); // next position
+			return n + 1;
 		}
 
 	}

@@ -8,7 +8,7 @@
   </a>
 </p>
 
-> Cosmos.Executable.Lua is a Lua 5.2 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
+> Cosmos.Executable.Lua is a Lua 5.3 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
 
 ## Usage
 
@@ -16,7 +16,7 @@ Add the package to your kernel .csproj:
 
 ```xml
 <ItemGroup>
-    <PackageReference Include="Cosmos.Executable.Lua" Version="1.0.0" />
+    <PackageReference Include="Cosmos.Executable.Lua" Version="2.0.0" />
 </ItemGroup>
 ```
 
@@ -49,9 +49,20 @@ catch (LuaExitException e)
 
 A C# function raises a Lua error with `state.L_Error(...)`, or by throwing: a .NET exception becomes a Lua error that `pcall` catches.
 
+### Strings
+
+Lua strings hold bytes, as in C Lua: on the `ILuaState` API a Lua string is a .NET string with one character, `\0` to `\xFF`, per byte. `LuaInterpreter` takes and gives text, as UTF-8, and so do the console, file names and `os.getenv`; files give and take their bytes as they are, in text mode as in binary mode. So `#"é"` is 2, and the `utf8` library reads the bytes of UTF-8 text. A C# function converts text with `LuaText`:
+
+```csharp
+state.PushString(LuaText.Encode("héllo")); // the 6 bytes of "héllo"
+string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
+```
+
 ### Limitations
 
-The standard libraries are those of Lua 5.2, except `io.popen`. Lua strings are .NET strings: a character is a UTF-16 code unit, files opened in text mode are UTF-8, and files opened in binary mode (`"rb"`, `"wb"`) map each byte to one character. There is no `__gc` and no weak tables, so close the files you open. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
+The standard libraries are those of Lua 5.3 built with `LUA_COMPAT_5_2`, as the reference one is, so `bit32`, `math.pow` and the others are there, except `io.popen`. There is no `__gc` and no weak tables, so close the files you open: a write reaches the file at once, unless `file:setvbuf` asks for a buffer. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
+
+The tests run the official [Lua 5.3 test suite](https://www.lua.org/tests/) (lua-5.3.4-tests), but for `gc.lua` and `main.lua`, with the four lines these limitations break patched in `LuaTestSuiteTests.cs`.
 
 ## Authors
 
@@ -69,4 +80,4 @@ Feel free to check [issues page](https://github.com/CosmosOS/Cosmos.Executable.L
 
 Copyright © 2026 [CosmosOS](https://github.com/CosmosOS).
 
-This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).
+This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, and code ported from Lua 5.3, Copyright © 1994–2020 Lua.org, PUC-Rio, both under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).

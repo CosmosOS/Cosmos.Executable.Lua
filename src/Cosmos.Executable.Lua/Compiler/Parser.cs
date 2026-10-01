@@ -75,7 +75,8 @@ namespace Cosmos.Executable.Lua
 		VTRUE,
 		VFALSE,
 		VK,		/* info = index of constant in `k' */
-		VKNUM,	/* nval = numerical value */
+		VKFLT,	/* nval = numerical float value */
+		VKINT,	/* ival = numerical integer value */
 		VNONRELOC,	/* info = result register */
 		VLOCAL,	/* info = local register */
 		VUPVAL,       /* info = index of upvalue in 'upvalues' */
@@ -100,14 +101,22 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 	
+	// ORDER OPR: the arithmetic and bitwise operators in the order of
+	// their opcodes and of LuaOp
 	internal enum BinOpr
 	{
 		ADD,
 		SUB,
 		MUL,
-		DIV,
 		MOD,
 		POW,
+		DIV,
+		IDIV,
+		BAND,
+		BOR,
+		BXOR,
+		SHL,
+		SHR,
 		CONCAT,
 		EQ,
 		LT,
@@ -123,6 +132,7 @@ namespace Cosmos.Executable.Lua
 	internal enum UnOpr
 	{
 		MINUS,
+		BNOT,
 		NOT,
 		LEN,
 		NOUNOPR,
@@ -143,6 +153,7 @@ namespace Cosmos.Executable.Lua
 		public IndData Ind;
 
 		public double NumberValue;
+		public long IntValue;
 
 		public int ExitTrue;
 		public int ExitFalse;
@@ -156,6 +167,7 @@ namespace Cosmos.Executable.Lua
 			// this.Ind.Vt 		= e.Ind.Vt;
 			this.Ind 			= e.Ind;
 			this.NumberValue 	= e.NumberValue;
+			this.IntValue 		= e.IntValue;
 			this.ExitTrue 		= e.ExitTrue;
 			this.ExitFalse 		= e.ExitFalse;
 		}
@@ -566,6 +578,8 @@ namespace Cosmos.Executable.Lua
 					return UnOpr.NOT;
 				case (int)'-':
 					return UnOpr.MINUS;
+				case (int)'~':
+					return UnOpr.BNOT;
 				case (int)'#':
 					return UnOpr.LEN;
 				default:
@@ -580,9 +594,15 @@ namespace Cosmos.Executable.Lua
 				case (int)'+': return BinOpr.ADD;
 				case (int)'-': return BinOpr.SUB;
 				case (int)'*': return BinOpr.MUL;
-				case (int)'/': return BinOpr.DIV;
 				case (int)'%': return BinOpr.MOD;
 				case (int)'^': return BinOpr.POW;
+				case (int)'/': return BinOpr.DIV;
+				case (int)TK.IDIV: return BinOpr.IDIV;
+				case (int)'&': return BinOpr.BAND;
+				case (int)'|': return BinOpr.BOR;
+				case (int)'~': return BinOpr.BXOR;
+				case (int)TK.SHL: return BinOpr.SHL;
+				case (int)TK.SHR: return BinOpr.SHR;
 				case (int)TK.CONCAT: return BinOpr.CONCAT;
 				case (int)TK.NE: return BinOpr.NE;
 				case (int)TK.EQ: return BinOpr.EQ;
@@ -596,59 +616,31 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		// left and right priority of each binary operator, ORDER OPR
+		private static readonly int[,] Priority = {
+			{10, 10}, {10, 10},		/* '+' '-' */
+			{11, 11}, {11, 11},		/* '*' '%' */
+			{14, 13},				/* '^' (right associative) */
+			{11, 11}, {11, 11},		/* '/' '//' */
+			{6, 6}, {4, 4}, {5, 5},	/* '&' '|' '~' */
+			{7, 7}, {7, 7},			/* '<<' '>>' */
+			{9, 8},					/* '..' (right associative) */
+			{3, 3}, {3, 3}, {3, 3},	/* ==, <, <= */
+			{3, 3}, {3, 3}, {3, 3},	/* ~=, >, >= */
+			{2, 2}, {1, 1},			/* and, or */
+		};
+
 		private int GetBinOprLeftPrior( BinOpr opr )
 		{
-			switch( opr )
-			{
-				case BinOpr.ADD: return 6;
-				case BinOpr.SUB: return 6;
-				case BinOpr.MUL: return 7;
-				case BinOpr.DIV: return 7;
-				case BinOpr.MOD: return 7;
-				case BinOpr.POW: return 10;
-				case BinOpr.CONCAT: return 5;
-				case BinOpr.EQ: return 3;
-				case BinOpr.LT: return 3;
-				case BinOpr.LE: return 3;
-				case BinOpr.NE: return 3;
-				case BinOpr.GT: return 3;
-				case BinOpr.GE: return 3;
-				case BinOpr.AND: return 2;
-				case BinOpr.OR: return 1;
-				case BinOpr.NOBINOPR:
-					throw new Exception("GetBinOprLeftPrior(NOBINOPR)");
-				default:
-					throw new Exception("Unknown BinOpr");
-			}
+			return Priority[(int)opr, 0];
 		}
 
 		private int GetBinOprRightPrior( BinOpr opr )
 		{
-			switch( opr )
-			{
-				case BinOpr.ADD: return 6;
-				case BinOpr.SUB: return 6;
-				case BinOpr.MUL: return 7;
-				case BinOpr.DIV: return 7;
-				case BinOpr.MOD: return 7;
-				case BinOpr.POW: return 9;
-				case BinOpr.CONCAT: return 4;
-				case BinOpr.EQ: return 3;
-				case BinOpr.LT: return 3;
-				case BinOpr.LE: return 3;
-				case BinOpr.NE: return 3;
-				case BinOpr.GT: return 3;
-				case BinOpr.GE: return 3;
-				case BinOpr.AND: return 2;
-				case BinOpr.OR: return 1;
-				case BinOpr.NOBINOPR:
-					throw new Exception("GetBinOprRightPrior(NOBINOPR)");
-				default:
-					throw new Exception("Unknown BinOpr");
-			}
+			return Priority[(int)opr, 1];
 		}
 
-		private const int UnaryPrior = 8;
+		private const int UnaryPrior = 12; // priority for unary operators
 
 		// statlist -> { stat [';'] }
 		private void StatList()
@@ -737,7 +729,7 @@ namespace Cosmos.Executable.Lua
 			CheckRepeated( fs, ActiveLabels, label );
 			CheckNext( (int)TK.DBCOLON );
 
-			var desc = NewLebelEntry( label, line, fs.Pc );
+			var desc = NewLebelEntry( label, line, Coder.GetLabel( fs ) );
 			ActiveLabels.Add( desc );
 			SkipNoOpStat();
 			if( BlockFollow( false ) )
@@ -847,7 +839,7 @@ namespace Cosmos.Executable.Lua
 			}
 			else // default step = 1
 			{
-				Coder.CodeK( fs, fs.FreeReg, Coder.NumberK( fs, 1 ) );
+				Coder.CodeK( fs, fs.FreeReg, Coder.IntK( fs, 1 ) );
 				Coder.ReserveRegs( fs, 1 );
 			}
 			ForBody( save, line, 1, true );
@@ -1846,10 +1838,17 @@ namespace Cosmos.Executable.Lua
 			var t = Lexer.Token;
 			switch( t.TokenType )
 			{
-				case (int)TK.NUMBER: {
+				case (int)TK.FLT: {
 					var nt = t as NumberToken;
-					InitExp( e, ExpKind.VKNUM, 0 );
+					InitExp( e, ExpKind.VKFLT, 0 );
 					e.NumberValue = nt.SemInfo;
+					break;
+				}
+
+				case (int)TK.INT: {
+					var it = t as IntegerToken;
+					InitExp( e, ExpKind.VKINT, 0 );
+					e.IntValue = it.SemInfo;
 					break;
 				}
 

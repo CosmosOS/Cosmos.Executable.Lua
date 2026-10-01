@@ -26,7 +26,8 @@ namespace Cosmos.Executable.Lua
 
 	internal partial class LuaState
 	{
-		private const int MAXTAGLOOP = 100;
+		// limit for table tag-method chains (to avoid loops)
+		private const int MAXTAGLOOP = 2000;
 
 		private struct ExecuteEnvironment
 		{
@@ -284,11 +285,13 @@ newframe:
 					{
 						var rkb = env.RKB;
 						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber())
-							{ ra.V.SetNValue(rkb.V.NValue + rkc.V.NValue); }
+						double nb, nc;
+						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
+							{ ra.V.SetIValue(unchecked(rkb.V.IValue() + rkc.V.IValue())); }
+						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
+							{ ra.V.SetFltValue(nb + nc); }
 						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_ADD); }
-
+							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_ADD); }
 						env.Base = ci.BaseIndex;
 						break;
 					}
@@ -297,10 +300,13 @@ newframe:
 					{
 						var rkb = env.RKB;
 						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber())
-							{ ra.V.SetNValue(rkb.V.NValue - rkc.V.NValue); }
+						double nb, nc;
+						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
+							{ ra.V.SetIValue(unchecked(rkb.V.IValue() - rkc.V.IValue())); }
+						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
+							{ ra.V.SetFltValue(nb - nc); }
 						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_SUB); }
+							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_SUB); }
 						env.Base = ci.BaseIndex;
 						break;
 					}
@@ -309,49 +315,36 @@ newframe:
 					{
 						var rkb = env.RKB;
 						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber())
-							{ ra.V.SetNValue(rkb.V.NValue * rkc.V.NValue); }
+						double nb, nc;
+						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
+							{ ra.V.SetIValue(unchecked(rkb.V.IValue() * rkc.V.IValue())); }
+						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
+							{ ra.V.SetFltValue(nb * nc); }
 						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_MUL); }
+							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_MUL); }
 						env.Base = ci.BaseIndex;
 						break;
 					}
 
-					case OpCode.OP_DIV:
+					case OpCode.OP_DIV: // float division (always with floats)
 					{
 						var rkb = env.RKB;
 						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber())
-							{ ra.V.SetNValue(rkb.V.NValue / rkc.V.NValue); }
+						double nb, nc;
+						if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
+							{ ra.V.SetFltValue(nb / nc); }
 						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_DIV); }
+							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_DIV); }
 						env.Base = ci.BaseIndex;
 						break;
 					}
 
-					case OpCode.OP_MOD:
+					case OpCode.OP_MOD: case OpCode.OP_POW: case OpCode.OP_IDIV:
+					case OpCode.OP_BAND: case OpCode.OP_BOR: case OpCode.OP_BXOR:
+					case OpCode.OP_SHL: case OpCode.OP_SHR:
 					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber()) {
-							var v1 = rkb.V.NValue;
-							var v2 = rkc.V.NValue;
-							ra.V.SetNValue(v1 - Math.Floor(v1/v2)*v2);
-						}
-						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_MOD); }
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_POW:
-					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						if(rkb.V.TtIsNumber() && rkc.V.TtIsNumber())
-							{ ra.V.SetNValue(Math.Pow(rkb.V.NValue, rkc.V.NValue)); }
-						else
-							{ V_Arith(ra, rkb, rkc, TMS.TM_POW); }
+						V_Arith( ra, env.RKB, env.RKC,
+							(TMS)((int)TMS.TM_ADD + (int)(i.GET_OPCODE() - OpCode.OP_ADD)) );
 						env.Base = ci.BaseIndex;
 						break;
 					}
@@ -359,13 +352,22 @@ newframe:
 					case OpCode.OP_UNM:
 					{
 						var rb = env.RB;
-						if(rb.V.TtIsNumber()) {
-							ra.V.SetNValue(-rb.V.NValue);
-						}
+						if(rb.V.TtIsInteger())
+							{ ra.V.SetIValue(unchecked(0 - rb.V.IValue())); }
+						else if(rb.V.TtIsFloat())
+							{ ra.V.SetFltValue(-rb.V.FltValue); }
 						else {
 							V_Arith(ra, rb, rb, TMS.TM_UNM);
 							env.Base = ci.BaseIndex;
 						}
+						break;
+					}
+
+					case OpCode.OP_BNOT:
+					{
+						var rb = env.RB;
+						V_Arith(ra, rb, rb, TMS.TM_BNOT);
+						env.Base = ci.BaseIndex;
 						break;
 					}
 
@@ -555,9 +557,8 @@ newframe:
 					case OpCode.OP_RETURN:
 					{
 						int b = i.GETARG_B();
-						if( b != 0 ) { Top = Stack[ra.Index + b - 1]; }
 						if( cl.Proto.P.Count > 0 ) { F_Close(Stack[env.Base]); }
-						b = D_PosCall( ra.Index );
+						b = D_PosCall( ra.Index, b != 0 ? b - 1 : Top.Index - ra.Index );
 						if( (ci.CallStatus & CallStatus.CIST_REENTRY) == 0 )
 						{
 							return;
@@ -575,46 +576,63 @@ newframe:
 						var ra1 = Stack[ra.Index + 1];
 						var ra2 = Stack[ra.Index + 2];
 						var ra3 = Stack[ra.Index + 3];
-						
-						var step 	= ra2.V.NValue;
-						var idx 	= ra.V.NValue + step;	// increment index
-						var limit 	= ra1.V.NValue;
 
-						if( (0 < step) ? idx <= limit
-									   : limit <= idx )
+						if( ra.V.TtIsInteger() ) // integer loop?
 						{
-							ci.SavedPc.Index += i.GETARG_sBx(); // jump back
-							ra.V.SetNValue(idx);// updateinternal index...
-							ra3.V.SetNValue(idx);// ... and external index
+							long step = ra2.V.IValue();
+							long idx = unchecked(ra.V.IValue() + step); // increment index
+							long limit = ra1.V.IValue();
+							if( (0 < step) ? idx <= limit : limit <= idx )
+							{
+								ci.SavedPc.Index += i.GETARG_sBx(); // jump back
+								ra.V.SetIValue(idx); // update internal index...
+								ra3.V.SetIValue(idx); // ...and external index
+							}
 						}
-
+						else // floating loop
+						{
+							double step = ra2.V.FltValue;
+							double idx = ra.V.FltValue + step; // increment index
+							double limit = ra1.V.FltValue;
+							if( (0 < step) ? idx <= limit : limit <= idx )
+							{
+								ci.SavedPc.Index += i.GETARG_sBx(); // jump back
+								ra.V.SetFltValue(idx); // update internal index...
+								ra3.V.SetFltValue(idx); // ...and external index
+							}
+						}
 						break;
 					}
 
 					case OpCode.OP_FORPREP:
 					{
-						var init = new TValue();
-						var limit = new TValue();
-						var step = new TValue();
-
-						var ra1 = Stack[ra.Index + 1];
-						var ra2 = Stack[ra.Index + 2];
-
-						// WHY: why limit is not used ?
-
-						if(!V_ToNumber(ra, ref init))
-							G_RunError("'for' initial value must be a number");
-						if(!V_ToNumber(ra1, ref limit))
-							G_RunError("'for' limit must be a number");
-						if(!V_ToNumber(ra2, ref step))
-							G_RunError("'for' step must be a number");
-
-						// numbers from here on, for OP_FORLOOP: for i="10","1","-2"
-						ra1.V.SetNValue(limit.NValue);
-						ra2.V.SetNValue(step.NValue);
-						ra.V.SetNValue(init.NValue - step.NValue);
+						var init = ra;
+						var plimit = Stack[ra.Index + 1];
+						var pstep = Stack[ra.Index + 2];
+						long ilimit;
+						bool stopnow;
+						if( init.V.TtIsInteger() && pstep.V.TtIsInteger() &&
+							ForLimit( ref plimit.V, out ilimit, pstep.V.IValue(), out stopnow ) )
+						{
+							// all values are integer
+							long initv = stopnow ? 0 : init.V.IValue();
+							plimit.V.SetIValue(ilimit);
+							init.V.SetIValue(unchecked(initv - pstep.V.IValue()));
+						}
+						else // try making all control values floats
+						{
+							double ninit, nlimit, nstep;
+							if( !V_ToNumber(ref plimit.V, out nlimit) )
+								G_RunError("'for' limit must be a number");
+							plimit.V.SetFltValue(nlimit);
+							if( !V_ToNumber(ref pstep.V, out nstep) )
+								G_RunError("'for' step must be a number");
+							pstep.V.SetFltValue(nstep);
+							if( !V_ToNumber(ref init.V, out ninit) )
+								G_RunError("'for' initial value must be a number");
+							init.V.SetFltValue(ninit - nstep);
+						}
 						ci.SavedPc.Index += i.GETARG_sBx();
-
 						break;
 					}
 
@@ -679,7 +697,7 @@ l_tforloop:
 						var tbl = ra.V.HValue();
 						Utl.Assert( tbl != null );
 
-						int last = ((c-1) * LuaDef.LFIELDS_PER_FLUSH) + n;
+						long last = ((long)(c-1) * LuaDef.LFIELDS_PER_FLUSH) + n;
 						int rai = ra.Index;
 						for(; n>0; --n) {
 							tbl.SetInt(last--, ref Stack[rai+n].V);
@@ -808,7 +826,7 @@ l_tforloop:
 
 				t = tmObj;
 			}
-			G_RunError( "loop in gettable" );
+			G_RunError( "'__index' chain too long; possible loop" );
 		}
 
 		private void V_SetTable(StkId t, StkId key, StkId val)
@@ -845,11 +863,11 @@ l_tforloop:
 
 				t = tmObj;
 			}
-			G_RunError( "loop in settable" );
+			G_RunError( "'__newindex' chain too long; possible loop" );
 		}
 
 		// getcached: the last closure of `p' if it has the upvalues a new one
-		// would get, as Lua 5.2 reuses it (functions alike are then equal)
+		// would get, as Lua 5.3 reuses it (functions alike are then equal)
 		private LuaLClosureValue GetCached( LuaProto p, LuaUpvalue[] encup, int stackBase )
 		{
 			var c = p.Cache;
@@ -901,13 +919,13 @@ l_tforloop:
 				tmObj = FastTM( rbt.MetaTable, TMS.TM_LEN );
 				if( tmObj != null )
 					goto calltm;
-				ra.V.SetNValue(rbt.Length);
+				ra.V.SetIValue(rbt.Length);
 				return;
 			}
 
 			if( rb.V.TtIsString() )
 			{
-				ra.V.SetNValue(rb.V.SValue().Length);
+				ra.V.SetIValue(rb.V.SValue().Length);
 				return;
 			}
 
@@ -926,42 +944,34 @@ calltm:
 			do
 			{
 				var top = Top;
-				int n = 2;
+				int n = 2; // number of elements handled in this pass (at least 2)
 				var lhs = Stack[top.Index - 2];
 				var rhs = Stack[top.Index - 1];
 				if(!(lhs.V.TtIsString() || lhs.V.TtIsNumber()) || !ToString(ref rhs.V))
 				{
-					if( !CallBinTM( lhs, rhs, lhs, TMS.TM_CONCAT ) )
-						G_ConcatError( lhs, rhs );
+					T_TryBinTM( lhs, rhs, lhs, TMS.TM_CONCAT );
 				}
-				else if(rhs.V.SValue().Length == 0) {
-					ToString(ref lhs.V);
+				else if(rhs.V.SValue().Length == 0) { // second operand is empty?
+					ToString(ref lhs.V); // result is first operand
 				}
 				else if(lhs.V.TtIsString() && lhs.V.SValue().Length == 0) {
-					lhs.V.SetObj(ref rhs.V);
+					lhs.V.SetObj(ref rhs.V); // result is second operand
 				}
 				else
 				{
-					StringBuilder sb = new StringBuilder();
-					n = 0;
-					for( ; n<total; ++n )
-					{
-						var cur = Stack[top.Index-(n+1)];
+					// at least two non-empty string values; get as many as possible
+					for( n = 1; n < total && ToString(ref Stack[top.Index-n-1].V); ++n ) { }
 
-						if(cur.V.TtIsString())
-							sb.Insert(0, cur.V.SValue());
-						else if(cur.V.TtIsNumber())
-							sb.Insert(0, LuaNumber.ToString(cur.V.NValue));
-						else
-							break;
-					}
+					StringBuilder sb = new StringBuilder();
+					for( int k = n; k >= 1; --k )
+						sb.Append( Stack[top.Index-k].V.SValue() );
 
 					var dest = Stack[top.Index - n];
 					dest.V.SetSValue(sb.ToString());
 				}
-				total -= n-1;
-				Top = Stack[Top.Index - (n-1)];
-			} while( total > 1 );
+				total -= n-1; // got 'n' strings to create 1 new
+				Top = Stack[Top.Index - (n-1)]; // popped 'n' strings and pushed one
+			} while( total > 1 ); // repeat until only 1 result left
 		}
 
 		private void V_DoJump( CallInfo ci, Instruction i, int e )
@@ -978,48 +988,137 @@ calltm:
 			V_DoJump( ci, i, 1 );
 		}
 
-		private bool V_ToNumber( StkId obj, ref TValue n )
+		// luaV_tonumber_: a number as a float, from an integer, a float or a
+		// string that is a numeral
+		internal static bool V_ToNumber( ref TValue obj, out double n )
 		{
-			if( obj.V.TtIsNumber() ) {
-				n.SetNValue( obj.V.NValue );
+			if( obj.TtIsFloat() ) {
+				n = obj.FltValue;
 				return true;
 			}
-			if( obj.V.TtIsString() ) {
-				double val;
-				if( O_Str2Decimal(obj.V.SValue(), out val) ) {
-					n.SetNValue( val );
-					return true;
-				}
+			if( obj.TtIsInteger() ) {
+				n = (double)obj.IValue();
+				return true;
 			}
-
+			TValue v;
+			if( obj.TtIsString() && O_Str2Num( obj.SValue(), out v ) ) {
+				n = v.NValue(); // convert result of 'O_Str2Num' to a float
+				return true;
+			}
+			n = 0.0;
 			return false;
 		}
 
-		private bool V_ToString(ref TValue v)
+		// luaV_tointeger: a number as an integer, rounding a float as 'mode'
+		// says: 0 accepts only integral values, 1 takes the floor, 2 the ceil
+		internal static bool V_ToInteger( ref TValue obj, out long p, int mode )
 		{
-			if(!v.TtIsNumber()) { return false; }
+			if( obj.TtIsInteger() ) {
+				p = obj.IValue();
+				return true;
+			}
+			if( obj.TtIsFloat() )
+				return FloatToInteger( obj.FltValue, out p, mode );
+			TValue v;
+			if( obj.TtIsString() && O_Str2Num( obj.SValue(), out v ) )
+				return V_ToInteger( ref v, out p, mode );
+			p = 0;
+			return false;
+		}
 
-			v.SetSValue(LuaNumber.ToString(v.NValue));
+		internal static bool FloatToInteger( double n, out long p, int mode )
+		{
+			double f = Math.Floor( n );
+			if( n != f ) { // not an integral value?
+				if( mode == 0 ) { p = 0; return false; } // fails if mode demands integral value
+				else if( mode > 1 ) // needs ceil?
+					f += 1; // convert floor to ceil (remember: n != f)
+			}
+			return NumberToInteger( f, out p );
+		}
+
+		// lua_numbertointeger: an integral float in the range of integers
+		internal static bool NumberToInteger( double n, out long p )
+		{
+			if( n >= (double)LuaConf.LUA_MININTEGER && n < -(double)LuaConf.LUA_MININTEGER ) {
+				p = (long)n;
+				return true;
+			}
+			p = 0;
+			return false;
+		}
+
+		// forlimit: a 'for' limit as an integer, keeping what the loop does
+		private static bool ForLimit( ref TValue obj, out long p, long step, out bool stopnow )
+		{
+			stopnow = false; // usually, let loops run
+			if( !V_ToInteger( ref obj, out p, (step < 0 ? 2 : 1) ) ) { // not fit in integer?
+				double n; // try to convert to float
+				if( !V_ToNumber( ref obj, out n ) ) // cannot convert to float?
+					return false; // not a number
+				if( 0 < n ) { // if true, float is larger than max integer
+					p = LuaConf.LUA_MAXINTEGER;
+					if( step < 0 ) stopnow = true;
+				}
+				else { // float is smaller than min integer
+					p = LuaConf.LUA_MININTEGER;
+					if( step >= 0 ) stopnow = true;
+				}
+			}
 			return true;
 		}
 
-		private LuaOp TMS2OP( TMS op )
+		// a number converted to the string Lua writes for it, in place
+		private static bool V_ToString(ref TValue v)
 		{
-			switch( op )
-			{
-				case TMS.TM_ADD: return LuaOp.LUA_OPADD;
-				case TMS.TM_SUB: return LuaOp.LUA_OPSUB;
-				case TMS.TM_MUL: return LuaOp.LUA_OPMUL;
-				case TMS.TM_DIV: return LuaOp.LUA_OPDIV;
-				case TMS.TM_MOD: return LuaOp.LUA_OPMOD;
-				case TMS.TM_POW: return LuaOp.LUA_OPPOW;
-				case TMS.TM_UNM: return LuaOp.LUA_OPUNM;
+			if( v.TtIsInteger() )
+				v.SetSValue(LuaNumber.ToString(v.IValue()));
+			else if( v.TtIsFloat() )
+				v.SetSValue(LuaNumber.ToString(v.FltValue));
+			else
+				return false;
+			return true;
+		}
 
-				// case TMS.TM_EQ:	return LuaOp.LUA_OPEQ;
-				// case TMS.TM_LT: return LuaOp.LUA_OPLT;
-				// case TMS.TM_LE: return LuaOp.LUA_OPLE;
+		// luaV_div: integer division, rounding towards minus infinity
+		internal static long V_Div( LuaState L, long m, long n )
+		{
+			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
+				if( n == 0 )
+					L.G_RunError( "attempt to divide by zero" );
+				return unchecked(0 - m); // n==-1; avoid overflow with 0x80000...//-1
+			}
+			long q = m / n; // perform C division
+			if( (m ^ n) < 0 && m % n != 0 ) // 'm/n' would be negative non-integer?
+				q -= 1; // correct result for different rounding
+			return q;
+		}
 
-				default: throw new System.NotImplementedException();
+		// luaV_mod: integer modulus, of the sign of the divisor
+		internal static long V_Mod( LuaState L, long m, long n )
+		{
+			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
+				if( n == 0 )
+					L.G_RunError( "attempt to perform 'n%0'" );
+				return 0; // m % -1 == 0; avoid overflow with 0x80000...%-1
+			}
+			long r = m % n;
+			if( r != 0 && (m ^ n) < 0 ) // 'm/n' would be non-integer negative?
+				r += n; // correct result for different rounding
+			return r;
+		}
+
+		// luaV_shiftl: shift left, or right for a negative 'y', logical
+		internal static long V_ShiftL( long x, long y )
+		{
+			const int NBITS = 64;
+			if( y < 0 ) { // shift right?
+				if( y <= -NBITS ) return 0;
+				return (long)((ulong)x >> (int)-y);
+			}
+			else { // shift left
+				if( y >= NBITS ) return 0;
+				return x << (int)y;
 			}
 		}
 
@@ -1053,18 +1152,41 @@ calltm:
 			return true;
 		}
 
-		private void V_Arith( StkId ra, StkId rb, StkId rc, TMS op )
+		// an arithmetic or bitwise operation, by its metamethod if an operand
+		// is not a number (ORDER TM follows ORDER OP from TM_ADD)
+		private void V_Arith( StkId ra, StkId rb, StkId rc, TMS tm )
 		{
-			var nb = new TValue();
-			var nc = new TValue();
-			if(V_ToNumber(rb, ref nb) && V_ToNumber(rc, ref nc))
+			var res = new TValue();
+			if( O_RawArith( this, (LuaOp)(tm - TMS.TM_ADD), ref rb.V, ref rc.V, ref res ) )
+				ra.V.SetObj( ref res );
+			else
+				T_TryBinTM( rb, rc, ra, tm );
+		}
+
+		// luaT_trybinTM: the metamethod of a binary operation, or the error
+		// of an operand it cannot apply to
+		private void T_TryBinTM( StkId p1, StkId p2, StkId res, TMS tm )
+		{
+			if( CallBinTM( p1, p2, res, tm ) )
+				return;
+
+			switch( tm )
 			{
-				var res = O_Arith( TMS2OP(op), nb.NValue, nc.NValue );
-				ra.V.SetNValue( res );
-			}
-			else if( !CallBinTM( rb, rc, ra, op ) )
-			{
-				G_ArithError( rb, rc );
+				case TMS.TM_CONCAT:
+					G_ConcatError( p1, p2 );
+					break;
+				case TMS.TM_BAND: case TMS.TM_BOR: case TMS.TM_BXOR:
+				case TMS.TM_SHL: case TMS.TM_SHR: case TMS.TM_BNOT: {
+					double dummy;
+					if( V_ToNumber( ref p1.V, out dummy ) && V_ToNumber( ref p2.V, out dummy ) )
+						G_ToIntError( p1, p2 );
+					else
+						G_OpIntError( p1, p2, "perform bitwise operation on" );
+					break;
+				}
+				default:
+					G_OpIntError( p1, p2, "perform arithmetic on" );
+					break;
 			}
 		}
 
@@ -1080,11 +1202,79 @@ calltm:
 			return !IsFalse(ref Top.V);
 		}
 
+		// LTintfloat: whether integer 'i' is less than float 'f'; compared as
+		// floats if 'i' has an exact representation as a float, else as
+		// integers if 'f' is in their range
+		private static bool LTIntFloat( long i, double f )
+		{
+			if( !IntFitsFloat( i ) ) {
+				if( f >= -(double)LuaConf.LUA_MININTEGER ) // -minint == maxint + 1
+					return true; // f >= maxint + 1 > i
+				else if( f > (double)LuaConf.LUA_MININTEGER ) // minint < f <= maxint ?
+					return i < (long)f; // compare them as integers
+				else // f <= minint <= i (or 'f' is NaN)  -->  not(i < f)
+					return false;
+			}
+			return (double)i < f; // compare them as floats
+		}
+
+		private static bool LEIntFloat( long i, double f )
+		{
+			if( !IntFitsFloat( i ) ) {
+				if( f >= -(double)LuaConf.LUA_MININTEGER ) // -minint == maxint + 1
+					return true; // f >= maxint + 1 > i
+				else if( f >= (double)LuaConf.LUA_MININTEGER ) // minint <= f <= maxint ?
+					return i <= (long)f; // compare them as integers
+				else // f < minint <= i (or 'f' is NaN)  -->  not(i <= f)
+					return false;
+			}
+			return (double)i <= f; // compare them as floats
+		}
+
+		// l_intfitsf: whether an integer converts to a float without rounding
+		private static bool IntFitsFloat( long i )
+		{
+			const long NBM = 1L << 53;
+			return -NBM <= i && i <= NBM;
+		}
+
+		private static bool LTNum( ref TValue l, ref TValue r )
+		{
+			if( l.TtIsInteger() ) {
+				long li = l.IValue();
+				if( r.TtIsInteger() )
+					return li < r.IValue(); // both are integers
+				return LTIntFloat( li, r.FltValue ); // 'l' is int and 'r' is float
+			}
+			double lf = l.FltValue; // 'l' must be float
+			if( r.TtIsFloat() )
+				return lf < r.FltValue; // both are float
+			if( double.IsNaN( lf ) ) // 'r' is int and 'l' is float
+				return false; // NaN < i is always false
+			return !LEIntFloat( r.IValue(), lf ); // not (r <= l) ?
+		}
+
+		private static bool LENum( ref TValue l, ref TValue r )
+		{
+			if( l.TtIsInteger() ) {
+				long li = l.IValue();
+				if( r.TtIsInteger() )
+					return li <= r.IValue(); // both are integers
+				return LEIntFloat( li, r.FltValue ); // 'l' is int and 'r' is float
+			}
+			double lf = l.FltValue; // 'l' must be float
+			if( r.TtIsFloat() )
+				return lf <= r.FltValue; // both are float
+			if( double.IsNaN( lf ) ) // 'r' is int and 'l' is float
+				return false; // NaN <= i is always false
+			return !LTIntFloat( r.IValue(), lf ); // not (r < l) ?
+		}
+
 		private bool V_LessThan( StkId lhs, StkId rhs )
 		{
 			// compare number
 			if(lhs.V.TtIsNumber() && rhs.V.TtIsNumber()) {
-				return lhs.V.NValue < rhs.V.NValue;
+				return LTNum(ref lhs.V, ref rhs.V);
 			}
 
 			// compare string
@@ -1106,7 +1296,7 @@ calltm:
 		{
 			// compare number
 			if(lhs.V.TtIsNumber() && rhs.V.TtIsNumber()) {
-				return lhs.V.NValue <= rhs.V.NValue;
+				return LENum(ref lhs.V, ref rhs.V);
 			}
 
 			// compare string
@@ -1121,12 +1311,12 @@ calltm:
 				return res;
 
 			// else try `lt': a <= b is not (b < a)
+			CI.CallStatus |= CallStatus.CIST_LEQ; // mark it is doing 'lt' for 'le'
 			res = CallOrderTM( rhs, lhs, TMS.TM_LT, out error );
-			if( !error )
-				return !res;
-
-			G_OrderError( lhs, rhs );
-			return false;
+			CI.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
+			if( error )
+				G_OrderError( lhs, rhs );
+			return !res; // result is negated
 		}
 
 		private void V_FinishOp()
@@ -1138,6 +1328,8 @@ calltm:
 			switch( op )
 			{
 				case OpCode.OP_ADD: case OpCode.OP_SUB: case OpCode.OP_MUL: case OpCode.OP_DIV:
+				case OpCode.OP_IDIV: case OpCode.OP_BAND: case OpCode.OP_BOR: case OpCode.OP_BXOR:
+				case OpCode.OP_SHL: case OpCode.OP_SHR: case OpCode.OP_BNOT:
 				case OpCode.OP_MOD: case OpCode.OP_POW: case OpCode.OP_UNM: case OpCode.OP_LEN:
 				case OpCode.OP_GETTABUP: case OpCode.OP_GETTABLE: case OpCode.OP_SELF:
 				{
@@ -1151,18 +1343,16 @@ calltm:
 				{
 					bool res = !IsFalse(ref Stack[Top.Index-1].V);
 					Top = Stack[Top.Index-1];
-					// metamethod should not be called when operand is K
-					Utl.Assert( !Instruction.ISK( i.GETARG_B() ) );
-					if( op == OpCode.OP_LE && // `<=' using `<' instead?
-						T_GetTMByObj(ref Stack[stackBase + i.GETARG_B()].V, TMS.TM_LE ).V.TtIsNil() )
+					var ci = BaseCI[ciIndex];
+					if( (ci.CallStatus & CallStatus.CIST_LEQ) != 0 ) // `<=' using `<' instead?
 					{
-						res = !res; // invert result
+						Utl.Assert( op == OpCode.OP_LE );
+						ci.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
+						res = !res; // negate result
 					}
 
-					var ci = BaseCI[ciIndex];
 					Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_JMP );
-					if( (res ? 1 : 0) != i.GETARG_A() )
-					if( (i.GETARG_A() == 0) == res ) // condition failed?
+					if( (res ? 1 : 0) != i.GETARG_A() ) // condition failed?
 					{
 						ci.SavedPc.Index++; // skip jump instruction
 					}
@@ -1218,41 +1408,36 @@ calltm:
 
 		internal bool V_RawEqualObj( ref TValue t1, ref TValue t2 )
 		{
-			return (t1.Tt == t2.Tt) && V_EqualObject( ref t1, ref t2, true );
+			return V_EqualObject( ref t1, ref t2, true );
 		}
 
 		private bool EqualObj( ref TValue t1, ref TValue t2, bool rawEq )
 		{
-			return (t1.Tt == t2.Tt) && V_EqualObject( ref t1, ref t2, rawEq );
+			return V_EqualObject( ref t1, ref t2, rawEq );
 		}
 
-		private StkId GetEqualTM( LuaTable mt1, LuaTable mt2, TMS tm )
-		{
-			var tm1 = FastTM( mt1, tm );
-			if(tm1 == null) // no metamethod
-				return null;
-			if(mt1 == mt2) // same metatables => same metamethods
-				return tm1;
-			var tm2 = FastTM( mt2, tm );
-			if(tm2 == null) // no metamethod
-				return null;
-			if(V_RawEqualObj(ref tm1.V, ref tm2.V)) // same metamethods?
-				return tm1;
-			return null;
-		}
-
+		// luaV_equalobj: 't1 == t2', by '__eq' of either operand unless raw
 		private bool V_EqualObject( ref TValue t1, ref TValue t2, bool rawEq )
 		{
-			Utl.Assert( t1.Tt == t2.Tt );
+			if( t1.Tt != t2.Tt ) // not the same variant?
+			{
+				if( t1.BaseTt() != t2.BaseTt() || t1.BaseTt() != (int)LuaType.LUA_TNUMBER )
+					return false; // only numbers can be equal with different variants
+				// two numbers with different variants: compare them as integers
+				long i1, i2;
+				return V_ToInteger( ref t1, out i1, 0 ) && V_ToInteger( ref t2, out i2, 0 ) && i1 == i2;
+			}
+
+			// values have same type and same variant
 			StkId tm = null;
 			switch( t1.Tt )
 			{
 				case (int)LuaType.LUA_TNIL:
 					return true;
-				case (int)LuaType.LUA_TNUMBER:
-					return t1.NValue == t2.NValue;
-				case (int)LuaType.LUA_TUINT64:
-					return t1.UInt64Value == t2.UInt64Value;
+				case TValue.LUA_TNUMINT:
+					return t1.IValue() == t2.IValue();
+				case TValue.LUA_TNUMFLT:
+					return t1.FltValue == t2.FltValue;
 				case (int)LuaType.LUA_TBOOLEAN:
 					return t1.BValue() == t2.BValue();
 				case (int)LuaType.LUA_TSTRING:
@@ -1265,7 +1450,9 @@ calltm:
 						return true;
 					if(rawEq)
 						return false;
-					tm = GetEqualTM( ud1.MetaTable, ud2.MetaTable, TMS.TM_EQ );
+					tm = FastTM( ud1.MetaTable, TMS.TM_EQ );
+					if( tm == null )
+						tm = FastTM( ud2.MetaTable, TMS.TM_EQ );
 					break;
 				}
 				case (int)LuaType.LUA_TTABLE:
@@ -1276,14 +1463,16 @@ calltm:
 						return true;
 					if( rawEq )
 						return false;
-					tm = GetEqualTM( tbl1.MetaTable, tbl2.MetaTable, TMS.TM_EQ );
+					tm = FastTM( tbl1.MetaTable, TMS.TM_EQ );
+					if( tm == null )
+						tm = FastTM( tbl2.MetaTable, TMS.TM_EQ );
 					break;
 				}
 				default:
 					return TValue.SameObject(t1.OValue, t2.OValue);
 			}
 			if( tm == null ) // no TM?
-				return false;
+				return false; // objects are different
 			CallTM(ref tm.V, ref t1, ref t2, Top, true ); // call TM
 			return !IsFalse(ref Top.V);
 		}

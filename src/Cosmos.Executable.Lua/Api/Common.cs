@@ -23,6 +23,10 @@ namespace Cosmos.Executable.Lua
 		public const int LUAI_FIRSTPSEUDOIDX	= (-LUAI_MAXSTACK-1000);
 
 		public const string LUA_SIGNATURE = "\u001bLua";
+
+		// lua_Integer is a long, as in the reference build
+		public const long LUA_MAXINTEGER = long.MaxValue;
+		public const long LUA_MININTEGER = long.MinValue;
 		public static string LUA_DIRSEP {
 			get { return System.IO.Path.DirectorySeparatorChar.ToString(); }
 		}
@@ -60,7 +64,7 @@ namespace Cosmos.Executable.Lua
 		public const int LUA_IDSIZE				= 60;
 
 		public const string LUA_VERSION_MAJOR	= "5";
-		public const string LUA_VERSION_MINOR	= "2";
+		public const string LUA_VERSION_MINOR	= "3";
 		public const string LUA_VERSION = "Lua " + LUA_VERSION_MAJOR + "." + LUA_VERSION_MINOR;
 
 		public const string LUA_ENV = "_ENV";
@@ -99,9 +103,7 @@ namespace Cosmos.Executable.Lua
 		LUA_TUSERDATA = 7,
 		LUA_TTHREAD = 8,
 
-		LUA_TUINT64 = 9,
-
-		LUA_NUMTAGS = 10,
+		LUA_NUMTAGS = 9,
 
 		LUA_TPROTO,
 		LUA_TUPVAL,
@@ -116,7 +118,6 @@ namespace Cosmos.Executable.Lua
 
 	public enum ThreadStatus
 	{
-		LUA_RESUME_ERROR = -1,
 		LUA_OK			 = 0,
 		LUA_YIELD		 = 1,
 		LUA_ERRRUN		 = 2,
@@ -128,16 +129,23 @@ namespace Cosmos.Executable.Lua
 		LUA_ERRFILE		 = 7,
 	}
 
-	/* ORDER TM */
-	internal enum LuaOp
+	/* ORDER TM, ORDER OP */
+	public enum LuaOp
 	{
-		LUA_OPADD	= 0,
+		LUA_OPADD	= 0,	/* ORDER TM, ORDER OP */
 		LUA_OPSUB	= 1,
 		LUA_OPMUL	= 2,
-		LUA_OPDIV	= 3,
-		LUA_OPMOD	= 4,
-		LUA_OPPOW	= 5,
-		LUA_OPUNM	= 6,
+		LUA_OPMOD	= 3,
+		LUA_OPPOW	= 4,
+		LUA_OPDIV	= 5,
+		LUA_OPIDIV	= 6,
+		LUA_OPBAND	= 7,
+		LUA_OPBOR	= 8,
+		LUA_OPBXOR	= 9,
+		LUA_OPSHL	= 10,
+		LUA_OPSHR	= 11,
+		LUA_OPUNM	= 12,
+		LUA_OPBNOT	= 13,
 	}
 
 	public enum LuaEq

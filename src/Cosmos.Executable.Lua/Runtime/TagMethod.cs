@@ -13,14 +13,21 @@ namespace Cosmos.Executable.Lua
 		TM_GC,
 		TM_MODE,
 		TM_LEN,
-		TM_EQ,
-		TM_ADD,
+		TM_EQ,	/* last tag method with fast access */
+		TM_ADD,	/* ORDER OP */
 		TM_SUB,
 		TM_MUL,
-		TM_DIV,
 		TM_MOD,
 		TM_POW,
+		TM_DIV,
+		TM_IDIV,
+		TM_BAND,
+		TM_BOR,
+		TM_BXOR,
+		TM_SHL,
+		TM_SHR,
 		TM_UNM,
+		TM_BNOT,
 		TM_LT,
 		TM_LE,
 		TM_CONCAT,
@@ -30,29 +37,38 @@ namespace Cosmos.Executable.Lua
 
 	internal partial class LuaState
 	{
+		// luaT_eventname, ORDER TM
+		private static readonly string[] TagMethodNames = {
+			"__index", "__newindex",
+			"__gc", "__mode", "__len", "__eq",
+			"__add", "__sub", "__mul", "__mod", "__pow",
+			"__div", "__idiv",
+			"__band", "__bor", "__bxor", "__shl", "__shr",
+			"__unm", "__bnot", "__lt", "__le",
+			"__concat", "__call",
+		};
+
 		private string GetTagMethodName( TMS tm )
 		{
-			switch( tm )
+			return TagMethodNames[(int)tm];
+		}
+
+		// luaT_objtypename: the type a message names, the '__name' of the
+		// metatable of a table or a userdata if it is a string
+		internal string ObjTypeName( ref TValue o )
+		{
+			LuaTable mt = null;
+			if( o.TtIsTable() )
+				mt = o.HValue().MetaTable;
+			else if( o.Tt == (int)LuaType.LUA_TUSERDATA )
+				mt = o.RawUValue().MetaTable;
+			if( mt != null )
 			{
-				case TMS.TM_INDEX: 		return "__index";
-				case TMS.TM_NEWINDEX: 	return "__newindex";
-				case TMS.TM_GC: 		return "__gc";
-				case TMS.TM_MODE: 		return "__mode";
-				case TMS.TM_LEN: 		return "__len";
-				case TMS.TM_EQ: 		return "__eq";
-				case TMS.TM_ADD: 		return "__add";
-				case TMS.TM_SUB: 		return "__sub";
-				case TMS.TM_MUL: 		return "__mul";
-				case TMS.TM_DIV: 		return "__div";
-				case TMS.TM_MOD: 		return "__mod";
-				case TMS.TM_POW: 		return "__pow";
-				case TMS.TM_UNM: 		return "__unm";
-				case TMS.TM_LT: 		return "__lt";
-				case TMS.TM_LE: 		return "__le";
-				case TMS.TM_CONCAT: 	return "__concat";
-				case TMS.TM_CALL: 		return "__call";
-				default: throw new System.NotImplementedException();
+				var name = mt.GetStr( "__name" );
+				if( name.V.TtIsString() )
+					return name.V.SValue();
 			}
+			return TypeName( (LuaType)o.BaseTt() );
 		}
 
 		private StkId T_GetTM( LuaTable mt, TMS tm )
@@ -91,7 +107,7 @@ namespace Cosmos.Executable.Lua
 				}
 				default:
 				{
-					mt = G.MetaTables[o.Tt];
+					mt = G.MetaTables[o.BaseTt()];
 					break;
 				}
 			}

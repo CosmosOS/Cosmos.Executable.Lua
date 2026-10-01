@@ -89,18 +89,6 @@ namespace Cosmos.Executable.Lua
 		}
 
 
-		private static double ReadHexa( string s, ref int pos, double r, out int count )
-		{
-			count = 0;
-			while( pos < s.Length && IsXDigit( s[pos] ) )
-			{
-				r = (r * 16.0) + HexaValue( s[pos] );
-				++pos;
-				++count;
-			}
-			return r;
-		}
-
 		private static double ReadDecimal( string s, ref int pos, double r, out int count )
 		{
 			count = 0;
@@ -113,61 +101,72 @@ namespace Cosmos.Executable.Lua
 			return r;
 		}
 
-		// following C99 specification for 'strtod'
+		// lua_strx2number: a hexadecimal numeral, its digits past the first
+		// MAXSIGDIG significant ones counted in the exponent only, so that a
+		// numeral of any length does not overflow the accumulator
 		public static double StrX2Number( string s, ref int curpos )
 		{
+			const int MAXSIGDIG = 30;
 			int pos = curpos;
 			while( pos < s.Length && IsSpace( s[pos] )) ++pos;
 			bool negative = IsNegative( s, ref pos );
 
 			// check `0x'
-			if( pos >= s.Length || !(s[pos] == '0' && (s[pos+1] == 'x' || s[pos+1] == 'X')) )
-				return 0.0;
+			if( pos + 1 >= s.Length || !(s[pos] == '0' && (s[pos+1] == 'x' || s[pos+1] == 'X')) )
+				return 0.0; // invalid format (no '0x')
 
-			pos += 2; // skip `0x'
-
-			double r = 0.0;
-			int i = 0;
-			int e = 0;
-			r = ReadHexa( s, ref pos, r, out i );
-			if( pos < s.Length && s[pos] == '.' )
+			double r = 0.0; // result (accumulator)
+			int sigdig = 0; // number of significant digits
+			int nosigdig = 0; // number of non-significant digits
+			int e = 0; // exponent correction
+			bool hasdot = false; // true after seen a dot
+			for( pos += 2; pos < s.Length; ++pos ) // skip '0x' and read numeral
 			{
-				++pos; // skip `.'
-				r = ReadHexa( s, ref pos, r, out e );
+				char c = s[pos];
+				if( c == '.' )
+				{
+					if( hasdot ) break; // second dot? stop loop
+					hasdot = true;
+				}
+				else if( IsXDigit( c ) )
+				{
+					if( sigdig == 0 && c == '0' ) // non-significant digit (zero)?
+						nosigdig++;
+					else if( ++sigdig <= MAXSIGDIG ) // can read it without overflow?
+						r = (r * 16.0) + HexaValue( c );
+					else e++; // too many digits; ignore, but still count for exponent
+					if( hasdot ) e--; // decimal digit? correct exponent
+				}
+				else break; // neither a dot nor a digit
 			}
-			if( i == 0 && e == 0 )
-				return 0.0; // invalid format (no digit)
+			if( nosigdig + sigdig == 0 ) // no digits?
+				return 0.0; // invalid format
+			curpos = pos; // valid up to here
+			e *= 4; // each digit multiplies/divides value by 2^4
 
-			// each fractional digit divides value by 2^-4
-			e *= -4;
-			curpos = pos;
-
-			// exponent part
-			if( pos < s.Length && (s[pos] == 'p' || s[pos] == 'P') )
+			if( pos < s.Length && (s[pos] == 'p' || s[pos] == 'P') ) // exponent part?
 			{
-				++pos; // skip `p'
+				++pos; // skip 'p'
 				bool expNegative = IsNegative( s, ref pos );
 				if( pos >= s.Length || !IsDigit( s[pos] ) )
-					goto ret;
-
-				int exp1 = 0;
-				while( pos < s.Length && IsDigit( s[pos] ) )
+					return 0.0; // invalid; must have at least one digit
+				int exp1 = 0; // exponent value
+				while( pos < s.Length && IsDigit( s[pos] ) ) // read exponent
 				{
-					exp1 = exp1 * 10 + (s[pos] - '0');
+					exp1 = Math.Min( exp1 * 10 + (s[pos] - '0'), 1 << 24 ); // way past any double
 					++pos;
 				}
 				if( expNegative )
 					exp1 = -exp1;
 				e += exp1;
+				curpos = pos; // valid up to here
 			}
-			curpos = pos;
 
-ret:
 			if( negative ) r = -r;
-
-			return r * Math.Pow(2.0, e);
+			return Math.ScaleB( r, e );
 		}
 
+		// following C99 specification for 'strtod'
 		public static double Str2Number( string s, ref int curpos )
 		{
 			int pos = curpos;

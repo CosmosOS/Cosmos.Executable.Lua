@@ -6,9 +6,11 @@ using System.Globalization;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// Numbers as Lua 5.2 writes them, <c>%.14g</c>: <c>tostring(1/3)</c> is
-/// <c>0.33333333333333</c> and <c>tostring(2^53)</c> is
-/// <c>9.007199254741e+15</c>, on any culture.
+/// Numbers as Lua 5.3 writes them: an integer in decimal, and a float as
+/// <c>%.14g</c>, with <c>.0</c> added when that looks like an integer:
+/// <c>tostring(1/3)</c> is <c>0.33333333333333</c>, <c>tostring(2^53)</c>
+/// is <c>9.007199254741e+15</c> and <c>tostring(3.0)</c> is <c>3.0</c>, on
+/// any culture.
 /// </summary>
 /// <remarks>
 /// UniLua wrote them with <see cref="double.ToString()"/>, which writes
@@ -20,9 +22,27 @@ internal static class LuaNumber
     /// <summary>The significant digits of <c>%.14g</c>.</summary>
     private const int Precision = 14;
 
+    /// <summary>The string <c>tostring</c> makes of an integer.</summary>
+    public static string ToString(long value)
+    {
+        return value.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The string <c>tostring</c> makes of a float.</summary>
     public static string ToString(double value)
     {
-        return Format(value, Precision, alternate: false);
+        string text = Format(value, Precision, alternate: false);
+
+        // Looks like an integer? Then it says it is a float
+        foreach (char c in text)
+        {
+            if (c != '-' && (c < '0' || c > '9'))
+            {
+                return text;
+            }
+        }
+
+        return text + ".0";
     }
 
     /// <summary>Formats <paramref name="value"/> as C's <c>%.{precision}g</c>, or <c>%#.{precision}g</c>.</summary>

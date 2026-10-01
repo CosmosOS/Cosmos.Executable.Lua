@@ -19,9 +19,14 @@ namespace Cosmos.Executable.Lua
 		private const UInt64 BOOLEAN_FALSE = 0;
 		private const UInt64 BOOLEAN_TRUE = 1;
 
+		// The two variants of numbers, as Lua 5.3 tags them: the type in the
+		// low four bits, the variant above
+		internal const int LUA_TNUMFLT = (int)LuaType.LUA_TNUMBER | (0 << 4);
+		internal const int LUA_TNUMINT = (int)LuaType.LUA_TNUMBER | (1 << 4);
+
 		public int Tt;
-		public double NValue;
-		public UInt64 UInt64Value;
+		public double FltValue;		// a float
+		public UInt64 UInt64Value;	// an integer, a boolean, or the kind of a closure
 		public object OValue;
 #if DEBUG_DUMMY_TVALUE_MODIFY
 		public bool Lock_;
@@ -29,7 +34,7 @@ namespace Cosmos.Executable.Lua
 
 		public override int GetHashCode()
 		{
-			return Tt.GetHashCode() ^ NValue.GetHashCode()
+			return Tt.GetHashCode() ^ FltValue.GetHashCode()
 				^ UInt64Value.GetHashCode()
 				^ (OValue != null ? OValue.GetHashCode() : 0x12345678);
 		}
@@ -40,14 +45,14 @@ namespace Cosmos.Executable.Lua
 		}
 		public bool Equals(TValue o)
 		{
-			if(Tt != o.Tt || NValue != o.NValue || UInt64Value != o.UInt64Value)
+			if(Tt != o.Tt || FltValue != o.FltValue || UInt64Value != o.UInt64Value)
 				{ return false; }
 
 			switch(Tt) {
 				case (int)LuaType.LUA_TNIL: return true;
 				case (int)LuaType.LUA_TBOOLEAN: return BValue() == o.BValue();
-				case (int)LuaType.LUA_TNUMBER: return NValue == o.NValue;
-				case (int)LuaType.LUA_TUINT64: return UInt64Value == o.UInt64Value;
+				case LUA_TNUMFLT: return FltValue == o.FltValue;
+				case LUA_TNUMINT: return UInt64Value == o.UInt64Value;
 				case (int)LuaType.LUA_TSTRING: return SValue() == o.SValue();
 				default: return SameObject(OValue, o.OValue);
 			}
@@ -80,10 +85,14 @@ namespace Cosmos.Executable.Lua
 		}
 #endif
 
+		// ttnov: the type, without its variant
+		internal int BaseTt() { return Tt & 0x0F; }
+
 		internal bool TtIsNil() { return Tt == (int)LuaType.LUA_TNIL; }
 		internal bool TtIsBoolean() { return Tt == (int)LuaType.LUA_TBOOLEAN; }
-		internal bool TtIsNumber() { return Tt == (int)LuaType.LUA_TNUMBER; }
-		internal bool TtIsUInt64() { return Tt == (int)LuaType.LUA_TUINT64; }
+		internal bool TtIsNumber() { return (Tt & 0x0F) == (int)LuaType.LUA_TNUMBER; }
+		internal bool TtIsFloat() { return Tt == LUA_TNUMFLT; }
+		internal bool TtIsInteger() { return Tt == LUA_TNUMINT; }
 		internal bool TtIsString() { return Tt == (int)LuaType.LUA_TSTRING; }
 		internal bool TtIsTable() { return Tt == (int)LuaType.LUA_TTABLE; }
 		internal bool TtIsFunction() { return Tt == (int)LuaType.LUA_TFUNCTION; }
@@ -94,6 +103,9 @@ namespace Cosmos.Executable.Lua
 		internal bool ClIsLcsClosure() { return UInt64Value == CLOSURE_LCS; }
 
 		internal bool BValue() { return UInt64Value != BOOLEAN_FALSE; }
+		internal long IValue() { return unchecked((long)UInt64Value); }
+		// nvalue: a number, an integer converted to a float
+		internal double NValue() { return Tt == LUA_TNUMINT ? (double)IValue() : FltValue; }
 		internal string SValue() { return (string)OValue; }
 		internal LuaTable HValue() { return OValue as LuaTable; }
 		internal LuaLClosureValue ClLValue() { return (LuaLClosureValue)OValue; }
@@ -105,7 +117,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TNIL;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = null;
 		}
@@ -114,7 +126,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TBOOLEAN;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = v ? BOOLEAN_TRUE : BOOLEAN_FALSE;
 			OValue = null;
 		}
@@ -123,26 +135,26 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = v.Tt;
-			NValue = v.NValue;
+			FltValue = v.FltValue;
 			UInt64Value = v.UInt64Value;
 			OValue = v.OValue;
 		}
-		internal void SetNValue(double v) {
+		internal void SetFltValue(double v) {
 #if DEBUG_DUMMY_TVALUE_MODIFY
 			CheckLock();
 #endif
-			Tt = (int)LuaType.LUA_TNUMBER;
-			NValue = v;
+			Tt = LUA_TNUMFLT;
+			FltValue = v;
 			UInt64Value = 0;
 			OValue = null;
 		}
-		internal void SetUInt64Value(UInt64 v) {
+		internal void SetIValue(long v) {
 #if DEBUG_DUMMY_TVALUE_MODIFY
 			CheckLock();
 #endif
-			Tt = (int)LuaType.LUA_TUINT64;
-			NValue = 0.0;
-			UInt64Value = v;
+			Tt = LUA_TNUMINT;
+			FltValue = 0.0;
+			UInt64Value = unchecked((UInt64)v);
 			OValue = null;
 		}
 		internal void SetSValue(string v) {
@@ -150,7 +162,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TSTRING;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = v;
 		}
@@ -159,7 +171,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TTABLE;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = v;
 		}
@@ -168,7 +180,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TTHREAD;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = v;
 		}
@@ -177,7 +189,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TLIGHTUSERDATA;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = v;
 		}
@@ -186,7 +198,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TUSERDATA;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = 0;
 			OValue = v;
 		}
@@ -195,7 +207,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TFUNCTION;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = CLOSURE_LUA;
 			OValue = v;
 		}
@@ -204,7 +216,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TFUNCTION;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = CLOSURE_CS;
 			OValue = v;
 		}
@@ -213,7 +225,7 @@ namespace Cosmos.Executable.Lua
 			CheckLock();
 #endif
 			Tt = (int)LuaType.LUA_TFUNCTION;
-			NValue = 0.0;
+			FltValue = 0.0;
 			UInt64Value = CLOSURE_LCS;
 			OValue = v;
 		}
@@ -222,8 +234,10 @@ namespace Cosmos.Executable.Lua
 		{
 			if (TtIsString()) {
 				return string.Format("(string, {0})", SValue());
-			} else if (TtIsNumber()) {
-				return string.Format("(number, {0})", NValue);
+			} else if (TtIsInteger()) {
+				return string.Format("(integer, {0})", IValue());
+			} else if (TtIsFloat()) {
+				return string.Format("(float, {0})", FltValue);
 			} else if (TtIsNil()) {
 				return "(nil)";
 			} else {
@@ -256,7 +270,7 @@ namespace Cosmos.Executable.Lua
 				{ detail = V.SValue().Replace("\n", "»"); }
 			else
 				{ detail = "..."; }
-			return string.Format("StkId - {0} - {1}", LuaState.TypeName((LuaType)V.Tt), detail);
+			return string.Format("StkId - {0} - {1}", LuaState.TypeName((LuaType)V.BaseTt()), detail);
 		}
 	}
 
@@ -325,8 +339,11 @@ namespace Cosmos.Executable.Lua
 			LocVars = new List<LocVar>();
 		}
 
+		// getfuncline: -1 for a function with no line information (stripped)
 		public int GetFuncLine( int pc )
 		{
+			if( LineInfo.Count == 0 )
+				return -1;
 			return (0 <= pc && pc < LineInfo.Count) ? LineInfo[pc] : 0;
 		}
 	}
@@ -383,15 +400,60 @@ namespace Cosmos.Executable.Lua
 	{
 		internal static StkId TheNilValue;
 
+		// l_str2int: a decimal or hexadecimal integer numeral, with optional
+		// spaces around it; a hexadecimal one wraps around, a decimal one
+		// that overflows is no integer (but a float)
+		private static bool O_Str2Int( string s, out long result )
+		{
+			const ulong maxby10 = (ulong)LuaConf.LUA_MAXINTEGER / 10;
+			const int maxlastd = (int)((ulong)LuaConf.LUA_MAXINTEGER % 10);
+			ulong a = 0;
+			bool empty = true;
+			int pos = 0;
+			result = 0;
+			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) ++pos;
+			bool neg = false;
+			if( pos < s.Length && s[pos] == '-' ) { ++pos; neg = true; }
+			else if( pos < s.Length && s[pos] == '+' ) ++pos;
+			if( pos + 1 < s.Length && s[pos] == '0' && (s[pos+1] == 'x' || s[pos+1] == 'X') )
+			{
+				for( pos += 2; pos < s.Length && Utl.IsXDigit( s[pos] ); ++pos )
+				{
+					a = unchecked( a * 16 + (ulong)Utl.HexaValue( s[pos] ) );
+					empty = false;
+				}
+			}
+			else
+			{
+				for( ; pos < s.Length && Utl.IsDigit( s[pos] ); ++pos )
+				{
+					int d = s[pos] - '0';
+					if( a >= maxby10 && (a > maxby10 || d > maxlastd + (neg ? 1 : 0)) )
+						return false; // overflow: not accepted as an integer
+					a = a * 10 + (ulong)d;
+					empty = false;
+				}
+			}
+			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) ++pos;
+			if( empty || pos != s.Length )
+				return false;
+			result = unchecked( (long)(neg ? 0UL - a : a) );
+			return true;
+		}
+
+		// l_str2d: a float numeral, decimal or hexadecimal, with optional
+		// spaces around it; not 'inf' nor 'nan'
 		public static bool O_Str2Decimal( string s, out double result )
 		{
 			result = 0.0;
 
-			if( s.Contains("n") || s.Contains("N") ) // reject `inf' and `nan'
+			int mark = s.IndexOfAny( new char[] { '.', 'x', 'X', 'n', 'N' } );
+			char mode = mark < 0 ? '\0' : char.ToLowerInvariant( s[mark] );
+			if( mode == 'n' ) // reject 'inf' and 'nan'
 				return false;
 
 			int pos = 0;
-			if( s.Contains("x") || s.Contains("X") )
+			if( mode == 'x' )
 				result = Utl.StrX2Number( s, ref pos );
 			else
 				result = Utl.Str2Number( s, ref pos );
@@ -403,7 +465,89 @@ namespace Cosmos.Executable.Lua
 			return pos == s.Length; // OK if no trailing characters
 		}
 
-		private static double O_Arith( LuaOp op, double v1, double v2 )
+		// luaO_str2num: the number a whole string is the numeral of, an
+		// integer if it is one, else a float
+		public static bool O_Str2Num( string s, out TValue o )
+		{
+			o = new TValue();
+			long i;
+			double n;
+			if( O_Str2Int( s, out i ) )
+				o.SetIValue( i );
+			else if( O_Str2Decimal( s, out n ) )
+				o.SetFltValue( n );
+			else
+				return false;
+			return true;
+		}
+
+		// luaO_arith: an arithmetic or bitwise operation on numbers or on
+		// strings that convert to numbers; false if an operand is neither
+		internal static bool O_RawArith( LuaState L, LuaOp op, ref TValue p1, ref TValue p2, ref TValue res )
+		{
+			switch( op )
+			{
+				case LuaOp.LUA_OPBAND: case LuaOp.LUA_OPBOR: case LuaOp.LUA_OPBXOR:
+				case LuaOp.LUA_OPSHL: case LuaOp.LUA_OPSHR:
+				case LuaOp.LUA_OPBNOT: { // operate only on integers
+					long i1, i2;
+					if( V_ToInteger( ref p1, out i1, 0 ) && V_ToInteger( ref p2, out i2, 0 ) )
+					{
+						res.SetIValue( IntArith( L, op, i1, i2 ) );
+						return true;
+					}
+					return false;
+				}
+				case LuaOp.LUA_OPDIV: case LuaOp.LUA_OPPOW: { // operate only on floats
+					double n1, n2;
+					if( V_ToNumber( ref p1, out n1 ) && V_ToNumber( ref p2, out n2 ) )
+					{
+						res.SetFltValue( NumArith( op, n1, n2 ) );
+						return true;
+					}
+					return false;
+				}
+				default: { // other operations
+					double n1, n2;
+					if( p1.TtIsInteger() && p2.TtIsInteger() )
+					{
+						res.SetIValue( IntArith( L, op, p1.IValue(), p2.IValue() ) );
+						return true;
+					}
+					if( V_ToNumber( ref p1, out n1 ) && V_ToNumber( ref p2, out n2 ) )
+					{
+						res.SetFltValue( NumArith( op, n1, n2 ) );
+						return true;
+					}
+					return false;
+				}
+			}
+		}
+
+		internal static long IntArith( LuaState L, LuaOp op, long v1, long v2 )
+		{
+			unchecked
+			{
+				switch( op )
+				{
+					case LuaOp.LUA_OPADD: return v1 + v2;
+					case LuaOp.LUA_OPSUB: return v1 - v2;
+					case LuaOp.LUA_OPMUL: return v1 * v2;
+					case LuaOp.LUA_OPMOD: return V_Mod( L, v1, v2 );
+					case LuaOp.LUA_OPIDIV: return V_Div( L, v1, v2 );
+					case LuaOp.LUA_OPBAND: return v1 & v2;
+					case LuaOp.LUA_OPBOR: return v1 | v2;
+					case LuaOp.LUA_OPBXOR: return v1 ^ v2;
+					case LuaOp.LUA_OPSHL: return V_ShiftL( v1, v2 );
+					case LuaOp.LUA_OPSHR: return V_ShiftL( v1, 0 - v2 );
+					case LuaOp.LUA_OPUNM: return 0 - v1;
+					case LuaOp.LUA_OPBNOT: return ~v1;
+					default: throw new System.NotImplementedException();
+				}
+			}
+		}
+
+		internal static double NumArith( LuaOp op, double v1, double v2 )
 		{
 			switch( op )
 			{
@@ -411,11 +555,21 @@ namespace Cosmos.Executable.Lua
 				case LuaOp.LUA_OPSUB: return v1-v2;
 				case LuaOp.LUA_OPMUL: return v1*v2;
 				case LuaOp.LUA_OPDIV: return v1/v2;
-				case LuaOp.LUA_OPMOD: return v1 - Math.Floor(v1/v2)*v2;
 				case LuaOp.LUA_OPPOW: return Math.Pow(v1, v2);
+				case LuaOp.LUA_OPIDIV: return Math.Floor(v1/v2);
 				case LuaOp.LUA_OPUNM: return -v1;
+				case LuaOp.LUA_OPMOD: return NumMod(v1, v2);
 				default: throw new System.NotImplementedException();
 			}
+		}
+
+		// luai_nummod: 'a - floor(a/b)*b', from fmod (which C#'s % is)
+		internal static double NumMod( double a, double b )
+		{
+			double m = a % b;
+			if( m * b < 0 )
+				m += b;
+			return m;
 		}
 
 		private bool IsFalse(ref TValue v)
@@ -429,7 +583,8 @@ namespace Cosmos.Executable.Lua
 			return false;
 		}
 
-		private bool ToString(ref TValue o)
+		// tostring: whether 'o' is a string, after converting a number to one
+		private static bool ToString(ref TValue o)
 		{
 			if(o.TtIsString()) { return true; }
 			return V_ToString(ref o);

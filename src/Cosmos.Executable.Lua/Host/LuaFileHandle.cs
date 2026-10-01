@@ -2,7 +2,6 @@
 
 using System;
 using System.IO;
-using System.Text;
 
 namespace Cosmos.Executable.Lua;
 
@@ -11,36 +10,41 @@ namespace Cosmos.Executable.Lua;
 /// standard files, which are the host's console.
 /// </summary>
 /// <remarks>
-/// Lua strings are .NET strings here, as everywhere in UniLua. A file opened
-/// in text mode is UTF-8, as scripts are, so text written by a script reads
-/// back the same; in binary mode (<c>"rb"</c>, <c>"wb"</c>...) every byte is
-/// one character, from <c>\0</c> to <c>\255</c>, so bytes make the round
-/// trip whatever they are.
+/// Lua strings hold bytes (see <see cref="LuaText"/>): a file gives and
+/// takes its bytes as they are, in text mode as in binary mode, as on
+/// POSIX. The console is text, which the standard files encode to and
+/// decode from UTF-8. A write reaches the file at once, unless the script
+/// asked <c>setvbuf</c> for a buffer: no collector flushes the buffer of a
+/// file a script forgot to close (see <see cref="BufferMode"/>).
 /// </remarks>
 internal sealed class LuaFileHandle
 {
     private readonly Stream? _stream;
     private readonly LuaHost _host;
     private readonly StandardFile _standard;
-    private readonly bool _binary;
     private readonly bool _append;
+
+    /// <summary>The size of a buffer <c>setvbuf</c> gives no size, LUAL_BUFFERSIZE.</summary>
+    public const int DefaultBufferSize = 8192;
+
+    /// <summary>The bytes written that have not reached the stream yet.</summary>
+    private byte[]? _writeBuffer;
+    private int _writeCount;
+    private int _bufferSize = DefaultBufferSize;
+    private BufferMode _bufferMode = BufferMode.No;
 
     /// <summary>The byte <see cref="UnreadByte"/> put back, or -1.</summary>
     private int _pushback = -1;
 
-    /// <summary>The second half of a surrogate pair <see cref="ReadChar"/> decoded, or -1.</summary>
-    private int _lowSurrogate = -1;
-
-    /// <summary>What is left of the line standard input last gave.</summary>
+    /// <summary>What is left of the line standard input last gave, as bytes.</summary>
     private string? _consoleLine;
     private int _consolePosition;
 
     /// <summary>A file on a stream, which <paramref name="host"/> closes with the others it left open.</summary>
-    public LuaFileHandle(LuaHost host, Stream stream, bool binary, bool append)
+    public LuaFileHandle(LuaHost host, Stream stream, bool append)
     {
         _host = host;
         _stream = stream;
-        _binary = binary;
         _append = append;
         host.OpenFiles.Add(this);
     }
@@ -61,61 +65,30 @@ internal sealed class LuaFileHandle
         Error,
     }
 
+    /// <summary>When the writes to a file reach its stream, as the modes of <c>setvbuf</c>.</summary>
+    public enum BufferMode
+    {
+        /// <summary>At once.</summary>
+        No,
+
+        /// <summary>When the buffer is full.</summary>
+        Full,
+
+        /// <summary>At the end of a line, or when the buffer is full.</summary>
+        Line,
+    }
+
     public bool IsClosed { get; private set; }
 
     public bool IsStandard => _standard != StandardFile.None;
 
-    /// <summary>Reads one character; -1 at the end of the file.</summary>
-    /// <remarks>A character outside the BMP comes as its two surrogates, in two calls.</remarks>
+    /// <summary>Reads one byte; -1 at the end of the file.</summary>
     public int ReadChar()
     {
-        if (_standard == StandardFile.Input)
-        {
-            return ReadConsoleChar();
-        }
-
-        if (_lowSurrogate >= 0)
-        {
-            int low = _lowSurrogate;
-            _lowSurrogate = -1;
-            return low;
-        }
-
-        int b = ReadByte();
-        if (b < 0x80 || _binary)
-        {
-            return b;
-        }
-
-        // A UTF-8 sequence: its lead byte says how many bytes follow
-        int length = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
-        Span<byte> bytes = stackalloc byte[4];
-        bytes[0] = (byte)b;
-        int count = 1;
-        while (count < length)
-        {
-            int next = ReadByte();
-            if (next is < 0x80 or >= 0xC0)
-            {
-                // not a continuation byte: it starts the next character
-                UnreadByte(next);
-                break;
-            }
-
-            bytes[count++] = (byte)next;
-        }
-
-        Span<char> chars = stackalloc char[2];
-        int decoded = Encoding.UTF8.GetChars(bytes[..count], chars);
-        if (decoded == 2)
-        {
-            _lowSurrogate = chars[1];
-        }
-
-        return chars[0];
+        return _standard == StandardFile.Input ? ReadConsoleChar() : ReadByte();
     }
 
-    /// <summary>Reads the next byte without consuming it; -1 at the end. Characters of standard input are bytes here.</summary>
+    /// <summary>Reads the next byte without consuming it; -1 at the end.</summary>
     public int PeekByte()
     {
         if (_standard == StandardFile.Input)
@@ -134,6 +107,22 @@ internal sealed class LuaFileHandle
         return b;
     }
 
+    /// <summary>Puts back the byte <see cref="ReadChar"/> read last, as ungetc.</summary>
+    public void Unread(int b)
+    {
+        if (_standard == StandardFile.Input)
+        {
+            if (_consolePosition > 0)
+            {
+                _consolePosition--;
+            }
+
+            return;
+        }
+
+        UnreadByte(b);
+    }
+
     /// <summary>Consumes the byte <see cref="PeekByte"/> returned.</summary>
     public void SkipByte()
     {
@@ -146,45 +135,56 @@ internal sealed class LuaFileHandle
         ReadByte();
     }
 
+    /// <summary>Writes the bytes of the Lua string <paramref name="text"/>.</summary>
     public void Write(string text)
     {
         switch (_standard)
         {
             case StandardFile.Output:
-                _host.Out.Write(text);
+                _host.WriteOut(text);
                 return;
             case StandardFile.Error:
-                _host.Err.Write(text);
+                _host.WriteErr(text);
                 return;
             case StandardFile.Input:
                 throw new IOException("Bad file descriptor");
         }
 
-        if (_append)
-        {
-            _stream!.Seek(0, SeekOrigin.End);
-        }
-
-        byte[] bytes;
-        if (_binary)
-        {
-            bytes = new byte[text.Length];
-            for (int i = 0; i < text.Length; i++)
-            {
-                bytes[i] = text[i] <= 0xFF ? (byte)text[i] : (byte)'?';
-            }
-        }
-        else
-        {
-            bytes = Encoding.UTF8.GetBytes(text);
-        }
-
+        byte[] bytes = LuaText.ToBytes(text);
         DropReadAhead();
-        _stream!.Write(bytes, 0, bytes.Length);
+        if (_bufferMode == BufferMode.No || bytes.Length >= _bufferSize)
+        {
+            FlushBuffer();
+            WriteThrough(bytes, bytes.Length);
+            return;
+        }
 
-        // Through to the file system at once: no collector flushes a file a
-        // script forgot to close
-        _stream.Flush();
+        if (_writeCount + bytes.Length > _bufferSize)
+        {
+            FlushBuffer();
+        }
+
+        _writeBuffer ??= new byte[_bufferSize];
+        Array.Copy(bytes, 0, _writeBuffer, _writeCount, bytes.Length);
+        _writeCount += bytes.Length;
+        if (_bufferMode == BufferMode.Line && Array.IndexOf(bytes, (byte)'\n') >= 0)
+        {
+            FlushBuffer();
+        }
+    }
+
+    /// <summary>Sets how the writes reach the file, as <c>setvbuf</c>; the console is not buffered.</summary>
+    public void SetBuffering(BufferMode mode, int size)
+    {
+        if (_stream is null)
+        {
+            return;
+        }
+
+        FlushBuffer();
+        _bufferMode = mode;
+        _bufferSize = Math.Max(1, size);
+        _writeBuffer = null;
     }
 
     public void Flush()
@@ -201,6 +201,7 @@ internal sealed class LuaFileHandle
                 return;
         }
 
+        FlushBuffer();
         _stream!.Flush();
     }
 
@@ -212,6 +213,7 @@ internal sealed class LuaFileHandle
             throw new IOException("Illegal seek");
         }
 
+        FlushBuffer();
         if (origin == SeekOrigin.Current && _pushback >= 0)
         {
             offset--; // the stream is one byte ahead of the script
@@ -226,8 +228,15 @@ internal sealed class LuaFileHandle
         IsClosed = true;
         if (_stream is not null)
         {
-            _host.OpenFiles.Remove(this);
-            _stream.Dispose();
+            try
+            {
+                FlushBuffer();
+            }
+            finally
+            {
+                _host.OpenFiles.Remove(this);
+                _stream.Dispose();
+            }
         }
     }
 
@@ -240,7 +249,32 @@ internal sealed class LuaFileHandle
             return b;
         }
 
+        FlushBuffer(); // what was written is there to read
         return _stream!.ReadByte();
+    }
+
+    /// <summary>Writes the buffered bytes through to the file.</summary>
+    private void FlushBuffer()
+    {
+        if (_writeCount == 0)
+        {
+            return;
+        }
+
+        int count = _writeCount;
+        _writeCount = 0; // forgotten even when the disk fails, as fflush
+        WriteThrough(_writeBuffer!, count);
+    }
+
+    private void WriteThrough(byte[] bytes, int count)
+    {
+        if (_append)
+        {
+            _stream!.Seek(0, SeekOrigin.End);
+        }
+
+        _stream!.Write(bytes, 0, count);
+        _stream.Flush();
     }
 
     private void UnreadByte(int b)
@@ -252,20 +286,19 @@ internal sealed class LuaFileHandle
     private void DropReadAhead()
     {
         _pushback = -1;
-        _lowSurrogate = -1;
     }
 
     private int ReadConsoleChar()
     {
         while (_consoleLine is null || _consolePosition >= _consoleLine.Length)
         {
-            string? line = _host.In.ReadLine();
+            string? line = _host.ReadInLine();
             if (line is null)
             {
                 return -1;
             }
 
-            _consoleLine = line + "\n";
+            _consoleLine = line;
             _consolePosition = 0;
         }
 

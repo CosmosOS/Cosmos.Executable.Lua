@@ -20,12 +20,19 @@ public class LuaLibraryTests : LuaTest
     [TestCase("0.1 + 0.2", "0.3")]
     [TestCase("123456789012", "123456789012")]
     [TestCase("1e-5", "1e-05")]
-    [TestCase("-0.0", "-0")]
+    [TestCase("-0.0", "-0.0")]
     [TestCase("math.huge", "inf")]
     [TestCase("-math.huge", "-inf")]
     [TestCase("0x10", "16")]
     [TestCase("10 .. ''", "10")]
     [TestCase("1.5 .. 'x'", "1.5x")]
+    [TestCase("3.0", "3.0")]
+    [TestCase("10 / 2", "5.0")]
+    [TestCase("2^2", "4.0")]
+    [TestCase("2^63", "9.2233720368548e+18")]
+    [TestCase("'10' + 1", "11.0")]
+    [TestCase("math.maxinteger", "9223372036854775807")]
+    [TestCase("3.0 .. ''", "3.0")]
     public void NumbersAreWrittenAsLuaWritesThem(string expression, string expected)
     {
         Assert.That(Eval(expression), Is.EqualTo(expected));
@@ -50,6 +57,57 @@ public class LuaLibraryTests : LuaTest
     public void DecimalLiteralsAreRoundedOnce()
     {
         Assert.That(Eval("0.3 == 3/10, 0.1 * 3 == 0.3, 123.456e-2 == 1.23456"), Is.EqualTo("true\tfalse\ttrue"));
+    }
+
+    [Test]
+    public void IntegersAndFloatsAreTwoKindsOfNumbers()
+    {
+        Assert.That(Eval("math.type(1), math.type(1.0), math.type('1'), 1 == 1.0"), Is.EqualTo("integer\tfloat\tnil\ttrue"));
+        Assert.That(Eval("7 // 2, 7.0 // 2, -7 // 2, 3 % -2, 1 // 0.0"), Is.EqualTo("3\t3.0\t-4\t-1\tinf"));
+        Assert.That(Eval("math.maxinteger + 1 == math.mininteger, 9007199254740993, 0xffffffffffffffff"), Is.EqualTo("true\t9007199254740993\t-1"));
+        Assert.That(Eval("math.tointeger(3.0), math.tointeger(3.5), math.floor(3.7), math.ult(1, -1)"), Is.EqualTo("3\tnil\t3\ttrue"));
+        Assert.That(ErrorOf("local zero = 0 return 1 // zero"), Does.Contain("attempt to divide by zero"));
+        Assert.That(ErrorOf("local zero = 0 return 1 % zero"), Does.Contain("attempt to perform 'n%0'"));
+    }
+
+    [Test]
+    public void BitwiseOperatorsWorkOnIntegers()
+    {
+        Assert.That(Eval("5 & 3, 5 | 3, 5 ~ 3, ~0, 1 << 62, 1 << 64, -1 >> 63, 2.0 | 1"), Is.EqualTo("1\t7\t6\t-1\t4611686018427387904\t0\t1\t3"));
+        Assert.That(ErrorOf("return 1.5 | 0"), Does.Contain("number has no integer representation"));
+        Assert.That(Eval("bit32.band(0xFF, 0x0F), bit32.bnot(0), bit32.rshift(-1, 28)"), Is.EqualTo("15\t4294967295\t15"));
+    }
+
+    [Test]
+    public void StringsAreBytesThatTheConsoleSeesAsUtf8()
+    {
+        Assert.That(Eval("#'é', utf8.len('héllo'), utf8.char(233, 0x4e2d), utf8.codepoint('é'), '\\u{48}\\u{49}'"), Is.EqualTo("2\t5\té中\t233\tHI"));
+        Assert.That(Eval("('é'):byte(1, -1)"), Is.EqualTo("195\t169"));
+        Assert.That(Run("for p, c in utf8.codes('aé') do io.write(p, ':', c, ' ') end"), Is.EqualTo("1:97 2:233 "));
+
+        Lua.State.PushString(LuaText.Encode("héllo"));
+        Lua.State.SetGlobal("s");
+        Assert.That(Eval("#s"), Is.EqualTo("6"));
+        Lua.State.GetGlobal("s");
+        Assert.That(LuaText.Decode(Lua.State.ToString(-1)), Is.EqualTo("héllo"));
+        Lua.State.Pop(1);
+    }
+
+    [Test]
+    public void StringsPackAndUnpackBinaryData()
+    {
+        Assert.That(Eval("string.pack('>i4', 1):byte(1, -1)"), Is.EqualTo("0\t0\t0\t1"));
+        Assert.That(Eval("string.unpack('<i2', '\\1\\2')"), Is.EqualTo("513\t3"));
+        Assert.That(Eval("string.packsize('i4i8'), string.unpack('z', 'ab\\0')"), Is.EqualTo("12\tab\t4"));
+        Assert.That(Eval("string.format('%q', 1/3), string.format('%q', math.mininteger), string.format('%5.2f|%x', 2.5, 255)"), Is.EqualTo("0x1.5555555555555p-2\t0x8000000000000000\t 2.50|ff"));
+    }
+
+    [Test]
+    public void TablesMoveAndUnpack()
+    {
+        Assert.That(Eval("table.concat(table.move({ 1, 2, 3 }, 1, 3, 2), ','), table.unpack({ 1, 2, 3 }, 2)"), Is.EqualTo("1,1,2,3\t2\t3"));
+        Assert.That(Eval("next({}), rawlen({ 1, 2 }), select(-1, 1, 2, 3)"), Is.EqualTo("nil\t2\t3"));
+        Assert.That(Eval("load(string.dump(function(a) return a * 3 end))(14)"), Is.EqualTo("42"));
     }
 
     [Test]
@@ -235,6 +293,24 @@ public class LuaLibraryTests : LuaTest
     }
 
     [Test]
+    public void SetvbufHoldsWritesInABuffer()
+    {
+        string path = Path.Combine(Directory, "buffered.txt");
+        Run("f = io.open('buffered.txt', 'w') f:setvbuf('full') f:write('held')");
+        Assert.That(File.ReadAllText(path), Is.Empty);
+
+        Run("f:flush() f:setvbuf('line') f:write(' line')");
+        Assert.That(File.ReadAllText(path), Is.EqualTo("held"));
+
+        Run("f:write(' end\\n')");
+        Assert.That(File.ReadAllText(path), Is.EqualTo("held line end\n"));
+
+        Run("f:setvbuf('full') f:write('closed') f:close()");
+        Assert.That(File.ReadAllText(path), Is.EqualTo("held line end\nclosed"));
+        Assert.That(ErrorOf("io.stdout:setvbuf('some')"), Does.Contain("invalid option 'some'"));
+    }
+
+    [Test]
     public void DisposeClosesTheFilesScriptsLeftOpen()
     {
         Run("leaked = io.open('leak.txt', 'w') lines = io.lines('leak.txt')");
@@ -271,7 +347,7 @@ public class LuaLibraryTests : LuaTest
             "2026-10-01 21:46:05 Thu Oct 274 PM %\n" +
             "true\n" +
             "Thu Jan  1 00:00:00 1970\t01/01/71 00:00:00 71\n" +
-            "60\tnumber\ttrue\n"));
+            "60.0\tnumber\ttrue\n"));
     }
 
     [Test]

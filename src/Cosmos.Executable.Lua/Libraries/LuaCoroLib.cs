@@ -20,6 +20,7 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "status", 	CO_Status	),
 				new NameFuncPair( "wrap", 		CO_Wrap		),
 				new NameFuncPair( "yield", 		CO_Yield	),
+				new NameFuncPair( "isyieldable", CO_IsYieldable ),
 			};
 
 			lua.L_NewLib( define );
@@ -71,7 +72,7 @@ namespace Cosmos.Executable.Lua
 		private static int CO_Resume( ILuaState lua )
 		{
 			ILuaState co = lua.ToThread( 1 );
-			lua.L_ArgCheck( co != null, 1, "coroutine expected" );
+			lua.L_ArgCheck( co != null, 1, "thread expected" );
 			int r = AuxResume( lua, co, lua.GetTop() - 1 );
 			if( r < 0 )
 			{
@@ -97,7 +98,7 @@ namespace Cosmos.Executable.Lua
 		private static int CO_Status( ILuaState lua )
 		{
 			ILuaState co = lua.ToThread( 1 );
-			lua.L_ArgCheck( co != null, 1, "coroutine expected" );
+			lua.L_ArgCheck( co != null, 1, "thread expected" );
 			if( (LuaState)lua == (LuaState)co )
 				lua.PushString( "running" );
 			else switch( co.Status )
@@ -129,7 +130,7 @@ namespace Cosmos.Executable.Lua
 			int r = AuxResume( lua, co, lua.GetTop() );
 			if( r < 0 )
 			{
-				if( lua.IsString( -1 ) ) // error object is a string?
+				if( lua.Type( -1 ) == LuaType.LUA_TSTRING ) // error object is a string?
 				{
 					lua.L_Where( 1 ); // add extra info
 					lua.Insert( -2 );
@@ -150,6 +151,12 @@ namespace Cosmos.Executable.Lua
 		private static int CO_Yield( ILuaState lua )
 		{
 			return lua.Yield( lua.GetTop() );
+		}
+
+		private static int CO_IsYieldable( ILuaState lua )
+		{
+			lua.PushBoolean( lua.IsYieldable() );
+			return 1;
 		}
 
 	}

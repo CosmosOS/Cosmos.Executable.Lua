@@ -23,7 +23,6 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "ipairs", 		LuaBaseLib.B_Ipairs ),
 				new NameFuncPair( "loadfile", 		LuaBaseLib.B_LoadFile ),
 				new NameFuncPair( "load", 			LuaBaseLib.B_Load ),
-				new NameFuncPair( "loadstring", 	LuaBaseLib.B_Load ),
 				new NameFuncPair( "next", 			LuaBaseLib.B_Next ),
 				new NameFuncPair( "pairs", 			LuaBaseLib.B_Pairs ),
 				new NameFuncPair( "pcall", 			LuaBaseLib.B_PCall ),
@@ -62,9 +61,15 @@ namespace Cosmos.Executable.Lua
 
 		public static int B_Assert( ILuaState lua )
 		{
-			if( !lua.ToBoolean( 1 ) )
-				return lua.L_Error( "{0}", lua.L_OptString( 2, "assertion failed!" ) );
-			return lua.GetTop();
+			if( lua.ToBoolean( 1 ) ) // condition is true?
+				return lua.GetTop(); // return all arguments
+
+			// error
+			lua.L_CheckAny( 1 ); // there must be a condition
+			lua.Remove( 1 ); // remove it
+			lua.PushString( "assertion failed!" ); // default message
+			lua.SetTop( 1 ); // leave only message (default if no other one)
+			return B_Error( lua ); // call 'error'
 		}
 
 		// the .NET garbage collector runs on its own: "collect" asks it for a
@@ -80,8 +85,7 @@ namespace Cosmos.Executable.Lua
 					// RhWaitForPendingFinalizers, which a Cosmos kernel does not export
 					long bytes = System.GC.GetGCMemoryInfo().HeapSizeBytes;
 					lua.PushNumber( bytes / 1024.0 );
-					lua.PushInteger( (int)(bytes % 1024) );
-					return 2;
+					return 1;
 				}
 
 				case "step":
@@ -95,8 +99,8 @@ namespace Cosmos.Executable.Lua
 					return 1;
 
 				case "stop": case "restart":
-				case "setpause": case "setstepmul": case "setmajorinc":
-				case "generational": case "incremental":
+				case "setpause": case "setstepmul":
+					lua.L_OptInteger( 2, 0 );
 					lua.PushInteger( 0 );
 					return 1;
 
@@ -124,7 +128,7 @@ namespace Cosmos.Executable.Lua
 		{
 			int level = lua.L_OptInt( 2, 1 );
 			lua.SetTop( 1 );
-			if( lua.IsString( 1 ) && level > 0 )
+			if( lua.Type( 1 ) == LuaType.LUA_TSTRING && level > 0 )
 			{
 				lua.L_Where( level );
 				lua.PushValue( 1 );
@@ -273,7 +277,7 @@ namespace Cosmos.Executable.Lua
 		public static int B_XPCall( ILuaState lua )
 		{
 			int n = lua.GetTop();
-			lua.L_ArgCheck( n>=2, 2, "value expected" );
+			lua.L_CheckType( 2, LuaType.LUA_TFUNCTION ); // check error function
 			lua.PushValue( 1 ); // exchange function...
 			lua.Copy( 2, 1); // ...and error handler
 			lua.Replace( 2 );
@@ -329,11 +333,11 @@ namespace Cosmos.Executable.Lua
 			}
 			else
 			{
-				int i = lua.L_CheckInteger( 1 );
+				long i = lua.L_CheckInteger( 1 );
 				if( i < 0 ) i = n + i;
 				else if( i > n ) i = n;
 				lua.L_ArgCheck( 1 <= i, 1, "index out of range" );
-				return n - i;
+				return n - (int)i;
 			}
 		}
 
@@ -362,50 +366,59 @@ namespace Cosmos.Executable.Lua
 			return 1;
 		}
 
+		// b_str2int: a numeral in 'numBase', which wraps around
+		private static bool StrToInt( string s, int numBase, out long result )
+		{
+			ulong n = 0;
+			bool neg = false;
+			int pos = 0;
+			result = 0;
+			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip initial spaces
+			if( pos < s.Length && s[pos] == '-' ) { pos++; neg = true; } // handle signal
+			else if( pos < s.Length && s[pos] == '+' ) pos++;
+			if( pos >= s.Length || !Utl.IsAlnum( s[pos] ) ) // no digit?
+				return false;
+			do
+			{
+				int digit = Utl.IsDigit( s[pos] )
+					? s[pos] - '0'
+					: (s[pos] | 0x20) - 'a' + 10;
+				if( digit >= numBase )
+					return false; // invalid numeral
+				n = unchecked( n * (ulong)numBase + (ulong)digit );
+				pos++;
+			} while( pos < s.Length && Utl.IsAlnum( s[pos] ) );
+			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip trailing spaces
+			result = unchecked( (long)(neg ? 0UL - n : n) );
+			return pos == s.Length;
+		}
+
 		public static int B_ToNumber( ILuaState lua )
 		{
-			LuaType t = lua.Type( 2 );
-			if( t == LuaType.LUA_TNONE || t == LuaType.LUA_TNIL ) // standard conversion
+			if( lua.IsNoneOrNil( 2 ) ) // standard conversion?
 			{
-				bool isnum;
-				double n = lua.ToNumberX( 1, out isnum );
-				if( isnum )
-				{
-					lua.PushNumber( n );
-					return 1;
-				} // else not a number; must be something
 				lua.L_CheckAny( 1 );
+				if( lua.Type( 1 ) == LuaType.LUA_TNUMBER ) // already a number?
+				{
+					lua.SetTop( 1 ); // yes; return it
+					return 1;
+				}
+				string s = lua.ToString( 1 );
+				if( s != null && lua.StringToNumber( s ) == s.Length + 1 )
+					return 1; // successful conversion to number
+				// else not a number
 			}
 			else
 			{
-				string s = lua.L_CheckString( 1 );
-				int numBase = lua.L_CheckInteger( 2 );
-				bool negative = false;
-				lua.L_ArgCheck( (2 <= numBase && numBase <= 36), 2,
-					"base out of range" );
-				int pos = 0;
-				while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip initial spaces
-				if( pos < s.Length && s[pos] == '-' ) { pos++; negative = true; }
-				else if( pos < s.Length && s[pos] == '+' ) pos++;
-				if( pos < s.Length && Utl.IsAlnum( s[pos] ) )
+				long numBase = lua.L_CheckInteger( 2 );
+				lua.L_CheckType( 1, LuaType.LUA_TSTRING ); // no numbers as strings
+				string s = lua.ToString( 1 );
+				lua.L_ArgCheck( 2 <= numBase && numBase <= 36, 2, "base out of range" );
+				long n;
+				if( StrToInt( s, (int)numBase, out n ) )
 				{
-					double n = 0.0;
-					do
-					{
-						int digit = Utl.IsDigit( s[pos] )
-							? s[pos] - '0'
-							: (s[pos] | 0x20) - 'a' + 10;
-						if( digit >= numBase )
-							break; // invalid numeral; force a fail
-						n = n * (double)numBase + (double)digit;
-						pos++;
-					} while( pos < s.Length && Utl.IsAlnum( s[pos] ) );
-					while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip trailing spaces
-					if( pos == s.Length ) // no invalid trailing characters?
-					{
-						lua.PushNumber( negative ? -n : n );
-						return 1;
-					} // else not a number
+					lua.PushInteger( n );
+					return 1;
 				} // else not a number
 			}
 			lua.PushNil(); // not a number
@@ -415,6 +428,7 @@ namespace Cosmos.Executable.Lua
 		public static int B_Type( ILuaState lua )
 		{
 			var t = lua.Type( 1 );
+			lua.L_ArgCheck( t != LuaType.LUA_TNONE, 1, "value expected" );
 			var tname = lua.TypeName( t );
 			lua.PushString( tname );
 			return 1;
@@ -423,10 +437,10 @@ namespace Cosmos.Executable.Lua
 		private static int PairsMeta( ILuaState lua, string method, bool isZero
 			, CSharpFunctionDelegate iter )
 		{
+			lua.L_CheckAny( 1 );
 			if( !lua.L_GetMetaField( 1, method ) ) // no metamethod?
 			{
-				lua.L_CheckType( 1, LuaType.LUA_TTABLE );
-				lua.PushCSharpFunction( iter );
+				lua.PushCSharpFunction( iter ); // will return generator,
 				lua.PushValue( 1 );
 				if( isZero )
 					lua.PushInteger( 0 );
@@ -462,14 +476,12 @@ namespace Cosmos.Executable.Lua
 			return PairsMeta( lua, "__pairs", false, DG_B_Next );
 		}
 
+		// traversal function for 'ipairs', which respects '__index'
 		private static int IpairsAux( ILuaState lua )
 		{
-			int i = lua.L_CheckInteger( 2 );
-			lua.L_CheckType( 1, LuaType.LUA_TTABLE );
-			i++; // next value
+			long i = unchecked( lua.L_CheckInteger( 2 ) + 1 );
 			lua.PushInteger( i );
-			lua.RawGetI( 1, i );
-			return lua.IsNil( -1 ) ? 1 : 2;
+			return lua.GetI( 1, i ) == LuaType.LUA_TNIL ? 1 : 2;
 		}
 		static CSharpFunctionDelegate DG_IpairsAux = IpairsAux;
 
@@ -496,7 +508,8 @@ namespace Cosmos.Executable.Lua
 				sb.Append( s );
 				lua.Pop( 1 );
 			}
-			LuaHost.Of( lua ).Out.WriteLine( sb.ToString() );
+			sb.Append( '\n' );
+			LuaHost.Of( lua ).WriteOut( sb.ToString() );
 			return 0;
 		}
 

@@ -77,6 +77,7 @@ namespace Cosmos.Executable.Lua
 		CIST_YPCALL		= (1<<4),	/* call is a yieldable protected call */
 		CIST_STAT		= (1<<5),	/* call has an error status (pcall) */
 		CIST_TAIL		= (1<<6),	/* call was tail called */
+		CIST_LEQ		= (1<<7),	/* using __lt for __le */
 	}
 
 	internal class CallInfo

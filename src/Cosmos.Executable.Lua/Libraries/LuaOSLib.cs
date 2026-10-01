@@ -9,7 +9,7 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>os</c> library of Lua 5.2, where UniLua had <c>os.clock</c> only,
+/// The <c>os</c> library of Lua 5.3, where UniLua had <c>os.clock</c> only,
 /// on <see cref="Process"/>, which a kernel does not have.
 /// </summary>
 /// <remarks>
@@ -55,7 +55,9 @@ internal static class LuaOSLib
 
     private static int OS_Difftime(ILuaState lua)
     {
-        lua.PushNumber(lua.L_CheckNumber(1) - lua.L_Opt(lua.L_CheckNumber, 2, 0.0));
+        long t1 = lua.L_CheckInteger(1);
+        long t2 = lua.L_CheckInteger(2);
+        lua.PushNumber((double)t1 - t2);
         return 1;
     }
 
@@ -69,7 +71,7 @@ internal static class LuaOSLib
             return 1;
         }
 
-        string command = lua.L_CheckString(1);
+        string command = LuaText.Decode(lua.L_CheckString(1));
         int status = execute is null ? 127 : execute(command); // 127: what a shell says of a command it cannot find
         if (status == 0)
         {
@@ -100,14 +102,14 @@ internal static class LuaOSLib
 
     private static int OS_Getenv(ILuaState lua)
     {
-        string? value = Environment.GetEnvironmentVariable(lua.L_CheckString(1));
+        string? value = Environment.GetEnvironmentVariable(LuaText.Decode(lua.L_CheckString(1)));
         if (value is null)
         {
             lua.PushNil();
         }
         else
         {
-            lua.PushString(value);
+            lua.PushString(LuaText.Encode(value));
         }
 
         return 1;
@@ -199,7 +201,7 @@ internal static class LuaOSLib
             try
             {
                 new FileStream(name, FileMode.CreateNew, FileAccess.Write).Dispose();
-                lua.PushString(name);
+                lua.PushString(LuaText.Encode(name));
                 return 1;
             }
             catch (IOException) when (File.Exists(name))
@@ -221,19 +223,19 @@ internal static class LuaOSLib
     {
         if (lua.IsNoneOrNil(1))
         {
-            lua.PushNumber(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            lua.PushInteger(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             return 1;
         }
 
         lua.L_CheckType(1, LuaType.LUA_TTABLE);
         lua.SetTop(1); // make sure the table is at the top
         // In the order of the reference implementation, which says which field is missing first
-        int second = GetField(lua, "sec", 0);
-        int minute = GetField(lua, "min", 0);
-        int hour = GetField(lua, "hour", 12);
-        int day = GetField(lua, "day", -1);
-        int month = GetField(lua, "month", -1);
-        int year = GetField(lua, "year", -1);
+        int second = GetField(lua, "sec", 0, 0);
+        int minute = GetField(lua, "min", 0, 0);
+        int hour = GetField(lua, "hour", 12, 0);
+        int day = GetField(lua, "day", -1, 0);
+        int month = GetField(lua, "month", -1, 0);
+        int year = GetField(lua, "year", -1, 0);
 
         // Out of range fields carry over, as mktime does: day 0 is the last of the month before
         DateTime local;
@@ -248,43 +250,80 @@ internal static class LuaOSLib
         }
         catch (ArgumentOutOfRangeException)
         {
-            lua.PushNil(); // the time cannot be represented
-            return 1;
+            return lua.L_Error("time result cannot be represented in this installation");
         }
 
+        // The fields as mktime normalizes them
+        lua.SetTop(1);
+        SetAllFields(lua, local);
+
         DateTime utc = local - LocalOffset(local);
-        lua.PushNumber(new DateTimeOffset(utc.Ticks, TimeSpan.Zero).ToUnixTimeSeconds());
+        lua.PushInteger(new DateTimeOffset(utc.Ticks, TimeSpan.Zero).ToUnixTimeSeconds());
         return 1;
     }
 
-    private static int GetField(ILuaState lua, string key, int fallback)
+    /// <summary>
+    /// A field of the date table, which must be an integer (in a range that
+    /// keeps the arithmetic on dates from overflowing), or else the default
+    /// <paramref name="fallback"/> if there is one.
+    /// </summary>
+    private static int GetField(ILuaState lua, string key, int fallback, int delta)
     {
-        lua.GetField(-1, key);
-        int value = lua.ToIntegerX(-1, out bool isNumber);
+        const long MaxDateField = int.MaxValue / 2;
+        LuaType type = lua.GetField(-1, key);
+        long value = lua.ToIntegerX(-1, out bool isInteger);
+        if (!isInteger)
+        {
+            if (type != LuaType.LUA_TNIL)
+            {
+                return lua.L_Error("field '{0}' is not an integer", key);
+            }
+
+            if (fallback < 0)
+            {
+                return lua.L_Error("field '{0}' missing in date table", key);
+            }
+
+            value = fallback;
+        }
+        else
+        {
+            if (!(-MaxDateField <= value && value <= MaxDateField))
+            {
+                return lua.L_Error("field '{0}' is out-of-bound", key);
+            }
+
+            value -= delta;
+        }
+
         lua.Pop(1);
-        if (isNumber)
-        {
-            return value;
-        }
+        return (int)value;
+    }
 
-        if (fallback < 0)
-        {
-            return lua.L_Error("field '{0}' missing in date table", key);
-        }
-
-        return fallback;
+    private static void SetAllFields(ILuaState lua, DateTime time)
+    {
+        SetField(lua, "sec", time.Second);
+        SetField(lua, "min", time.Minute);
+        SetField(lua, "hour", time.Hour);
+        SetField(lua, "day", time.Day);
+        SetField(lua, "month", time.Month);
+        SetField(lua, "year", time.Year);
+        SetField(lua, "wday", (int)time.DayOfWeek + 1);
+        SetField(lua, "yday", time.DayOfYear);
+        lua.PushBoolean(false);
+        lua.SetField(-2, "isdst");
     }
 
     private static int OS_Date(ILuaState lua)
     {
         string format = lua.L_OptString(1, "%c");
-        double seconds = lua.IsNoneOrNil(2) ? DateTimeOffset.UtcNow.ToUnixTimeSeconds() : lua.L_CheckNumber(2);
+        long seconds = lua.IsNoneOrNil(2) ? DateTimeOffset.UtcNow.ToUnixTimeSeconds() : lua.L_CheckInteger(2);
 
         DateTime time;
         TimeSpan offset;
         try
         {
-            DateTime utc = DateTimeOffset.FromUnixTimeSeconds((long)Math.Floor(seconds)).UtcDateTime;
+            DateTime utc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
             bool universal = format.StartsWith('!');
             if (universal)
             {
@@ -296,23 +335,13 @@ internal static class LuaOSLib
         }
         catch (ArgumentOutOfRangeException)
         {
-            lua.PushNil(); // the time cannot be represented
-            return 1;
+            return lua.L_Error("time result cannot be represented in this installation");
         }
 
-        if (format.StartsWith("*t", StringComparison.Ordinal))
+        if (format == "*t")
         {
-            lua.CreateTable(0, 9);
-            SetField(lua, "sec", time.Second);
-            SetField(lua, "min", time.Minute);
-            SetField(lua, "hour", time.Hour);
-            SetField(lua, "day", time.Day);
-            SetField(lua, "month", time.Month);
-            SetField(lua, "year", time.Year);
-            SetField(lua, "wday", (int)time.DayOfWeek + 1);
-            SetField(lua, "yday", time.DayOfYear);
-            lua.PushBoolean(false);
-            lua.SetField(-2, "isdst");
+            lua.CreateTable(0, 9); // 9 = number of fields
+            SetAllFields(lua, time);
             return 1;
         }
 
@@ -327,7 +356,7 @@ internal static class LuaOSLib
 
             if (++i >= format.Length)
             {
-                return lua.L_Error("invalid conversion specifier '%'");
+                return lua.L_ArgError(1, "invalid conversion specifier '%'");
             }
 
             // The E and O modifiers ask for the locale's alternative forms, which
@@ -337,7 +366,7 @@ internal static class LuaOSLib
                 string modified = format[i] == 'E' ? "cCxXyY" : "deHImMSuUVwWy";
                 if (i + 1 >= format.Length || modified.IndexOf(format[i + 1]) < 0)
                 {
-                    return lua.L_Error("invalid conversion specifier '%{0}'", format.Substring(i, Math.Min(2, format.Length - i)));
+                    return lua.L_ArgError(1, "invalid conversion specifier '%" + format[i..] + "'");
                 }
 
                 i++;
@@ -345,7 +374,7 @@ internal static class LuaOSLib
 
             if (!AppendConversion(result, format[i], time, offset))
             {
-                return lua.L_Error("invalid conversion specifier '%{0}'", format[i]);
+                return lua.L_ArgError(1, "invalid conversion specifier '%" + format[i..] + "'");
             }
         }
 

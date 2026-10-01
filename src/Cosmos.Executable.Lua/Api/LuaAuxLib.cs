@@ -29,10 +29,8 @@ namespace Cosmos.Executable.Lua
 		void 	L_CheckAny( int narg );
 		void 	L_CheckType( int index, LuaType t );
 		double	L_CheckNumber( int narg );
-		UInt64	L_CheckUInt64( int narg );
-		int 	L_CheckInteger( int narg );
+		long 	L_CheckInteger( int narg );
 		string 	L_CheckString( int narg );
-		uint	L_CheckUnsigned( int narg );
 		void 	L_ArgCheck( bool cond, int narg, string extraMsg );
 		int 	L_ArgError( int narg, string extraMsg );
 		string 	L_TypeName( int index );
@@ -53,10 +51,12 @@ namespace Cosmos.Executable.Lua
 		
 		T 		L_Opt<T>( Func<int,T> f, int n, T def );
 		int		L_OptInt( int narg, int def );
+		long	L_OptInteger( int narg, long def );
+		double	L_OptNumber( int narg, double def );
 		string 	L_OptString( int narg, string def );
 		bool 	L_CallMeta( int obj, string name );
 		void	L_Traceback( ILuaState otherLua, string msg, int level );
-		int		L_Len( int index );
+		long	L_Len( int index );
 
 		ThreadStatus L_LoadBuffer( string s, string name );
 		ThreadStatus L_LoadBufferX( string s, string name, string mode );
@@ -134,8 +134,8 @@ namespace Cosmos.Executable.Lua
 
 	internal partial class LuaState
 	{
-		private const int LEVELS1 = 12; // size of the first part of the stack
-		private const int LEVELS2 = 10; // size of the second part of the stack
+		private const int LEVELS1 = 10; // size of the first part of the stack
+		private const int LEVELS2 = 11; // size of the second part of the stack
 
 		public void L_Where( int level )
 		{
@@ -187,21 +187,21 @@ namespace Cosmos.Executable.Lua
 			return d;
 		}
 
-		public UInt64 L_CheckUInt64( int narg )
+		// interror: the argument is a float with no integer value, or no number
+		private void IntError( int narg )
 		{
-			bool isnum;
-			UInt64 v = API.ToUInt64X( narg, out isnum );
-			if( !isnum )
-				TagError( narg, LuaType.LUA_TUINT64 );
-			return v;
+			if( API.IsNumber( narg ) )
+				L_ArgError( narg, "number has no integer representation" );
+			else
+				TagError( narg, LuaType.LUA_TNUMBER );
 		}
 
-		public int L_CheckInteger( int narg )
+		public long L_CheckInteger( int narg )
 		{
 			bool isnum;
-			int d = API.ToIntegerX( narg, out isnum );
+			long d = API.ToIntegerX( narg, out isnum );
 			if( !isnum )
-				TagError( narg, LuaType.LUA_TNUMBER );
+				IntError( narg );
 			return d;
 		}
 
@@ -210,15 +210,6 @@ namespace Cosmos.Executable.Lua
 			string s = API.ToString( narg );
 			if( s == null ) TagError( narg, LuaType.LUA_TSTRING );
 			return s;
-		}
-
-		public uint L_CheckUnsigned( int narg )
-		{
-			bool isnum;
-			uint d = API.ToUnsignedX( narg, out isnum );
-			if( !isnum )
-				TagError( narg, LuaType.LUA_TNUMBER );
-			return d;
 		}
 
 		public T L_Opt<T>( Func<int,T> f, int n, T def )
@@ -235,6 +226,8 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		// an optional integer argument the library uses as an int (a count,
+		// a position), clamped into the range of int
 		public int L_OptInt( int narg, int def )
 		{
 			LuaType t = API.Type( narg );
@@ -245,8 +238,18 @@ namespace Cosmos.Executable.Lua
 			}
 			else
 			{
-				return L_CheckInteger( narg );
+				return (int)System.Math.Clamp( L_CheckInteger( narg ), int.MinValue, int.MaxValue );
 			}
+		}
+
+		public long L_OptInteger( int narg, long def )
+		{
+			return API.IsNoneOrNil( narg ) ? def : L_CheckInteger( narg );
+		}
+
+		public double L_OptNumber( int narg, double def )
+		{
+			return API.IsNoneOrNil( narg ) ? def : L_CheckNumber( narg );
 		}
 
 		public string L_OptString( int narg, string def )
@@ -265,8 +268,14 @@ namespace Cosmos.Executable.Lua
 
 		private int TypeError( int index, string typeName )
 		{
-			string msg = string.Format( "{0} expected, got {1}",
-				typeName, L_TypeName( index ) );
+			string typearg; // name for the type of the actual argument
+			if( L_GetMetaField( index, "__name" ) && API.Type( -1 ) == LuaType.LUA_TSTRING )
+				typearg = API.ToString( -1 ); // use the given type name
+			else if( API.Type( index ) == LuaType.LUA_TLIGHTUSERDATA )
+				typearg = "light userdata"; // special name for messages
+			else
+				typearg = L_TypeName( index ); // standard name
+			string msg = string.Format( "{0} expected, got {1}", typeName, typearg );
 			API.PushString( msg );
 			return L_ArgError( index, msg );
 		}
@@ -337,7 +346,9 @@ namespace Cosmos.Executable.Lua
 			if( !API.IsNil( -1 ) ) // name already in use?
 				return false; // leave previous value on top
 			API.Pop( 1 );
-			API.NewTable(); // create metatable
+			API.CreateTable( 0, 2 ); // create metatable
+			API.PushString( tname );
+			API.SetField( -2, "__name" ); // metatable.__name = tname
 			API.PushValue( -1 );
 			API.SetField( LuaDef.LUA_REGISTRYINDEX, tname ); // registry.name = metatable
 			return true;
@@ -380,22 +391,19 @@ namespace Cosmos.Executable.Lua
 
 		private void PushFuncName( LuaDebug ar, LuaState L1 )
 		{
-			if( ar.NameWhat.Length > 0 && ar.NameWhat[0] != '\0' ) // is there a name?
-				API.PushString( string.Format( "function '{0}'", ar.Name ) );
+			if( PushGlobalFuncName( ar, L1 ) ) // try first a global name
+			{
+				API.PushString( string.Format( "function '{0}'", API.ToString(-1) ) );
+				API.Remove( -2 ); // remove name
+			}
+			else if( !string.IsNullOrEmpty( ar.NameWhat ) ) // is there a name from code?
+				API.PushString( string.Format( "{0} '{1}'", ar.NameWhat, ar.Name ) ); // use it
 			else if( ar.What.Length > 0 && ar.What[0] == 'm' ) // main?
 				API.PushString( "main chunk" );
-			else if( ar.What.Length > 0 && ar.What[0] == 'C' )
-			{
-				if( PushGlobalFuncName( ar, L1 ) )
-				{
-					API.PushString( string.Format( "function '{0}'", API.ToString(-1) ) );
-					API.Remove( -2 ); //remove name
-				}
-				else
-					API.PushString( "?" );
-			}
-			else
+			else if( ar.What.Length > 0 && ar.What[0] != 'C' ) // for Lua functions, use <file:line>
 				API.PushString( string.Format( "function <{0}:{1}>", ar.ShortSrc, ar.LineDefined ) );
+			else // nothing left...
+				API.PushString( "?" );
 		}
 
 		private int CountLevels()
@@ -426,17 +434,17 @@ namespace Cosmos.Executable.Lua
 			LuaState oLua = otherLua as LuaState;
 			LuaDebug ar = new LuaDebug();
 			int top = API.GetTop();
-			int numLevels = oLua.CountLevels();
-			int mark = (numLevels > LEVELS1 + LEVELS2) ? LEVELS1 : 0;
+			int last = oLua.CountLevels();
+			int n1 = (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1;
 			if( msg != null )
 				API.PushString( string.Format( "{0}\n", msg ) );
 			API.PushString( "stack traceback:" );
 			while( otherLua.GetStack( level++, ar ) )
 			{
-				if( level == mark ) // too many levels?
+				if( n1-- == 0 ) // too many levels?
 				{
-					API.PushString( "\n\t..." );
-					level = numLevels - LEVELS2; // and skip to last ones
+					API.PushString( "\n\t..." ); // add a '...'
+					level = last - LEVELS2 + 1; // and skip to last ones
 				}
 				else
 				{
@@ -454,15 +462,15 @@ namespace Cosmos.Executable.Lua
 			API.Concat( API.GetTop() - top );
 		}
 
-		public int L_Len( int index )
+		public long L_Len( int index )
 		{
 			API.Len( index );
 
 			bool isnum;
-			int l = (int)API.ToIntegerX( -1, out isnum );
+			long l = API.ToIntegerX( -1, out isnum );
 			if( !isnum )
-				L_Error( "object length is not a number" );
-			API.Pop( 1 );
+				L_Error( "object length is not an integer" );
+			API.Pop( 1 ); // remove object
 			return l;
 		}
 
@@ -514,7 +522,7 @@ namespace Cosmos.Executable.Lua
 			{
 				API.Remove( fnameindex );
 				API.PushString( string.Format( "cannot open {0}: {1}",
-					filename, e.Message ) );
+					filename, LuaIOLib.Describe( e ) ) );
 				return ThreadStatus.LUA_ERRFILE;
 			}
 			using( loadinfo )
@@ -555,9 +563,15 @@ namespace Cosmos.Executable.Lua
 			return res;
 		}
 		
+		// luaL_tolstring
 		public string L_ToString( int index )
 		{
-			if( !L_CallMeta( index, "__tostring" ) ) // no metafield? // TODO L_CallMeta
+			if( L_CallMeta( index, "__tostring" ) ) // metafield?
+			{
+				if( !API.IsString( -1 ) )
+					L_Error( "'__tostring' must return a string" );
+			}
+			else
 			{
 				switch( API.Type(index) )
 				{
@@ -581,10 +595,15 @@ namespace Cosmos.Executable.Lua
 						var cscl = o as LuaCsClosureValue;
 						if( cscl != null && cscl.IsLight )
 							o = cscl.F;
+						bool named = L_GetMetaField( index, "__name" ); // try name
+						string kind = named && API.Type( -1 ) == LuaType.LUA_TSTRING
+							? API.ToString( -1 ) : L_TypeName( index );
 						API.PushString( string.Format("{0}: 0x{1:x8}"
-							, L_TypeName( index )
+							, kind
 							, System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode( o )
 							) );
+						if( named )
+							API.Remove( -2 ); // remove '__name'
 						break;
 					}
 				}
@@ -620,10 +639,10 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( LuaOSLib.LIB_NAME,	LuaOSLib.OpenLib	),
 				// {LUA_OSLIBNAME, luaopen_os},
 				new NameFuncPair( LuaStrLib.LIB_NAME, 	LuaStrLib.OpenLib   ),
-				new NameFuncPair( LuaBitLib.LIB_NAME, 	LuaBitLib.OpenLib   ),
 				new NameFuncPair( LuaMathLib.LIB_NAME, 	LuaMathLib.OpenLib  ),
 				new NameFuncPair( LuaDebugLib.LIB_NAME, LuaDebugLib.OpenLib ),
-				new NameFuncPair( LuaEncLib.LIB_NAME,	LuaEncLib.OpenLib	),
+				new NameFuncPair( LuaUtf8Lib.LIB_NAME,	LuaUtf8Lib.OpenLib	),
+				new NameFuncPair( LuaBitLib.LIB_NAME, 	LuaBitLib.OpenLib   ),
 			};
 
 			for( var i=0; i<define.Length; ++i)
@@ -727,11 +746,17 @@ namespace Cosmos.Executable.Lua
 			int top = API.GetTop();
 			L1.GetInfo( "f", ar ); // push function
 			((ILuaAPI)L1).XMove( this, 1 );
-			API.PushGlobalTable();
+			API.GetField( LuaDef.LUA_REGISTRYINDEX, "_LOADED" );
 			if( FindField( top+1, 2 ) )
 			{
-				API.Copy( -1, top+1 );
-				API.Pop( 2 );
+				string name = API.ToString( -1 );
+				if( name.StartsWith( "_G.", StringComparison.Ordinal ) ) // name start with '_G.'?
+				{
+					API.PushString( name.Substring( 3 ) ); // push name without prefix
+					API.Remove( -2 ); // remove original name
+				}
+				API.Copy( -1, top+1 ); // move name to proper place
+				API.Pop( 2 ); // remove pushed values
 				return true;
 			}
 			else
@@ -753,7 +778,7 @@ namespace Cosmos.Executable.Lua
 
 			t = API.AbsIndex(t);
 			API.RawGetI(t, FreeList); // get first free element
-			int reference = API.ToInteger(-1); // ref = t[freelist]
+			int reference = (int)API.ToInteger(-1); // ref = t[freelist]
 			API.Pop(1); // remove it from stack
 			if( reference != 0 ) // any free element?
 			{

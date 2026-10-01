@@ -146,7 +146,7 @@ namespace Cosmos.Executable.Lua
 				return lua.L_ArgError( arg+2, "invalid option" );
 			if( lua.Type( arg+1 ) == LuaType.LUA_TNUMBER )
 			{
-				if( !L1.GetStack( lua.ToInteger( arg+1 ), ar ) )
+				if( !L1.GetStack( ClampInt( lua.ToInteger( arg+1 ) ), ar ) )
 				{
 					lua.PushNil(); // level out of range
 					return 1;
@@ -198,7 +198,7 @@ namespace Cosmos.Executable.Lua
 			int arg;
 			ILuaState L1 = GetThread( lua, out arg );
 			LuaDebug ar = new LuaDebug();
-			int nvar = lua.L_CheckInteger( arg+2 ); // local-variable index
+			int nvar = ClampInt( lua.L_CheckInteger( arg+2 ) ); // local-variable index
 			if( lua.IsFunction( arg+1 ) ) // function argument?
 			{
 				lua.PushValue( arg+1 ); // push function
@@ -207,7 +207,7 @@ namespace Cosmos.Executable.Lua
 			}
 			else // stack-level argument
 			{
-				if( !L1.GetStack( lua.L_CheckInteger( arg+1 ), ar ) ) // out of range?
+				if( !L1.GetStack( ClampInt( lua.L_CheckInteger( arg+1 ) ), ar ) ) // out of range?
 					return lua.L_ArgError( arg+1, "level out of range" );
 				string name = ((LuaState)L1).GetLocal( ar, nvar );
 				if( name != null )
@@ -230,19 +230,26 @@ namespace Cosmos.Executable.Lua
 			int arg;
 			ILuaState L1 = GetThread( lua, out arg );
 			LuaDebug ar = new LuaDebug();
-			if( !L1.GetStack( lua.L_CheckInteger( arg+1 ), ar ) ) // out of range?
+			if( !L1.GetStack( ClampInt( lua.L_CheckInteger( arg+1 ) ), ar ) ) // out of range?
 				return lua.L_ArgError( arg+1, "level out of range" );
 			lua.L_CheckAny( arg+3 );
-			int nvar = lua.L_CheckInteger( arg+2 );
+			int nvar = ClampInt( lua.L_CheckInteger( arg+2 ) );
 			lua.SetTop( arg+3 );
 			lua.XMove( L1, 1 );
 			lua.PushString( ((LuaState)L1).SetLocal( ar, nvar ) );
 			return 1;
 		}
 
+		// a level or an index as an int, a value beyond int's range being
+		// as much out of range as the end of int's range
+		private static int ClampInt( long v )
+		{
+			return (int)System.Math.Clamp( v, int.MinValue, int.MaxValue );
+		}
+
 		private static int AuxUpvalue( ILuaState lua, bool get )
 		{
-			int n = lua.L_CheckInteger( 2 );
+			int n = ClampInt( lua.L_CheckInteger( 2 ) );
 			lua.L_CheckType( 1, LuaType.LUA_TFUNCTION );
 			string name = get ? lua.GetUpvalue( 1, n ) : lua.SetUpvalue( 1, n );
 			if( name == null ) return 0;
@@ -265,7 +272,7 @@ namespace Cosmos.Executable.Lua
 		private static int CheckUpval( ILuaState lua, int argf, int argnup )
 		{
 			LuaDebug ar = new LuaDebug();
-			int nup = lua.L_CheckInteger( argnup );
+			int nup = ClampInt( lua.L_CheckInteger( argnup ) );
 			lua.L_CheckType( argf, LuaType.LUA_TFUNCTION );
 			lua.PushValue( argf );
 			((LuaState)lua).GetInfo( ">u", ar );

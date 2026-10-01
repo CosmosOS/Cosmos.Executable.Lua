@@ -33,10 +33,17 @@ namespace Cosmos.Executable.Lua
 		OP_ADD,/*	A B C	R(A) := RK(B) + RK(C)				*/
 		OP_SUB,/*	A B C	R(A) := RK(B) - RK(C)				*/
 		OP_MUL,/*	A B C	R(A) := RK(B) * RK(C)				*/
-		OP_DIV,/*	A B C	R(A) := RK(B) / RK(C)				*/
 		OP_MOD,/*	A B C	R(A) := RK(B) % RK(C)				*/
 		OP_POW,/*	A B C	R(A) := RK(B) ^ RK(C)				*/
+		OP_DIV,/*	A B C	R(A) := RK(B) / RK(C)				*/
+		OP_IDIV,/*	A B C	R(A) := RK(B) // RK(C)				*/
+		OP_BAND,/*	A B C	R(A) := RK(B) & RK(C)				*/
+		OP_BOR,/*	A B C	R(A) := RK(B) | RK(C)				*/
+		OP_BXOR,/*	A B C	R(A) := RK(B) ~ RK(C)				*/
+		OP_SHL,/*	A B C	R(A) := RK(B) << RK(C)				*/
+		OP_SHR,/*	A B C	R(A) := RK(B) >> RK(C)				*/
 		OP_UNM,/*	A B	R(A) := -R(B)					*/
+		OP_BNOT,/*	A B	R(A) := ~R(B)					*/
 		OP_NOT,/*	A B	R(A) := not R(B)				*/
 		OP_LEN,/*	A B	R(A) := length of R(B)				*/
 
@@ -126,10 +133,17 @@ namespace Cosmos.Executable.Lua
 			Info.Add( OpCode.OP_ADD, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
 			Info.Add( OpCode.OP_SUB, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
 			Info.Add( OpCode.OP_MUL, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
-			Info.Add( OpCode.OP_DIV, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
 			Info.Add( OpCode.OP_MOD, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
 			Info.Add( OpCode.OP_POW, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_DIV, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_IDIV, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_BAND, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_BOR, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_BXOR, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_SHL, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
+			Info.Add( OpCode.OP_SHR, 		M(false, true,  OpArgMask.OpArgK, OpArgMask.OpArgK, OpMode.iABC) );
 			Info.Add( OpCode.OP_UNM, 		M(false, true,  OpArgMask.OpArgR, OpArgMask.OpArgN, OpMode.iABC) );
+			Info.Add( OpCode.OP_BNOT, 		M(false, true,  OpArgMask.OpArgR, OpArgMask.OpArgN, OpMode.iABC) );
 			Info.Add( OpCode.OP_NOT, 		M(false, true,  OpArgMask.OpArgR, OpArgMask.OpArgN, OpMode.iABC) );
 			Info.Add( OpCode.OP_LEN, 		M(false, true,  OpArgMask.OpArgR, OpArgMask.OpArgN, OpMode.iABC) );
 			Info.Add( OpCode.OP_CONCAT, 	M(false, true,  OpArgMask.OpArgR, OpArgMask.OpArgR, OpMode.iABC) );

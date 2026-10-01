@@ -246,53 +246,69 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private static bool IsNumeral( ExpDesc e )
+		// tonumeral: whether 'e' is a numeral, and its value
+		private static bool ToNumeral( ExpDesc e, out TValue v )
 		{
-			return e.Kind == ExpKind.VKNUM
-				&& e.ExitTrue == NO_JUMP
-				&& e.ExitFalse == NO_JUMP;
+			v = new TValue();
+			if( e.ExitTrue != NO_JUMP || e.ExitFalse != NO_JUMP )
+				return false; // not a numeral
+			switch( e.Kind )
+			{
+				case ExpKind.VKINT:
+					v.SetIValue( e.IntValue );
+					return true;
+				case ExpKind.VKFLT:
+					v.SetFltValue( e.NumberValue );
+					return true;
+				default: return false;
+			}
 		}
 
-		private static bool ConstFolding( OpCode op, ExpDesc e1, ExpDesc e2 )
+		private static bool IsNumeral( ExpDesc e )
 		{
-			if( !IsNumeral(e1) || !IsNumeral(e2) )
-				return false;
+			TValue v;
+			return ToNumeral( e, out v );
+		}
 
-			if( (op == OpCode.OP_DIV || op == OpCode.OP_MOD)
-				&& e2.NumberValue == 0.0 )
-			{
-				return false; // do not attempt to divide by 0
-			}
-
+		// validop: whether folding 'op' would not raise an error
+		private static bool ValidOp( LuaOp op, ref TValue v1, ref TValue v2 )
+		{
 			switch( op )
 			{
-				case OpCode.OP_ADD:
-					e1.NumberValue = e1.NumberValue + e2.NumberValue;
-					break;
-				case OpCode.OP_SUB:
-					e1.NumberValue = e1.NumberValue - e2.NumberValue;
-					break;
-				case OpCode.OP_MUL:
-					e1.NumberValue = e1.NumberValue * e2.NumberValue;
-					break;
-				case OpCode.OP_DIV:
-					e1.NumberValue = e1.NumberValue / e2.NumberValue;
-					break;
-				case OpCode.OP_MOD:
-					var v1 = e1.NumberValue;
-					var v2 = e2.NumberValue;
-					e1.NumberValue = v1 - Math.Floor(v1/v2) * v2;
-					break;
-				case OpCode.OP_POW:
-					e1.NumberValue = Math.Pow( e1.NumberValue, e2.NumberValue );
-					break;
-				case OpCode.OP_UNM:
-					e1.NumberValue = -e1.NumberValue;
-					break;
-				default:
-					throw new Exception("ConstFolding unknown op" + op);
+				case LuaOp.LUA_OPBAND: case LuaOp.LUA_OPBOR: case LuaOp.LUA_OPBXOR:
+				case LuaOp.LUA_OPSHL: case LuaOp.LUA_OPSHR: case LuaOp.LUA_OPBNOT: { // conversion errors
+					long i;
+					return LuaState.V_ToInteger( ref v1, out i, 0 ) && LuaState.V_ToInteger( ref v2, out i, 0 );
+				}
+				case LuaOp.LUA_OPDIV: case LuaOp.LUA_OPIDIV: case LuaOp.LUA_OPMOD: // division by 0
+					return v2.NValue() != 0;
+				default: return true; // everything else is valid
 			}
+		}
 
+		// constfolding: an operation on numerals done now, unless it could
+		// raise an error or results in NaN or 0.0 (because of -0.0)
+		private static bool ConstFolding( LuaOp op, ExpDesc e1, ExpDesc e2 )
+		{
+			TValue v1, v2;
+			if( !ToNumeral( e1, out v1 ) || !ToNumeral( e2, out v2 ) || !ValidOp( op, ref v1, ref v2 ) )
+				return false; // non-numeric operands or not safe to fold
+
+			var res = new TValue();
+			LuaState.O_RawArith( null, op, ref v1, ref v2, ref res ); // does operation
+			if( res.TtIsInteger() )
+			{
+				e1.Kind = ExpKind.VKINT;
+				e1.IntValue = res.IValue();
+			}
+			else
+			{
+				double n = res.FltValue;
+				if( double.IsNaN( n ) || n == 0 )
+					return false;
+				e1.Kind = ExpKind.VKFLT;
+				e1.NumberValue = n;
+			}
 			return true;
 		}
 
@@ -301,14 +317,21 @@ namespace Cosmos.Executable.Lua
 			fs.Proto.LineInfo[ fs.Pc-1 ] = line;
 		}
 
-		private static void CodeArith( FuncState fs, OpCode op,
+		// codeunexpval: a unary operation on a register
+		private static void CodeUnExpVal( FuncState fs, OpCode op, ExpDesc e, int line )
+		{
+			int r = Exp2AnyReg( fs, e ); // opcodes operate only on registers
+			FreeExp( fs, e );
+			e.Info = CodeABC( fs, op, 0, r, 0 ); // generate opcode
+			e.Kind = ExpKind.VRELOCABLE; // all those operations are relocatable
+			FixLine( fs, line );
+		}
+
+		// codebinexpval: a binary operation on registers or constants
+		private static void CodeBinExpVal( FuncState fs, OpCode op,
 			ExpDesc e1, ExpDesc e2, int line )
 		{
-			if( ConstFolding( op, e1, e2 ) )
-				return;
-
-			int o2 = ( op != OpCode.OP_UNM && op != OpCode.OP_LEN )
-				? Exp2RK( fs, e2 ) : 0;
+			int o2 = Exp2RK( fs, e2 ); // both operands are "RK"
 			int o1 = Exp2RK( fs, e1 );
 			if( o1 > o2 )
 			{
@@ -320,8 +343,8 @@ namespace Cosmos.Executable.Lua
 				FreeExp( fs, e2 );
 				FreeExp( fs, e1 );
 			}
-			e1.Info = CodeABC( fs, op, 0, o1, o2 );
-			e1.Kind = ExpKind.VRELOCABLE;
+			e1.Info = CodeABC( fs, op, 0, o1, o2 ); // generate opcode
+			e1.Kind = ExpKind.VRELOCABLE; // all those operations are relocatable
 			FixLine( fs, line );
 		}
 
@@ -467,9 +490,10 @@ namespace Cosmos.Executable.Lua
 					break;
 
 				case ExpKind.VK:
-				case ExpKind.VKNUM:
+				case ExpKind.VKFLT:
+				case ExpKind.VKINT:
 				case ExpKind.VTRUE:
-					pc = NO_JUMP;
+					pc = NO_JUMP; // always true; do nothing
 					break;
 
 				default:
@@ -520,7 +544,8 @@ namespace Cosmos.Executable.Lua
 					break;
 
 				case ExpKind.VK:
-				case ExpKind.VKNUM:
+				case ExpKind.VKFLT:
+				case ExpKind.VKINT:
 				case ExpKind.VTRUE:
 					e.Kind = ExpKind.VFALSE;
 					break;
@@ -568,33 +593,28 @@ namespace Cosmos.Executable.Lua
 
 		public static void Prefix( FuncState fs, UnOpr op, ExpDesc e, int line )
 		{
-			ExpDesc e2 = new ExpDesc();
-			e2.ExitTrue = NO_JUMP;
-			e2.ExitFalse = NO_JUMP;
-			e2.Kind = ExpKind.VKNUM;
-			e2.NumberValue = 0.0;
+			// 'ef' is a fake 2nd operand
+			ExpDesc ef = new ExpDesc();
+			ef.ExitTrue = NO_JUMP;
+			ef.ExitFalse = NO_JUMP;
+			ef.Kind = ExpKind.VKINT;
+			ef.IntValue = 0;
 
 			switch( op )
 			{
-				case UnOpr.MINUS: {
-					if( IsNumeral( e ) ) // minus constant?
-					{
-						e.NumberValue = -e.NumberValue;
-					}
-					else
-					{
-						Exp2AnyReg( fs, e );
-						CodeArith( fs, OpCode.OP_UNM, e, e2, line );
-					}
+				case UnOpr.MINUS:
+				case UnOpr.BNOT: {
+					if( ConstFolding( op == UnOpr.MINUS ? LuaOp.LUA_OPUNM : LuaOp.LUA_OPBNOT, e, ef ) )
+						break;
+					CodeUnExpVal( fs, op == UnOpr.MINUS ? OpCode.OP_UNM : OpCode.OP_BNOT, e, line );
+				} break;
+
+				case UnOpr.LEN: {
+					CodeUnExpVal( fs, OpCode.OP_LEN, e, line );
 				} break;
 
 				case UnOpr.NOT: {
 					CodeNot( fs, e );
-				} break;
-
-				case UnOpr.LEN: {
-					Exp2AnyReg( fs, e ); // cannot operate on constants
-					CodeArith( fs, OpCode.OP_LEN, e, e2, line );
 				} break;
 
 				default:
@@ -607,25 +627,25 @@ namespace Cosmos.Executable.Lua
 			switch( op )
 			{
 				case BinOpr.AND: {
-					GoIfTrue( fs, e );
+					GoIfTrue( fs, e ); // go ahead only if 'v' is true
 				} break;
 
 				case BinOpr.OR: {
-					GoIfFalse( fs, e );
+					GoIfFalse( fs, e ); // go ahead only if 'v' is false
 				} break;
 
 				case BinOpr.CONCAT: {
 					Exp2NextReg( fs, e ); // operand must be on the `stack'
 				} break;
 
-				case BinOpr.ADD:
-				case BinOpr.SUB:
-				case BinOpr.MUL:
-				case BinOpr.DIV:
-				case BinOpr.MOD:
-				case BinOpr.POW: {
+				case BinOpr.ADD: case BinOpr.SUB:
+				case BinOpr.MUL: case BinOpr.DIV: case BinOpr.IDIV:
+				case BinOpr.MOD: case BinOpr.POW:
+				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR:
+				case BinOpr.SHL: case BinOpr.SHR: {
 					if( !IsNumeral(e) )
 						Exp2RK( fs, e );
+					// else keep numeral, which may be folded with 2nd operand
 				} break;
 
 				default: {
@@ -640,14 +660,14 @@ namespace Cosmos.Executable.Lua
 			switch( op )
 			{
 				case BinOpr.AND: {
-					Utl.Assert( e1.ExitTrue == NO_JUMP );
+					Utl.Assert( e1.ExitTrue == NO_JUMP ); // list closed by 'Infix'
 					DischargeVars( fs, e2 );
 					e2.ExitFalse = Concat( fs, e2.ExitFalse, e1.ExitFalse );
 					e1.CopyFrom( e2 );
 					break;
 				}
 				case BinOpr.OR: {
-					Utl.Assert( e1.ExitFalse == NO_JUMP );
+					Utl.Assert( e1.ExitFalse == NO_JUMP ); // list closed by 'Infix'
 					DischargeVars( fs, e2 );
 					e2.ExitTrue = Concat( fs, e2.ExitTrue, e1.ExitTrue );
 					e1.CopyFrom( e2 );
@@ -669,32 +689,16 @@ namespace Cosmos.Executable.Lua
 					{
 						// operand must be on the `stack'
 						Exp2NextReg( fs, e2 );
-						CodeArith( fs, OpCode.OP_CONCAT, e1, e2, line );
+						CodeBinExpVal( fs, OpCode.OP_CONCAT, e1, e2, line );
 					}
 					break;
 				}
-				case BinOpr.ADD: {
-					CodeArith( fs, OpCode.OP_ADD, e1, e2, line);
-					break;
-				}
-				case BinOpr.SUB: {
-					CodeArith( fs, OpCode.OP_SUB, e1, e2, line);
-					break;
-				}
-				case BinOpr.MUL: {
-					CodeArith( fs, OpCode.OP_MUL, e1, e2, line);
-					break;
-				}
-				case BinOpr.DIV: {
-					CodeArith( fs, OpCode.OP_DIV, e1, e2, line);
-					break;
-				}
-				case BinOpr.MOD: {
-					CodeArith( fs, OpCode.OP_MOD, e1, e2, line);
-					break;
-				}
-				case BinOpr.POW: {
-					CodeArith( fs, OpCode.OP_POW, e1, e2, line);
+				case BinOpr.ADD: case BinOpr.SUB: case BinOpr.MUL: case BinOpr.DIV:
+				case BinOpr.IDIV: case BinOpr.MOD: case BinOpr.POW:
+				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR:
+				case BinOpr.SHL: case BinOpr.SHR: {
+					if( !ConstFolding( (LuaOp)(op - BinOpr.ADD), e1, e2 ) )
+						CodeBinExpVal( fs, (OpCode)((int)OpCode.OP_ADD + (int)(op - BinOpr.ADD)), e1, e2, line );
 					break;
 				}
 				case BinOpr.EQ: {
@@ -811,17 +815,21 @@ namespace Cosmos.Executable.Lua
 			return AddK( fs, ref o, ref o );
 		}
 
+		// luaK_intK: an integer constant; an integer and a float are two
+		// constants, as their type tags differ
+		public static int IntK( FuncState fs, long n )
+		{
+			var o = new TValue();
+			o.SetIValue(n);
+			return AddK( fs, ref o, ref o );
+		}
+
+		// luaK_numberK: a float constant, never NaN nor -0.0 (folding avoids
+		// them), so that the value itself is its key
 		public static int NumberK( FuncState fs, double r )
 		{
 			var o = new TValue();
-			o.SetNValue(r);
-			if( r == 0 || System.Double.IsNaN(r) ) // handle -0 and NaN
-			{
-				// keyed by the raw bits, so that -0 and 0 are two constants
-				var key = new TValue();
-				key.SetUInt64Value( (ulong)System.BitConverter.DoubleToInt64Bits(r) );
-				return AddK( fs, ref key, ref o );
-			}
+			o.SetFltValue(r);
 			return AddK( fs, ref o, ref o );
 		}
 
@@ -899,8 +907,12 @@ namespace Cosmos.Executable.Lua
 					CodeK( fs, reg, e.Info );
 					break;
 				}
-				case ExpKind.VKNUM: {
+				case ExpKind.VKFLT: {
 					CodeK( fs, reg, NumberK( fs, e.NumberValue ) );
+					break;
+				}
+				case ExpKind.VKINT: {
+					CodeK( fs, reg, IntK( fs, e.IntValue ) );
 					break;
 				}
 				case ExpKind.VRELOCABLE: {
@@ -929,7 +941,7 @@ namespace Cosmos.Executable.Lua
 			{
 				if( newStack >= LuaLimits.MAXSTACK )
 				{
-					fs.Lexer.SyntaxError("function or expression too complex");
+					fs.Lexer.SyntaxError("function or expression needs too many registers");
 				}
 				fs.Proto.MaxStackSize = (byte)newStack;
 			}
@@ -1001,38 +1013,21 @@ namespace Cosmos.Executable.Lua
 		public static int Exp2RK( FuncState fs, ExpDesc e )
 		{
 			Exp2Val( fs, e );
-			switch( e.Kind )
+			switch( e.Kind ) // move constants to 'k'
 			{
-				case ExpKind.VTRUE:
-				case ExpKind.VFALSE:
-				case ExpKind.VNIL: {
-					// constant fits in RK operand?
-					if( fs.Proto.K.Count <= Instruction.MAXINDEXRK )
-					{
-						e.Info = (e.Kind == ExpKind.VNIL) ? NilK(fs)
-							: BoolK( fs, (e.Kind == ExpKind.VTRUE ) );
-						e.Kind = ExpKind.VK;
-						return Instruction.RKASK( e.Info );
-					}
-					else break;
-				}
-				case ExpKind.VKNUM:
-				case ExpKind.VK:
-				{
-					if( e.Kind == ExpKind.VKNUM )
-					{
-						e.Info = NumberK( fs, e.NumberValue );
-						e.Kind = ExpKind.VK;
-					}
-
-					if( e.Info <= Instruction.MAXINDEXRK )
-						return Instruction.RKASK( e.Info );
-					else break;
-				}
-
-				default: break;
+				case ExpKind.VTRUE: e.Info = BoolK( fs, true ); break;
+				case ExpKind.VFALSE: e.Info = BoolK( fs, false ); break;
+				case ExpKind.VNIL: e.Info = NilK( fs ); break;
+				case ExpKind.VKINT: e.Info = IntK( fs, e.IntValue ); break;
+				case ExpKind.VKFLT: e.Info = NumberK( fs, e.NumberValue ); break;
+				case ExpKind.VK: break;
+				default:
+					// not a constant in the right range: put it in a register
+					return Exp2AnyReg( fs, e );
 			}
-
+			e.Kind = ExpKind.VK;
+			if( e.Info <= Instruction.MAXINDEXRK ) // constant fits in 'argC'?
+				return Instruction.RKASK( e.Info );
 			return Exp2AnyReg( fs, e );
 		}
 

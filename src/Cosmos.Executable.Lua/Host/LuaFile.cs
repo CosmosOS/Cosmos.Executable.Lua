@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security;
-using System.Text;
 
 namespace Cosmos.Executable.Lua;
 
@@ -16,9 +15,8 @@ namespace Cosmos.Executable.Lua;
 internal static class LuaFile
 {
     /// <summary>
-    /// Opens <paramref name="filename"/> for the lexer: a script as UTF-8 (a
-    /// byte order mark is skipped), a precompiled chunk, which starts with
-    /// ESC as <c>string.dump</c> writes it, one byte per character.
+    /// Opens the file the Lua string <paramref name="filename"/> names, for
+    /// the lexer, which reads its bytes.
     /// </summary>
     public static FileLoadInfo OpenFile(ILuaState lua, string filename)
     {
@@ -51,53 +49,22 @@ internal static class LuaFile
     }
 }
 
-/// <summary>A script file as the lexer reads it, one character at a time.</summary>
+/// <summary>A script file as the lexer reads it, one byte at a time.</summary>
 internal sealed class FileLoadInfo : ILoadInfo, IDisposable
 {
-    private readonly StreamReader _reader;
+    private readonly Stream _stream;
 
-    /// <summary>Characters read ahead of the lexer: the first one, and those <see cref="PeekByte"/> saw.</summary>
-    private readonly Queue<char> _buffer = new();
-
-    /// <summary>The first byte of a precompiled chunk (LUA_SIGNATURE).</summary>
-    private const int BinaryChunkMark = 0x1B;
-
-    /// <summary>Whether the file is a precompiled chunk, which is read one byte per character.</summary>
-    private readonly bool _binary;
+    /// <summary>Bytes read ahead of the lexer: those <see cref="SkipComment"/> kept, and those <see cref="PeekByte"/> saw.</summary>
+    private readonly Queue<int> _buffer = new();
 
     public FileLoadInfo(Stream stream)
     {
-        _binary = IsBinaryChunk(stream);
-        _reader = _binary
-            ? new StreamReader(stream, Encoding.Latin1, detectEncodingFromByteOrderMarks: false)
-            : new StreamReader(stream, Encoding.UTF8);
-    }
-
-    /// <summary>
-    /// Whether the file holds a precompiled chunk, after a first line that
-    /// starts with <c>#</c> if there is one, as luaL_loadfilex looks; the
-    /// stream is left at its start.
-    /// </summary>
-    private static bool IsBinaryChunk(Stream stream)
-    {
-        int c = stream.ReadByte();
-        if (c == '#')
-        {
-            while (c != -1 && c != '\n')
-            {
-                c = stream.ReadByte();
-            }
-
-            c = stream.ReadByte();
-        }
-
-        stream.Seek(0, SeekOrigin.Begin);
-        return c == BinaryChunkMark;
+        _stream = new BufferedStream(stream);
     }
 
     public int ReadByte()
     {
-        return _buffer.Count > 0 ? _buffer.Dequeue() : _reader.Read();
+        return _buffer.Count > 0 ? _buffer.Dequeue() : _stream.ReadByte();
     }
 
     public int PeekByte()
@@ -107,40 +74,72 @@ internal sealed class FileLoadInfo : ILoadInfo, IDisposable
             return _buffer.Peek();
         }
 
-        int c = _reader.Read();
+        int c = _stream.ReadByte();
         if (c != -1)
         {
-            _buffer.Enqueue((char)c);
+            _buffer.Enqueue(c);
         }
 
         return c;
     }
 
-    /// <summary>Skips a first line that starts with <c>#</c>, as in a script run as <c>#!/usr/bin/lua</c>.</summary>
+    /// <summary>
+    /// skipcomment, as luaL_loadfilex does: skips a UTF-8 byte order mark,
+    /// and a first line that starts with <c>#</c>, as in a script run as
+    /// <c>#!/usr/bin/lua</c>, which stays as a newline to keep the line
+    /// numbers of a script, but not of a precompiled chunk.
+    /// </summary>
     public void SkipComment()
     {
-        int c = _reader.Read();
-        if (c == '#')
+        List<int> prefix = [];
+        int c = SkipBom(prefix);
+        foreach (int b in prefix)
+        {
+            _buffer.Enqueue(b); // what was read of a mark that is not one
+        }
+
+        if (c == '#') // first line is a comment (Unix exec. file)?
         {
             do
             {
-                c = _reader.Read();
+                c = _stream.ReadByte();
             }
             while (c != -1 && c != '\n');
 
-            if (!_binary)
+            c = _stream.ReadByte(); // skip end-of-line, if present
+            if (c != LuaConf.LUA_SIGNATURE[0])
             {
-                _buffer.Enqueue('\n'); // keep the line numbers; a chunk must start with its signature
+                _buffer.Enqueue('\n'); // add line to correct line numbers
             }
         }
-        else if (c != -1)
+
+        if (c != -1)
         {
-            _buffer.Enqueue((char)c);
+            _buffer.Enqueue(c); // the first character of the stream
         }
+    }
+
+    /// <summary>skipBOM: the first byte after a UTF-8 byte order mark; <paramref name="prefix"/> gets what was read of one that is not.</summary>
+    private int SkipBom(List<int> prefix)
+    {
+        ReadOnlySpan<byte> bom = [0xEF, 0xBB, 0xBF];
+        for (int n = 0; n < bom.Length; n++)
+        {
+            int c = _stream.ReadByte();
+            if (c == -1 || c != bom[n])
+            {
+                return c;
+            }
+
+            prefix.Add(c);
+        }
+
+        prefix.Clear(); // prefix matched; discard it
+        return _stream.ReadByte(); // return next character
     }
 
     public void Dispose()
     {
-        _reader.Dispose();
+        _stream.Dispose();
     }
 }

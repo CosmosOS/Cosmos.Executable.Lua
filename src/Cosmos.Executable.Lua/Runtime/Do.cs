@@ -50,7 +50,7 @@ namespace Cosmos.Executable.Lua
 					// Any other .NET exception, from a C# function such as a
 					// host's or from a file operation, is a Lua error with its
 					// message: pcall catches it, and it does not tear down the host.
-					Top.V.SetSValue( e.GetType().Name + ": " + e.Message );
+					Top.V.SetSValue( LuaText.Encode( e.GetType().Name + ": " + e.Message ) );
 					IncrTop();
 					res = ThreadStatus.LUA_ERRRUN;
 				}
@@ -213,7 +213,7 @@ namespace Cosmos.Executable.Lua
 				int n = cscl.F( this );
 				
 				// poscall
-				D_PosCall( Top.Index-n );
+				D_PosCall( Top.Index-n, n );
 
 				return true;
 			}
@@ -221,7 +221,10 @@ namespace Cosmos.Executable.Lua
 			throw new System.NotImplementedException();
 		}
 
-		private int D_PosCall( int firstResultIndex )
+		// The 'nres' results from 'firstResultIndex' go where the function was;
+		// 'Top' is left where it is until the return hook has run, so that the
+		// hook sees the frame of the function whole (a bug of 5.2)
+		private int D_PosCall( int firstResultIndex, int nres )
 		{
 			if( (HookMask & (LuaDef.LUA_MASKRET | LuaDef.LUA_MASKLINE)) != 0 )
 			{
@@ -242,7 +245,7 @@ namespace Cosmos.Executable.Lua
 			CI = BaseCI[CI.Index-1];
 
 			int i = wanted;
-			for( ; i!=0 && firstResultIndex < Top.Index; --i )
+			for( ; i!=0 && nres > 0; --i, --nres )
 			{
 #if DEBUG_D_POS_CALL
 				System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall assign lhs res:" + res );
