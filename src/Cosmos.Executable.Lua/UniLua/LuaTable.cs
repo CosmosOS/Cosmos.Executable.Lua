@@ -1,24 +1,22 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define DEBUG_DUMMY_TVALUE_MODIFY
 
 using System;
 using System.Collections.Generic;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
-	using ULDebug = UniLua.Tools.ULDebug;
 
-	public class LuaTable {
+	internal class LuaTable {
 		public LuaTable MetaTable;
 		public uint NoTagMethodFlags;
 
 		public LuaTable(LuaState l) {
 			InitLuaTable(l);
-		}
-
-		~LuaTable()
-		{
-			Recycle();
 		}
 
 		public StkId Get(ref TValue key)
@@ -70,6 +68,8 @@ namespace UniLua
 
 		public void Set(ref TValue key, ref TValue val)
 		{
+			if(key.TtIsString())
+				{ NoTagMethodFlags = 0; } // a metamethod may come: forget the misses
 			var cell = Get(ref key);
 			if(cell == TheNilValue) {
 				cell = NewTableKey(ref key);
@@ -195,9 +195,6 @@ namespace UniLua
 					Set(ref node.Key.V, ref node.Val.V);
 				}
 			}
-
-			if (oldHashPart != DummyHashPart)
-				RecycleHNode(oldHashPart);
 		}
 
 		//-----------------------------------------
@@ -255,59 +252,16 @@ namespace UniLua
 			DummyHashPart[0].Index = 0;
 		}
 
-		#region Small Object Cache
-		private static HNode CacheHead = null;
-		private static object CacheHeadLock = new Object();
-
-		private void Recycle()
-		{
-			if (HashPart != null && HashPart != DummyHashPart)
-			{
-				RecycleHNode(HashPart);
-				HashPart = null;
-			}
-		}
-
-		private void RecycleHNode(HNode[] garbage)
-		{
-			if (garbage == null || garbage.Length == 0)
-				return;
-
-			for (int i = 0; i < garbage.Length-1; i++)
-			{
-				garbage[i].Next = garbage[i + 1];
-			}
-
-			lock(CacheHeadLock) {
-				garbage[garbage.Length - 1].Next = CacheHead;
-				CacheHead = garbage[0];
-			}
-		}
-
+		// UniLua recycled the nodes of a resized or finalized table into a
+		// cache shared by every state. Gone: a finalizer on every table, and a
+		// cache that only grows, are too much for a kernel's heap and GC.
 		private HNode NewHNode()
 		{
-			HNode ret;
-			if (CacheHead == null)
-			{
-				ret = new HNode();
-				ret.Key = new StkId();
-				ret.Val = new StkId();
-			}
-			else
-			{
-				lock(CacheHeadLock) {
-					ret = CacheHead;
-					CacheHead = CacheHead.Next;
-				}
-				ret.Next = null;
-				ret.Index = 0;
-				ret.Key.V.SetNilValue();
-				ret.Val.V.SetNilValue();
-			}
-
+			HNode ret = new HNode();
+			ret.Key = new StkId();
+			ret.Val = new StkId();
 			return ret;
 		}
-		#endregion
 
 		private void InitLuaTable(LuaState lua)
 		{
@@ -480,10 +434,10 @@ namespace UniLua
 			return na;
 		}
 
-		private static int[] Nums = new int[MAXBITS + 1];
 		private void Rehash(ref TValue k)
 		{
-			for(int i=0; i<=MAXBITS; ++i) { Nums[i] = 0; }
+			// Per call, not static: states on other threads rehash at the same time
+			int[] Nums = new int[MAXBITS + 1];
 
 			int nasize = NumUseArray(ref Nums);
 			int totaluse = nasize;
@@ -496,19 +450,19 @@ namespace UniLua
 
 		private void DumpParts()
 		{
-			ULDebug.Log("------------------ [DumpParts] enter -----------------------");
-			ULDebug.Log("<< Array Part >>");
+			System.Diagnostics.Debug.WriteLine("------------------ [DumpParts] enter -----------------------");
+			System.Diagnostics.Debug.WriteLine("<< Array Part >>");
 			for(var i=0; i<ArrayPart.Length; ++i) {
 				var n = ArrayPart[i];
-				ULDebug.Log(string.Format("i:{0} val:{1}", i, n.V));
+				System.Diagnostics.Debug.WriteLine(string.Format("i:{0} val:{1}", i, n.V));
 			}
-			ULDebug.Log("<< Hash Part >>");
+			System.Diagnostics.Debug.WriteLine("<< Hash Part >>");
 			for(var i=0; i<HashPart.Length; ++i) {
 				var n = HashPart[i];
 				var next = (n.Next == null) ? -1 : n.Next.Index;
-				ULDebug.Log(string.Format("i:{0} index:{1} key:{2} val:{3} next:{4}", i, n.Index, n.Key.V, n.Val.V, next));
+				System.Diagnostics.Debug.WriteLine(string.Format("i:{0} index:{1} key:{2} val:{3} next:{4}", i, n.Index, n.Key.V, n.Val.V, next));
 			}
-			ULDebug.Log("++++++++++++++++++ [DumpParts] leave +++++++++++++++++++++++");
+			System.Diagnostics.Debug.WriteLine("++++++++++++++++++ [DumpParts] leave +++++++++++++++++++++++");
 		}
 
 		private StkId NewTableKey(ref TValue k)

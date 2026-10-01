@@ -1,5 +1,9 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 
 	internal class LuaCoroLib
@@ -58,6 +62,8 @@ namespace UniLua
 			else
 			{
 				co.XMove( lua, 1 ); // move error message
+				if( LuaHost.Of( lua ).ExitCode.HasValue ) // os.exit in the coroutine?
+					((LuaState)lua).D_PropagateExit( status );
 				return -1;
 			}
 		}

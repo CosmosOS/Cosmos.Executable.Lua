@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Cosmos.Executable.Lua/Cosmos.Executable.Lua.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cosmos.Executable.Lua.Tests/Cosmos.Executable.Lua.Tests.csproj" />
+  </Folder>
+</Solution>

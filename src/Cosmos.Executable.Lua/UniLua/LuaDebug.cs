@@ -1,8 +1,13 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 	public class LuaDebug
 	{
+		public int			Event;
 		public string 		Name;
 		public string 		NameWhat;
 		public int 			ActiveCIIndex;
@@ -18,7 +23,7 @@ namespace UniLua
 		public string		ShortSrc;
 	}
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		bool ILuaAPI.GetStack( int level, LuaDebug ar )
 		{
@@ -74,6 +79,177 @@ namespace UniLua
 			return status;
 		}
 
+		internal bool IsLuaFunction( int index )
+		{
+			StkId addr;
+			return Index2Addr( index, out addr )
+				&& addr.V.TtIsFunction() && addr.V.ClIsLuaClosure();
+		}
+
+		// lua_upvalueid: the closures sharing an upvalue give the same object
+		internal object UpvalueId( int funcIndex, int n )
+		{
+			StkId addr;
+			if( !Index2Addr( funcIndex, out addr ) )
+				return null;
+			if( addr.V.ClIsLuaClosure() )
+				return addr.V.ClLValue().Upvals[n-1];
+			return addr.V.ClCsValue().Upvals[n-1];
+		}
+
+		internal void UpvalueJoin( int funcIndex1, int n1, int funcIndex2, int n2 )
+		{
+			StkId f1, f2;
+			Index2Addr( funcIndex1, out f1 );
+			Index2Addr( funcIndex2, out f2 );
+			f1.V.ClLValue().Upvals[n1-1] = f2.V.ClLValue().Upvals[n2-1];
+		}
+
+		// lua_sethook
+		internal void SetHook( LuaHookDelegate func, int mask, int count )
+		{
+			if( func == null || mask == 0 ) // turn off hooks?
+			{
+				mask = 0;
+				func = null;
+			}
+			if( CI.IsLua )
+				OldPc = CI.SavedPc.Index;
+			Hook = func;
+			BaseHookCount = count;
+			ResetHookCount();
+			HookMask = (byte)mask;
+		}
+
+		// luaD_hook: runs the hook with the stack and the frame of the event
+		internal void D_Hook( int ev, int line )
+		{
+			var hook = Hook;
+			if( hook != null && AllowHook )
+			{
+				CallInfo ci = CI;
+				int top = Top.Index;
+				int ciTop = ci.TopIndex;
+				LuaDebug ar = new LuaDebug();
+				ar.Event = ev;
+				ar.CurrentLine = line;
+				ar.ActiveCIIndex = ci.Index;
+				D_CheckStack( LuaDef.LUA_MINSTACK ); // ensure minimum stack size
+				ci.TopIndex = Top.Index + LuaDef.LUA_MINSTACK;
+				AllowHook = false; // cannot call hooks inside a hook
+				ci.CallStatus |= CallStatus.CIST_HOOKED;
+				hook( this, ar );
+				AllowHook = true;
+				ci.TopIndex = ciTop;
+				Top = Stack[top];
+				ci.CallStatus &= ~CallStatus.CIST_HOOKED;
+			}
+		}
+
+		// the call hook of a Lua function, before its first instruction
+		private void CallHook( CallInfo ci )
+		{
+			int hook = LuaDef.LUA_HOOKCALL;
+			ci.SavedPc.Index++; // hooks assume 'pc' is already incremented
+			var prev = BaseCI[ci.Index-1];
+			if( prev.IsLua &&
+				(prev.SavedPc - 1).Value.GET_OPCODE() == OpCode.OP_TAILCALL )
+			{
+				ci.CallStatus |= CallStatus.CIST_TAIL;
+				hook = LuaDef.LUA_HOOKTAILCALL;
+			}
+			D_Hook( hook, -1 );
+			ci.SavedPc.Index--; // correct 'pc'
+		}
+
+		// the count and line hooks, before an instruction runs
+		private void TraceExec( CallInfo ci )
+		{
+			byte mask = HookMask;
+			if( (mask & LuaDef.LUA_MASKCOUNT) != 0 && HookCount == 0 )
+			{
+				ResetHookCount();
+				D_Hook( LuaDef.LUA_HOOKCOUNT, -1 );
+			}
+			if( (mask & LuaDef.LUA_MASKLINE) != 0 )
+			{
+				var p = GetCurrentLuaFunc(ci).Proto;
+				int npc = ci.SavedPc.Index - 1;
+				int newline = p.GetFuncLine( npc );
+				if( npc == 0 || // call linehook when enter a new function,
+					ci.SavedPc.Index <= OldPc || // when jump back (loop), or when
+					newline != p.GetFuncLine( OldPc - 1 ) ) // enter a new line
+					D_Hook( LuaDef.LUA_HOOKLINE, newline );
+			}
+			OldPc = ci.SavedPc.Index;
+		}
+
+		private string FindVararg( CallInfo ci, int n, out StkId pos )
+		{
+			int nparams = Stack[ci.FuncIndex].V.ClLValue().Proto.NumParams;
+			pos = null;
+			if( n >= ci.BaseIndex - ci.FuncIndex - nparams )
+				return null; // no such vararg
+			pos = Stack[ci.FuncIndex + nparams + n];
+			return "(*vararg)"; // generic name for any vararg
+		}
+
+		private string FindLocal( CallInfo ci, int n, out StkId pos )
+		{
+			string name = null;
+			int stackBase;
+			pos = null;
+			if( ci.IsLua )
+			{
+				if( n < 0 ) // access to vararg values?
+					return FindVararg( ci, -n, out pos );
+				stackBase = ci.BaseIndex;
+				name = F_GetLocalName( GetCurrentLuaFunc(ci).Proto, n, ci.CurrentPc );
+			}
+			else stackBase = ci.FuncIndex + 1;
+			if( name == null ) // no 'standard' name?
+			{
+				int limit = (ci == CI) ? Top.Index : BaseCI[ci.Index+1].FuncIndex;
+				if( limit - stackBase >= n && n > 0 ) // is 'n' inside 'ci' stack?
+					name = "(*temporary)"; // generic name for any valid slot
+				else
+					return null; // no name
+			}
+			pos = Stack[stackBase + (n - 1)];
+			return name;
+		}
+
+		// lua_getlocal: with no `ar', the parameter names of the function on top
+		internal string GetLocal( LuaDebug ar, int n )
+		{
+			if( ar == null )
+			{
+				var f = Stack[Top.Index-1];
+				if( !f.V.TtIsFunction() || !f.V.ClIsLuaClosure() )
+					return null;
+				return F_GetLocalName( f.V.ClLValue().Proto, n, 0 );
+			}
+			StkId pos;
+			var name = FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
+			if( name != null )
+			{
+				Top.V.SetObj(ref pos.V);
+				IncrTop();
+			}
+			return name;
+		}
+
+		// lua_setlocal: pops the value
+		internal string SetLocal( LuaDebug ar, int n )
+		{
+			StkId pos;
+			var name = FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
+			if( name != null )
+				pos.V.SetObj(ref Stack[Top.Index-1].V);
+			Top = Stack[Top.Index-1];
+			return name;
+		}
+
 		private int AuxGetInfo( string what, LuaDebug ar, StkId func, CallInfo ci )
 		{
 			int status = 1;
@@ -103,7 +279,7 @@ namespace UniLua
 						}
 						else if(func.V.ClIsCsClosure()) {
 							var ccl = func.V.ClCsValue();
-							ar.NumUps = ccl.Upvals.Length;
+							ar.NumUps = ccl.Upvals == null ? 0 : ccl.Upvals.Length;
 							ar.IsVarArg = true;
 							ar.NumParams = 0;
 						}
@@ -119,12 +295,11 @@ namespace UniLua
 					}
 					case 'n':
 					{
-						var prevCI = BaseCI[ci.Index-1];
 						if( ci != null
 							&& ((ci.CallStatus & CallStatus.CIST_TAIL) == 0)
-							&& prevCI.IsLua )
+							&& BaseCI[ci.Index-1].IsLua )
 						{
-							ar.NameWhat = GetFuncName( prevCI, out ar.Name );
+							ar.NameWhat = GetFuncName( BaseCI[ci.Index-1], out ar.Name );
 						}
 						else
 						{
@@ -223,48 +398,63 @@ namespace UniLua
 			if(func.V.ClIsLuaClosure()) {
 				var lcl = func.V.ClLValue();
 				var p = lcl.Proto;
-				ar.Source = string.IsNullOrEmpty(p.Source) ? "=?" : p.Source;
+				ar.Source = p.Source ?? "=?";
 				ar.LineDefined = p.LineDefined;
 				ar.LastLineDefined = p.LastLineDefined;
 				ar.What = (ar.LineDefined == 0) ? "main" : "Lua";
 			}
 			else if(func.V.ClIsCsClosure()) {
-				ar.Source = "=[C#]";
+				ar.Source = "=[C]";
 				ar.LineDefined = -1;
 				ar.LastLineDefined = -1;
-				ar.What = "C#";
+				ar.What = "C";
 			}
 			else throw new System.NotImplementedException();
 
-			if( ar.Source.Length > LuaDef.LUA_IDSIZE )
-			{
-				ar.ShortSrc = ar.Source.Substring(0, LuaDef.LUA_IDSIZE);
-			}
-			else ar.ShortSrc = ar.Source;
+			ar.ShortSrc = O_ChunkId( ar.Source );
+		}
+
+		// luaO_chunkid: a chunk name as messages show it, "file.lua" for
+		// "@file.lua", "name" for "=name", [string "..."] for source code
+		internal static string O_ChunkId( string source )
+		{
+			const int bufflen = LuaDef.LUA_IDSIZE;
+			if( source == null )
+				return "?";
+			int l = source.Length;
+			if( l > 0 && source[0] == '=' ) // 'literal' source
+				return (l <= bufflen) ? source.Substring(1) : source.Substring(1, bufflen-1);
+			if( l > 0 && source[0] == '@' ) // file name
+				return (l <= bufflen) ? source.Substring(1) : "..." + source.Substring(l-(bufflen-4));
+			// string; format as [string "source"]
+			int nl = source.IndexOf('\n');
+			int max = bufflen - 15; // room for [string "..."] and '\0'
+			if( l < max && nl < 0 )
+				return "[string \"" + source + "\"]";
+			if( nl >= 0 ) l = nl;
+			if( l > max ) l = max;
+			return "[string \"" + source.Substring(0, l) + "...\"]";
 		}
 
 		private void AddInfo( string msg )
 		{
-			// var api = (ILuaAPI)this;
-			// TODO
 			if( CI.IsLua )
 			{
 				var line = GetCurrentLine(CI);
 				var src = GetCurrentLuaFunc(CI).Proto.Source;
-				if( src == null )
-					src = "?";
 
 				// 不能用 PushString, 因为 PushString 是 API 接口
 				// API 接口中的 ApiIncrTop 会检查 Top 是否超过了 CI.Top 导致出错
 				// api.PushString( msg );
 				O_PushString( string.Format( "{0}:{1}: {2}",
-					src, line, msg ) );
+					O_ChunkId( src ), line, msg ) );
 			}
+			else O_PushString( msg ); // no position outside Lua code, but a message
 		}
 
 		internal void G_RunError( string fmt, params object[] args )
 		{
-			AddInfo( string.Format( fmt, args ) );
+			AddInfo( args.Length == 0 ? fmt : string.Format( fmt, args ) );
 			G_ErrorMsg();
 		}
 
@@ -290,8 +480,8 @@ namespace UniLua
 
 		private string UpvalName( LuaProto p, int uv )
 		{
-			// TODO
-			return "(UpvalName:NotImplemented)";
+			var name = (uv < p.Upvalues.Count) ? p.Upvalues[uv].Name : null;
+			return name ?? "?";
 		}
 
 		private string GetUpvalueName( CallInfo ci, StkId o, out string name )
@@ -454,8 +644,9 @@ namespace UniLua
 
 		private bool IsInStack( CallInfo ci, StkId o )
 		{
-			// TODO
-			return false;
+			// a register of the frame, not a constant or a closed upvalue
+			return ci.BaseIndex <= o.Index && o.Index < ci.TopIndex
+				&& o.Index < Stack.Length && Stack[o.Index] == o;
 		}
 
 		private void G_SimpleTypeError( ref TValue o, string op )
@@ -473,7 +664,7 @@ namespace UniLua
 			if( ci.IsLua )
 			{
 				kind = GetUpvalueName( ci, o, out name);
-				if( kind != null && IsInStack( ci, o ) )
+				if( kind == null && IsInStack( ci, o ) )
 				{
 					var lcl = Stack[ci.FuncIndex].V.ClLValue();
 					kind = GetObjName( lcl.Proto, ci.CurrentPc,
@@ -508,7 +699,9 @@ namespace UniLua
 
 		private void G_ConcatError( StkId p1, StkId p2 )
 		{
-			// TODO
+			if( p1.V.TtIsString() || p1.V.TtIsNumber() )
+				p1 = p2;
+			G_TypeError( p1, "concatenate" );
 		}
 	}
 

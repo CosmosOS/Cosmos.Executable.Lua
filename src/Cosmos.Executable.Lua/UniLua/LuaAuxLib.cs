@@ -1,5 +1,9 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 	using System;
 	using System.IO;
@@ -35,6 +39,10 @@ namespace UniLua
 
 		string 	L_ToString( int index );
 		bool 	L_GetMetaField( int index, string method );
+		bool 	L_NewMetaTable( string tname );
+		void 	L_SetMetaTable( string tname );
+		object 	L_TestUData( int narg, string tname );
+		object 	L_CheckUData( int narg, string tname );
 		int 	L_GetSubTable( int index, string fname );
 
 		void 	L_RequireF( string moduleName, CSharpFunctionDelegate openFunc, bool global );
@@ -124,7 +132,7 @@ namespace UniLua
 		private int 	Pos;
 	}
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		private const int LEVELS1 = 12; // size of the first part of the stack
 		private const int LEVELS2 = 10; // size of the second part of the stack
@@ -147,7 +155,8 @@ namespace UniLua
 		public int L_Error( string fmt, params object[] args )
 		{
 			L_Where( 1 );
-			API.PushString( string.Format( fmt, args ) );
+			// A message without arguments is not a format: it may hold braces
+			API.PushString( args.Length == 0 ? fmt : string.Format( fmt, args ) );
 			API.Concat( 2 );
 			return API.Error();
 		}
@@ -284,18 +293,18 @@ namespace UniLua
 
 			LuaDebug ar = new LuaDebug();
 			if( !API.GetStack( 0, ar ) ) // no stack frame ?
-				return L_Error( "bad argument {0} ({1})", narg, extraMsg );
+				return L_Error( "bad argument #{0} ({1})", narg, extraMsg );
 
 			GetInfo( "n", ar );
 			if( ar.NameWhat == "method" )
 			{
 				narg--; // do not count 'self'
 				if( narg == 0 ) // error is in the self argument itself?
-					return L_Error( "calling '{0}' on bad self", ar.Name );
+					return L_Error( "calling '{0}' on bad self ({1})", ar.Name, extraMsg );
 			}
 			if( ar.Name == null )
-				ar.Name = PushGlobalFuncName( ar ) ? API.ToString(-1) : "?";
-			return L_Error( "bad argument {0} to '{1}' ({2})",
+				ar.Name = PushGlobalFuncName( ar, this ) ? API.ToString(-1) : "?";
+			return L_Error( "bad argument #{0} to '{1}' ({2})",
 				narg, ar.Name, extraMsg );
 		}
 
@@ -322,6 +331,42 @@ namespace UniLua
 			}
 		}
 
+		public bool L_NewMetaTable( string tname )
+		{
+			API.GetField( LuaDef.LUA_REGISTRYINDEX, tname );
+			if( !API.IsNil( -1 ) ) // name already in use?
+				return false; // leave previous value on top
+			API.Pop( 1 );
+			API.NewTable(); // create metatable
+			API.PushValue( -1 );
+			API.SetField( LuaDef.LUA_REGISTRYINDEX, tname ); // registry.name = metatable
+			return true;
+		}
+
+		public void L_SetMetaTable( string tname )
+		{
+			API.GetField( LuaDef.LUA_REGISTRYINDEX, tname );
+			API.SetMetaTable( -2 );
+		}
+
+		public object L_TestUData( int narg, string tname )
+		{
+			if( API.Type( narg ) != LuaType.LUA_TUSERDATA || !API.GetMetaTable( narg ) )
+				return null;
+			API.GetField( LuaDef.LUA_REGISTRYINDEX, tname );
+			bool matches = API.RawEqual( -1, -2 );
+			API.Pop( 2 );
+			return matches ? API.ToUserData( narg ) : null;
+		}
+
+		public object L_CheckUData( int narg, string tname )
+		{
+			object p = L_TestUData( narg, tname );
+			if( p == null )
+				TypeError( narg, tname );
+			return p;
+		}
+
 		public bool L_CallMeta( int obj, string name )
 		{
 			obj = API.AbsIndex( obj );
@@ -333,7 +378,7 @@ namespace UniLua
 			return true;
 		}
 
-		private void PushFuncName( LuaDebug ar )
+		private void PushFuncName( LuaDebug ar, LuaState L1 )
 		{
 			if( ar.NameWhat.Length > 0 && ar.NameWhat[0] != '\0' ) // is there a name?
 				API.PushString( string.Format( "function '{0}'", ar.Name ) );
@@ -341,7 +386,7 @@ namespace UniLua
 				API.PushString( "main chunk" );
 			else if( ar.What.Length > 0 && ar.What[0] == 'C' )
 			{
-				if( PushGlobalFuncName( ar ) )
+				if( PushGlobalFuncName( ar, L1 ) )
 				{
 					API.PushString( string.Format( "function '{0}'", API.ToString(-1) ) );
 					API.Remove( -2 ); //remove name
@@ -400,7 +445,7 @@ namespace UniLua
 					if( ar.CurrentLine > 0 )
 						API.PushString( string.Format( "{0}:", ar.CurrentLine ) );
 					API.PushString(" in ");
-					PushFuncName( ar );
+					PushFuncName( ar, oLua );
 					if( ar.IsTailCall )
 						API.PushString( "\n\t(...tail calls...)" );
 					API.Concat( API.GetTop() - top );
@@ -453,25 +498,29 @@ namespace UniLua
 			var status = ThreadStatus.LUA_OK;
 			if( filename == null )
 			{
-				// 暂不实现从 stdin 输入
-				throw new System.NotImplementedException();
+				// no standard input to load a chunk from, as lua -
+				API.PushString( "cannot read stdin: not supported" );
+				return ThreadStatus.LUA_ERRFILE;
 			}
 
 			int fnameindex = API.GetTop() + 1;
 			API.PushString( "@" + filename );
+			FileLoadInfo loadinfo;
 			try
 			{
-				using( var loadinfo = LuaFile.OpenFile( filename ) )
-				{
-					loadinfo.SkipComment();
-					status = API.Load( loadinfo, API.ToString(-1), mode );
-				}
+				loadinfo = LuaFile.OpenFile( this, filename );
 			}
-			catch( LuaRuntimeException e )
+			catch( Exception e ) when ( LuaFile.IsFileError( e ) )
 			{
+				API.Remove( fnameindex );
 				API.PushString( string.Format( "cannot open {0}: {1}",
 					filename, e.Message ) );
 				return ThreadStatus.LUA_ERRFILE;
+			}
+			using( loadinfo )
+			{
+				loadinfo.SkipComment();
+				status = API.Load( loadinfo, API.ToString(-1), mode );
 			}
 
 			API.Remove( fnameindex );
@@ -526,11 +575,18 @@ namespace UniLua
 						break;
 
 					default:
-						API.PushString( string.Format("{0}: {1:X}"
+					{
+						// the same light function shows one address (see TValue.SameObject)
+						object o = API.ToObject( index );
+						var cscl = o as LuaCsClosureValue;
+						if( cscl != null && cscl.IsLight )
+							o = cscl.F;
+						API.PushString( string.Format("{0}: 0x{1:x8}"
 							, L_TypeName( index )
-							, API.ToObject( index ).GetHashCode()
+							, System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode( o )
 							) );
 						break;
+					}
 				}
 			}
 			return API.ToString( -1 );
@@ -567,7 +623,6 @@ namespace UniLua
 				new NameFuncPair( LuaBitLib.LIB_NAME, 	LuaBitLib.OpenLib   ),
 				new NameFuncPair( LuaMathLib.LIB_NAME, 	LuaMathLib.OpenLib  ),
 				new NameFuncPair( LuaDebugLib.LIB_NAME, LuaDebugLib.OpenLib ),
-				new NameFuncPair( LuaFFILib.LIB_NAME,	LuaFFILib.OpenLib	),
 				new NameFuncPair( LuaEncLib.LIB_NAME,	LuaEncLib.OpenLib	),
 			};
 
@@ -666,10 +721,12 @@ namespace UniLua
 			return false; // not found
 		}
 
-		private bool PushGlobalFuncName( LuaDebug ar )
+		// `ar' describes a level of L1, maybe another thread than this one
+		private bool PushGlobalFuncName( LuaDebug ar, LuaState L1 )
 		{
 			int top = API.GetTop();
-			GetInfo( "f", ar );
+			L1.GetInfo( "f", ar ); // push function
+			((ILuaAPI)L1).XMove( this, 1 );
 			API.PushGlobalTable();
 			if( FindField( top+1, 2 ) )
 			{

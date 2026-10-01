@@ -1,8 +1,11 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 	using System.Collections.Generic;
-	using ULDebug = UniLua.Tools.ULDebug;
 	using StringBuilder = System.Text.StringBuilder;
 	using Char = System.Char;
 	using Int32 = System.Int32;
@@ -64,25 +67,41 @@ namespace UniLua
 			return lua.GetTop();
 		}
 
+		// the .NET garbage collector runs on its own: "collect" asks it for a
+		// collection, "count" gives the heap it measured at the last one
 		public static int B_CollectGarbage( ILuaState lua )
 		{
-			// not implement gc
 			string opt = lua.L_OptString( 1, "collect" );
 			switch( opt )
 			{
 				case "count":
-					lua.PushNumber( 0 );
-					lua.PushNumber( 0 );
+				{
+					// Not GC.GetTotalMemory, whose forced-collection path needs
+					// RhWaitForPendingFinalizers, which a Cosmos kernel does not export
+					long bytes = System.GC.GetGCMemoryInfo().HeapSizeBytes;
+					lua.PushNumber( bytes / 1024.0 );
+					lua.PushInteger( (int)(bytes % 1024) );
 					return 2;
+				}
 
 				case "step":
 				case "isrunning":
 					lua.PushBoolean( true );
 					return 1;
 
-				default:
+				case "collect":
+					System.GC.Collect();
 					lua.PushInteger( 0 );
 					return 1;
+
+				case "stop": case "restart":
+				case "setpause": case "setstepmul": case "setmajorinc":
+				case "generational": case "incremental":
+					lua.PushInteger( 0 );
+					return 1;
+
+				default:
+					return lua.L_ArgError( 1, string.Format( "invalid option '{0}'", opt ) );
 			}
 		}
 
@@ -145,6 +164,57 @@ namespace UniLua
 			return LoadAux(lua, status, env);
 		}
 
+		private const int RESERVEDSLOT = 5;
+
+		// the chunk as the reader function, at index 1, gives it in pieces
+		private class ReaderLoadInfo : ILoadInfo
+		{
+			private ILuaState Lua;
+			private string Piece = "";
+			private int Pos = 0;
+			private bool Done = false;
+
+			public ReaderLoadInfo( ILuaState lua )
+			{
+				Lua = lua;
+			}
+
+			private bool Fill()
+			{
+				while( !Done && Pos >= Piece.Length )
+				{
+					Lua.L_CheckStack( 2, "too many nested functions" );
+					Lua.PushValue( 1 ); // get function
+					Lua.Call( 0, 1 ); // call it
+					if( Lua.IsNil( -1 ) )
+					{
+						Lua.Pop( 1 );
+						Done = true;
+					}
+					else if( !Lua.IsString( -1 ) )
+						Lua.L_Error( "reader function must return a string" );
+					else
+					{
+						Piece = Lua.ToString( -1 );
+						Pos = 0;
+						Lua.Replace( RESERVEDSLOT ); // save string in reserved slot
+						Done = Piece.Length == 0; // an empty piece ends the chunk
+					}
+				}
+				return Pos < Piece.Length;
+			}
+
+			public int ReadByte()
+			{
+				return Fill() ? Piece[Pos++] : -1;
+			}
+
+			public int PeekByte()
+			{
+				return Fill() ? Piece[Pos] : -1;
+			}
+		}
+
 		public static int B_Load( ILuaState lua )
 		{
 			ThreadStatus status;
@@ -158,7 +228,10 @@ namespace UniLua
 			}
 			else // loading from a reader function
 			{
-				throw new System.NotImplementedException(); // TODO
+				string chunkName = lua.L_OptString(2, "=(load)");
+				lua.L_CheckType(1, LuaType.LUA_TFUNCTION);
+				lua.SetTop(RESERVEDSLOT); // create reserved slot
+				status = lua.Load( new ReaderLoadInfo( lua ), chunkName, mode );
 			}
 			return LoadAux( lua, status, env );
 		}
@@ -249,7 +322,7 @@ namespace UniLua
 		{
 			int n = lua.GetTop();
 			if( lua.Type( 1 ) == LuaType.LUA_TSTRING &&
-				lua.ToString( 1 )[0] == '#' )
+				lua.ToString( 1 ).StartsWith( '#' ) )
 			{
 				lua.PushInteger( n-1 );
 				return 1;
@@ -310,27 +383,25 @@ namespace UniLua
 				bool negative = false;
 				lua.L_ArgCheck( (2 <= numBase && numBase <= 36), 2,
 					"base out of range" );
-				s = s.Trim( ' ', '\f', '\n', '\r', '\t', '\v' );
-				s = s + '\0'; // guard
 				int pos = 0;
-				if(s[pos] == '-') { pos++; negative = true; }
-				else if(s[pos] == '+') pos++;
-				if( Char.IsLetterOrDigit( s, pos ) )
+				while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip initial spaces
+				if( pos < s.Length && s[pos] == '-' ) { pos++; negative = true; }
+				else if( pos < s.Length && s[pos] == '+' ) pos++;
+				if( pos < s.Length && Utl.IsAlnum( s[pos] ) )
 				{
 					double n = 0.0;
 					do
 					{
-						int digit;
-						if( Char.IsDigit( s, pos ) )
-							digit = Int32.Parse( s[pos].ToString() );
-						else
-							digit = Char.ToUpper( s[pos] ) - 'A' + 10;
+						int digit = Utl.IsDigit( s[pos] )
+							? s[pos] - '0'
+							: (s[pos] | 0x20) - 'a' + 10;
 						if( digit >= numBase )
 							break; // invalid numeral; force a fail
 						n = n * (double)numBase + (double)digit;
 						pos++;
-					} while( Char.IsLetterOrDigit( s, pos ) );
-					if( pos == s.Length - 1 ) // except guard, no invalid trailing characters?
+					} while( pos < s.Length && Utl.IsAlnum( s[pos] ) );
+					while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip trailing spaces
+					if( pos == s.Length ) // no invalid trailing characters?
 					{
 						lua.PushNumber( negative ? -n : n );
 						return 1;
@@ -372,6 +443,7 @@ namespace UniLua
 
 		public static int B_Next( ILuaState lua )
 		{
+			lua.L_CheckType( 1, LuaType.LUA_TTABLE );
 			lua.SetTop( 2 );
 			if( lua.Next(1) )
 			{
@@ -392,7 +464,8 @@ namespace UniLua
 
 		private static int IpairsAux( ILuaState lua )
 		{
-			int i = lua.ToInteger( 2 );
+			int i = lua.L_CheckInteger( 2 );
+			lua.L_CheckType( 1, LuaType.LUA_TTABLE );
 			i++; // next value
 			lua.PushInteger( i );
 			lua.RawGetI( 1, i );
@@ -423,7 +496,7 @@ namespace UniLua
 				sb.Append( s );
 				lua.Pop( 1 );
 			}
-			ULDebug.Log( sb.ToString() );
+			LuaHost.Of( lua ).Out.WriteLine( sb.ToString() );
 			return 0;
 		}
 

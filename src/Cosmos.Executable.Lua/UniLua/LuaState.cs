@@ -1,3 +1,7 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define ENABLE_DUMP_STACK
 
@@ -5,12 +9,11 @@
 
 using System.Collections.Generic;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using InstructionPtr = Pointer<Instruction>;
-	using ULDebug = UniLua.Tools.ULDebug;
 
-	public struct Pointer<T>
+	internal struct Pointer<T>
 	{
 		private List<T> 	List;
 		public  int 		Index { get; set; }
@@ -62,7 +65,7 @@ namespace UniLua
 		}
 	}
 
-	public enum CallStatus
+	internal enum CallStatus
 	{
 		CIST_NONE		= 0,
 
@@ -76,7 +79,7 @@ namespace UniLua
 		CIST_TAIL		= (1<<6),	/* call was tail called */
 	}
 
-	public class CallInfo
+	internal class CallInfo
 	{
 		public CallInfo[] List;
 		public int Index;
@@ -113,12 +116,16 @@ namespace UniLua
 		}
 	}
 
-	public class GlobalState
+	internal class GlobalState
 	{
 		public StkId		Registry;
 		public LuaUpvalue 	UpvalHead;
 		public LuaTable[] 	MetaTables;
 		public LuaState		MainThread;
+
+		// What the libraries reach the machine through: shared by the
+		// coroutines of a state, separate from other states
+		internal readonly LuaHost Host = new LuaHost();
 
 		public GlobalState( LuaState state )
 		{
@@ -131,7 +138,7 @@ namespace UniLua
 
 	public delegate void LuaHookDelegate(ILuaState lua, LuaDebug ar);
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		public StkId[]			Stack;
 		public StkId			Top;
@@ -149,6 +156,7 @@ namespace UniLua
 		public int				BaseHookCount;
 		public int				HookCount;
 		public LuaHookDelegate	Hook;
+		public int				OldPc; // last traced instruction, for line hooks
 
 		public LinkedList<LuaUpvalue>	OpenUpval;
 
@@ -291,7 +299,7 @@ namespace UniLua
 		public void DumpStack( int baseIndex, string tag="" )
 		{
 #if ENABLE_DUMP_STACK
-			ULDebug.Log(DumpStackToString(baseIndex, tag));
+			System.Diagnostics.Debug.WriteLine(DumpStackToString(baseIndex, tag));
 #endif
 		}
 

@@ -1,9 +1,13 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 using System;
 using System.Text;
 using System.Collections.Generic;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	public enum DumpStatus
 	{
@@ -96,9 +100,11 @@ namespace UniLua
 			}
 			else
 			{
-				DumpUInt( (uint)(value.Length + 1) );
-				for(var i=0; i<value.Length; ++i)
-					DumpByte( (byte)value[i] );
+				// UTF-8, as Undump reads it: a character above \255 survives,
+				// where one byte per character dropped its high byte
+				var bytes = System.Text.Encoding.UTF8.GetBytes( value );
+				DumpUInt( (uint)(bytes.Length + 1) );
+				DumpBlock( bytes );
 				DumpByte( (byte)'\0' );
 			}
 		}

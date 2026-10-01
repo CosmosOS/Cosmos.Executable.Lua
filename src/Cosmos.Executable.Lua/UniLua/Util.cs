@@ -1,10 +1,14 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 #define API_CHECK
 #define UNILUA_ASSERT
 
 using System;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using DebugS = System.Diagnostics.Debug;
 	using NumberStyles = System.Globalization.NumberStyles;
@@ -84,26 +88,13 @@ namespace UniLua
 			return false;
 		}
 
-		private static bool IsXDigit( char c )
-		{
-			if( Char.IsDigit( c ) )
-				return true;
-
-			if( 'a' <= c && c <= 'f' )
-				return true;
-
-			if( 'A' <= c && c <= 'F' )
-				return true;
-
-			return false;
-		}
 
 		private static double ReadHexa( string s, ref int pos, double r, out int count )
 		{
 			count = 0;
 			while( pos < s.Length && IsXDigit( s[pos] ) )
 			{
-				r = (r * 16.0) + Int32.Parse( s[pos].ToString(), NumberStyles.HexNumber );
+				r = (r * 16.0) + HexaValue( s[pos] );
 				++pos;
 				++count;
 			}
@@ -113,9 +104,9 @@ namespace UniLua
 		private static double ReadDecimal( string s, ref int pos, double r, out int count )
 		{
 			count = 0;
-			while( pos < s.Length && Char.IsDigit( s[pos] ) )
+			while( pos < s.Length && IsDigit( s[pos] ) )
 			{
-				r = (r * 10.0) + Int32.Parse( s[pos].ToString() );
+				r = (r * 10.0) + (s[pos] - '0');
 				++pos;
 				++count;
 			}
@@ -126,7 +117,7 @@ namespace UniLua
 		public static double StrX2Number( string s, ref int curpos )
 		{
 			int pos = curpos;
-			while( pos < s.Length && Char.IsWhiteSpace( s[pos] )) ++pos;
+			while( pos < s.Length && IsSpace( s[pos] )) ++pos;
 			bool negative = IsNegative( s, ref pos );
 
 			// check `0x'
@@ -156,13 +147,13 @@ namespace UniLua
 			{
 				++pos; // skip `p'
 				bool expNegative = IsNegative( s, ref pos );
-				if( pos >= s.Length || !Char.IsDigit( s[pos] ) )
+				if( pos >= s.Length || !IsDigit( s[pos] ) )
 					goto ret;
 
 				int exp1 = 0;
-				while( pos < s.Length && Char.IsDigit( s[pos] ) )
+				while( pos < s.Length && IsDigit( s[pos] ) )
 				{
-					exp1 = exp1 * 10 + Int32.Parse( s[pos].ToString() );
+					exp1 = exp1 * 10 + (s[pos] - '0');
 					++pos;
 				}
 				if( expNegative )
@@ -180,7 +171,8 @@ ret:
 		public static double Str2Number( string s, ref int curpos )
 		{
 			int pos = curpos;
-			while( pos < s.Length && Char.IsWhiteSpace( s[pos] )) ++pos;
+			while( pos < s.Length && IsSpace( s[pos] )) ++pos;
+			int start = pos;
 			bool negative = IsNegative( s, ref pos );
 
 			double r = 0.0;
@@ -204,7 +196,7 @@ ret:
 			{
 				++pos;
 				bool expNegative = IsNegative( s, ref pos );
-				if( pos >= s.Length || !Char.IsDigit( s[pos] ) )
+				if( pos >= s.Length || !IsDigit( s[pos] ) )
 					goto ret;
 
 				int n;
@@ -216,10 +208,26 @@ ret:
 			curpos = pos;
 
 ret:
-			if( negative ) r = -r;
-
-			return r * Math.Pow(10, f);
+			// What was scanned, rounded once by the BCL: digits * 10^f is off by
+			// rounding errors, so that 0.3 came out as 0.30000000000000004
+			return Double.Parse( s.AsSpan( start, curpos - start ),
+				NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture );
 		}
+
+		// <ctype.h> in the "C" locale, as Lua uses it: ASCII only, so that
+		// chars above 127 are neither letters nor spaces nor punctuation
+		public static bool IsAlpha( int c ) { return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'); }
+		public static bool IsDigit( int c ) { return '0' <= c && c <= '9'; }
+		public static bool IsAlnum( int c ) { return IsAlpha( c ) || IsDigit( c ); }
+		public static bool IsSpace( int c ) { return c == ' ' || ('\t' <= c && c <= '\r'); }
+		public static bool IsCntrl( int c ) { return (0 <= c && c < 32) || c == 127; }
+		public static bool IsGraph( int c ) { return 32 < c && c < 127; }
+		public static bool IsPrint( int c ) { return 32 <= c && c < 127; }
+		public static bool IsPunct( int c ) { return IsGraph( c ) && !IsAlnum( c ); }
+		public static bool IsLower( int c ) { return 'a' <= c && c <= 'z'; }
+		public static bool IsUpper( int c ) { return 'A' <= c && c <= 'Z'; }
+		public static bool IsXDigit( int c ) { return IsDigit( c ) || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F'); }
+		public static int HexaValue( int c ) { return IsDigit( c ) ? c - '0' : (c | 0x20) - 'a' + 10; }
 
 		public static string TrimWhiteSpace( string str )
 		{

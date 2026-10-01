@@ -1,3 +1,7 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define DEBUG_NEW_FRAME
 // #define DEBUG_INSTRUCTION
@@ -16,12 +20,11 @@
 using System;
 using System.Collections.Generic;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
-	using ULDebug = UniLua.Tools.ULDebug;
 	using StringBuilder = System.Text.StringBuilder;
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		private const int MAXTAGLOOP = 100;
 
@@ -71,16 +74,22 @@ newframe:
 			env.Base = ci.BaseIndex;
 
 #if DEBUG_NEW_FRAME
-			ULDebug.Log( "#### NEW FRAME #########################################################################" );
-			ULDebug.Log( "## cl:" + cl );
-			ULDebug.Log( "## Base:" + env.Base );
-			ULDebug.Log( "########################################################################################" );
+			System.Diagnostics.Debug.WriteLine( "#### NEW FRAME #########################################################################" );
+			System.Diagnostics.Debug.WriteLine( "## cl:" + cl );
+			System.Diagnostics.Debug.WriteLine( "## Base:" + env.Base );
+			System.Diagnostics.Debug.WriteLine( "########################################################################################" );
 #endif
 
 			while( true )
 			{
 				Instruction i = ci.SavedPc.ValueInc;
 				env.I = i;
+				if( (HookMask & (LuaDef.LUA_MASKLINE | LuaDef.LUA_MASKCOUNT)) != 0 &&
+					(--HookCount == 0 || (HookMask & LuaDef.LUA_MASKLINE) != 0) )
+				{
+					TraceExec( ci );
+					env.Base = ci.BaseIndex;
+				}
 
 #if DEBUG_SRC_INFO
 				int line = 0;
@@ -102,7 +111,7 @@ newframe:
 #endif
 
 #if DEBUG_INSTRUCTION
-				ULDebug.Log( System.DateTime.Now + " [VM] ======================================================================== Instruction: " + i
+				System.Diagnostics.Debug.WriteLine( System.DateTime.Now + " [VM] ======================================================================== Instruction: " + i
 #if DEBUG_INSTRUCTION_WITH_STACK
 				+ "\n" + DumpStackToString( env.Base.Index )
 #endif
@@ -123,8 +132,8 @@ newframe:
 						var rb = env.RB;
 
 #if DEBUG_OP_MOVE
-						ULDebug.Log( "[VM] ==== OP_MOVE rb:" + rb );
-						ULDebug.Log( "[VM] ==== OP_MOVE ra:" + ra );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_MOVE rb:" + rb );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_MOVE ra:" + ra );
 #endif
 
 						ra.V.SetObj(ref rb.V);
@@ -174,8 +183,8 @@ newframe:
 						// {
 						// 	ULDebug.Log("[VM] ==== GETUPVAL upval:" + cl.Upvals[j] );
 						// }
-						ULDebug.Log( "[VM] ==== GETUPVAL b:" + b );
-						ULDebug.Log( "[VM] ==== GETUPVAL ra:" + ra );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== GETUPVAL b:" + b );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== GETUPVAL ra:" + ra );
 #endif
 						break;
 					}
@@ -186,8 +195,8 @@ newframe:
 						var key = env.RKC;
 						V_GetTable( cl.Upvals[b].V, key, ra );
 #if DEBUG_OP_GETTABUP
-						ULDebug.Log( "[VM] ==== OP_GETTABUP key:" + key );
-						ULDebug.Log( "[VM] ==== OP_GETTABUP val:" + ra );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_GETTABUP key:" + key );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_GETTABUP val:" + ra );
 #endif
 						env.Base = ci.BaseIndex;
 						break;
@@ -200,8 +209,8 @@ newframe:
 						var val = ra;
 						V_GetTable( tbl, key, val );
 #if DEBUG_OP_GETTABLE
-						ULDebug.Log("[VM] ==== OP_GETTABLE key:"+key.ToString());
-						ULDebug.Log("[VM] ==== OP_GETTABLE val:"+val.ToString());
+						System.Diagnostics.Debug.WriteLine("[VM] ==== OP_GETTABLE key:"+key.ToString());
+						System.Diagnostics.Debug.WriteLine("[VM] ==== OP_GETTABLE val:"+val.ToString());
 #endif
 						break;
 					}
@@ -214,8 +223,8 @@ newframe:
 						var val = env.RKC;
 						V_SetTable( cl.Upvals[a].V, key, val );
 #if DEBUG_OP_SETTABUP
-						ULDebug.Log( "[VM] ==== OP_SETTABUP key:" + key.Value );
-						ULDebug.Log( "[VM] ==== OP_SETTABUP val:" + val.Value );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABUP key:" + key.Value );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABUP val:" + val.Value );
 #endif
 						env.Base = ci.BaseIndex;
 						break;
@@ -227,8 +236,8 @@ newframe:
 						var uv = cl.Upvals[b];
 						uv.V.V.SetObj(ref ra.V);
 #if DEBUG_OP_SETUPVAL
-						ULDebug.Log( "[VM] ==== SETUPVAL b:" + b );
-						ULDebug.Log( "[VM] ==== SETUPVAL ra:" + ra );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== SETUPVAL b:" + b );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== SETUPVAL ra:" + ra );
 #endif
 						break;
 					}
@@ -238,8 +247,8 @@ newframe:
 						var key = env.RKB;
 						var val = env.RKC;
 #if DEBUG_OP_SETTABLE
-						ULDebug.Log( "[VM] ==== OP_SETTABLE key:" + key.ToString() );
-						ULDebug.Log( "[VM] ==== OP_SETTABLE val:" + val.ToString() );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABLE key:" + key.ToString() );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABLE val:" + val.ToString() );
 #endif
 						V_SetTable( ra, key, val );
 						break;
@@ -402,12 +411,12 @@ newframe:
 						var rhs = env.RKC;
 						var expectEq = i.GETARG_A() != 0;
 #if DEBUG_OP_EQ
-						ULDebug.Log( "[VM] ==== OP_EQ lhs:" + lhs );
-						ULDebug.Log( "[VM] ==== OP_EQ rhs:" + rhs );
-						ULDebug.Log( "[VM] ==== OP_EQ expectEq:" + expectEq );
-						ULDebug.Log( "[VM] ==== OP_EQ (lhs.V == rhs.V):" + (lhs.V == rhs.V) );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ lhs:" + lhs );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ rhs:" + rhs );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ expectEq:" + expectEq );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ (lhs.V == rhs.V):" + (lhs.V == rhs.V) );
 #endif
-						if((lhs.V == rhs.V) != expectEq)
+						if(EqualObj(ref lhs.V, ref rhs.V, false) != expectEq)
 						{
 							ci.SavedPc.Index += 1; // skip next jump instruction
 						}
@@ -600,6 +609,9 @@ newframe:
 						if(!V_ToNumber(ra2, ref step))
 							G_RunError("'for' step must be a number");
 
+						// numbers from here on, for OP_FORLOOP: for i="10","1","-2"
+						ra1.V.SetNValue(limit.NValue);
+						ra2.V.SetNValue(step.NValue);
 						ra.V.SetNValue(init.NValue - step.NValue);
 						ci.SavedPc.Index += i.GETARG_sBx();
 
@@ -628,7 +640,7 @@ newframe:
 
 						DumpStack( env.Base );
 #if DEBUG_INSTRUCTION
-						ULDebug.Log( "[VM] ============================================================ OP_TFORCALL Instruction: " + i );
+						System.Diagnostics.Debug.WriteLine( "[VM] ============================================================ OP_TFORCALL Instruction: " + i );
 #endif
 
 						Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORLOOP );
@@ -673,8 +685,8 @@ l_tforloop:
 							tbl.SetInt(last--, ref Stack[rai+n].V);
 						}
 #if DEBUG_OP_SETLIST
-						ULDebug.Log( "[VM] ==== OP_SETLIST ci.Top:" + ci.Top.Index );
-						ULDebug.Log( "[VM] ==== OP_SETLIST Top:" + Top.Index );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETLIST ci.Top:" + ci.Top.Index );
+						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETLIST Top:" + Top.Index );
 #endif
 						Top = Stack[ci.TopIndex]; // correct top (in case of previous open call)
 						break;
@@ -685,13 +697,13 @@ l_tforloop:
 						LuaProto p = cl.Proto.P[ i.GETARG_Bx() ];
 						V_PushClosure( p, cl.Upvals, env.Base, ra );
 #if DEBUG_OP_CLOSURE
-						ULDebug.Log( "OP_CLOSURE:" + ra.Value );
+						System.Diagnostics.Debug.WriteLine( "OP_CLOSURE:" + ra.Value );
 						var racl = ra.Value as LuaLClosure;
 						if( racl != null )
 						{
 							for( int ii=0; ii<racl.Upvals.Count; ++ii )
 							{
-								ULDebug.Log( ii + " ) " + racl.Upvals[ii] );
+								System.Diagnostics.Debug.WriteLine( ii + " ) " + racl.Upvals[ii] );
 							}
 						}
 #endif
@@ -748,7 +760,7 @@ l_tforloop:
 
 		private void V_NotImplemented( Instruction i )
 		{
-			ULDebug.LogError( "[VM] ==================================== Not Implemented Instruction: " + i );
+			System.Diagnostics.Debug.WriteLine( "[VM] ==================================== Not Implemented Instruction: " + i );
 			// throw new NotImplementedException();
 		}
 
@@ -786,7 +798,7 @@ l_tforloop:
 				else {
 					tmObj = T_GetTMByObj(ref t.V, TMS.TM_INDEX);
 					if(tmObj.V.TtIsNil())
-						G_SimpleTypeError(ref t.V, "index" );
+						G_TypeError( t, "index" );
 				}
 
 				if(tmObj.V.TtIsFunction()) {
@@ -823,7 +835,7 @@ l_tforloop:
 				else {
 					tmObj = T_GetTMByObj(ref t.V, TMS.TM_NEWINDEX);
 					if(tmObj.V.TtIsNil())
-						G_SimpleTypeError(ref t.V, "index" );
+						G_TypeError( t, "index" );
 				}
 
 				if(tmObj.V.TtIsFunction()) {
@@ -836,8 +848,32 @@ l_tforloop:
 			G_RunError( "loop in settable" );
 		}
 
+		// getcached: the last closure of `p' if it has the upvalues a new one
+		// would get, as Lua 5.2 reuses it (functions alike are then equal)
+		private LuaLClosureValue GetCached( LuaProto p, LuaUpvalue[] encup, int stackBase )
+		{
+			var c = p.Cache;
+			if( c != null )
+			{
+				for( int i=0; i<p.Upvalues.Count; ++i )
+				{
+					var uv = p.Upvalues[i];
+					var v = uv.InStack ? Stack[stackBase + uv.Index] : encup[uv.Index].V;
+					if( c.Upvals[i].V != v )
+						return null; // wrong upvalue; cannot reuse closure
+				}
+			}
+			return c;
+		}
+
 		private void V_PushClosure( LuaProto p, LuaUpvalue[] encup, int stackBase, StkId ra )
 		{
+			var cached = GetCached( p, encup, stackBase );
+			if( cached != null )
+			{
+				ra.V.SetClLValue(cached);
+				return;
+			}
 			var ncl = new LuaLClosureValue( p );
 			ra.V.SetClLValue(ncl);
 			for( int i=0; i<p.Upvalues.Count; ++i )
@@ -852,6 +888,7 @@ l_tforloop:
 				else	// get upvalue from enclosing function
 					ncl.Upvals[i] = encup[ p.Upvalues[i].Index ];
 			}
+			p.Cache = ncl; // save it on cache for reuse
 		}
 
 		private void V_ObjLen( StkId ra, StkId rb )
@@ -868,10 +905,9 @@ l_tforloop:
 				return;
 			}
 
-			var rbs = rb.V.SValue();
-			if( rbs != null )
+			if( rb.V.TtIsString() )
 			{
-				ra.V.SetNValue(rbs.Length);
+				ra.V.SetNValue(rb.V.SValue().Length);
 				return;
 			}
 
@@ -915,7 +951,7 @@ calltm:
 						if(cur.V.TtIsString())
 							sb.Insert(0, cur.V.SValue());
 						else if(cur.V.TtIsNumber())
-							sb.Insert(0, cur.V.NValue.ToString());
+							sb.Insert(0, LuaNumber.ToString(cur.V.NValue));
 						else
 							break;
 					}
@@ -963,7 +999,7 @@ calltm:
 		{
 			if(!v.TtIsNumber()) { return false; }
 
-			v.SetSValue(v.NValue.ToString());
+			v.SetSValue(LuaNumber.ToString(v.NValue));
 			return true;
 		}
 
@@ -975,6 +1011,7 @@ calltm:
 				case TMS.TM_SUB: return LuaOp.LUA_OPSUB;
 				case TMS.TM_MUL: return LuaOp.LUA_OPMUL;
 				case TMS.TM_DIV: return LuaOp.LUA_OPDIV;
+				case TMS.TM_MOD: return LuaOp.LUA_OPMOD;
 				case TMS.TM_POW: return LuaOp.LUA_OPPOW;
 				case TMS.TM_UNM: return LuaOp.LUA_OPUNM;
 
@@ -1052,7 +1089,7 @@ calltm:
 
 			// compare string
 			if(lhs.V.TtIsString() && rhs.V.TtIsString()) {
-				return string.Compare(lhs.V.SValue(), rhs.V.SValue()) < 0;
+				return string.CompareOrdinal(lhs.V.SValue(), rhs.V.SValue()) < 0;
 			}
 
 			bool error;
@@ -1074,7 +1111,7 @@ calltm:
 
 			// compare string
 			if(lhs.V.TtIsString() && rhs.V.TtIsString()) {
-				return string.Compare(lhs.V.SValue(), rhs.V.SValue()) <= 0;
+				return string.CompareOrdinal(lhs.V.SValue(), rhs.V.SValue()) <= 0;
 			}
 
 			// first try `le'
@@ -1083,10 +1120,10 @@ calltm:
 			if( !error )
 				return res;
 
-			// else try `lt'
+			// else try `lt': a <= b is not (b < a)
 			res = CallOrderTM( rhs, lhs, TMS.TM_LT, out error );
 			if( !error )
-				return res;
+				return !res;
 
 			G_OrderError( lhs, rhs );
 			return false;
@@ -1141,7 +1178,7 @@ calltm:
 					tmp.V.SetObj(ref top.V); // put TM result in proper position
 					if(total > 1) // are there elements to concat?
 					{
-						Top = Stack[Top.Index-1];
+						Top = Stack[top.Index-1]; // top is one after last element (at top-2)
 						V_Concat( total );
 					}
 					// move final result to final position
@@ -1224,7 +1261,7 @@ calltm:
 				{
 					var ud1 = t1.RawUValue();
 					var ud2 = t2.RawUValue();
-					if(ud1.Value == ud2.Value)
+					if(ud1 == ud2)
 						return true;
 					if(rawEq)
 						return false;
@@ -1243,7 +1280,7 @@ calltm:
 					break;
 				}
 				default:
-					return t1.OValue == t2.OValue;
+					return TValue.SameObject(t1.OValue, t2.OValue);
 			}
 			if( tm == null ) // no TM?
 				return false;

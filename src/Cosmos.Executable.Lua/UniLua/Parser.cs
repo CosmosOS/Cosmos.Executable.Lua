@@ -1,15 +1,18 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 using System;
 using System.IO;
 using System.Collections.Generic;
 
-using ULDebug = UniLua.Tools.ULDebug;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using InstructionPtr = Pointer<Instruction>;
 
-	public class FuncState
+	internal class FuncState
 	{
 		public FuncState Prev;
 		public BlockCnt	Block;
@@ -41,7 +44,7 @@ namespace UniLua
 		}
 	}
 
-	public class BlockCnt
+	internal class BlockCnt
 	{
 		public BlockCnt Previous;
 		public int		FirstLabel;
@@ -51,7 +54,7 @@ namespace UniLua
 		public bool		IsLoop;
 	}
 
-	public class ConstructorControl
+	internal class ConstructorControl
 	{
 		public ExpDesc	ExpLastItem;
 		public ExpDesc	ExpTable;
@@ -65,7 +68,7 @@ namespace UniLua
 		}
 	}
 
-	public enum ExpKind
+	internal enum ExpKind
 	{
 		VVOID,	/* no value */
 		VNIL,
@@ -83,7 +86,7 @@ namespace UniLua
 		VVARARG	/* info = instruction pc */
 	}
 
-	public static class ExpKindUtl
+	internal static class ExpKindUtl
 	{
 		public static bool VKIsVar( ExpKind k )
 		{
@@ -97,7 +100,7 @@ namespace UniLua
 		}
 	}
 	
-	public enum BinOpr
+	internal enum BinOpr
 	{
 		ADD,
 		SUB,
@@ -117,7 +120,7 @@ namespace UniLua
 		NOBINOPR,
 	}
 
-	public enum UnOpr
+	internal enum UnOpr
 	{
 		MINUS,
 		NOT,
@@ -125,13 +128,13 @@ namespace UniLua
 		NOUNOPR,
 	}
 
-	public class ExpDesc
+	internal class ExpDesc
 	{
 		public ExpKind Kind;
 
 		public int Info;
 
-		public struct IndData
+		internal struct IndData
 		{
 			public int T;
 			public int Idx;
@@ -158,12 +161,12 @@ namespace UniLua
 		}
 	}
 
-	public class VarDesc
+	internal class VarDesc
 	{
 		public int Index;
 	}
 
-	public class LabelDesc
+	internal class LabelDesc
 	{
 		public string 	Name;		// label identifier
 		public int 		Pc;			// position in code
@@ -171,7 +174,7 @@ namespace UniLua
 		public int		NumActVar;	// local level where it appears in current block
 	}
 
-	public class LHSAssign
+	internal class LHSAssign
 	{
 		public LHSAssign 	Prev;
 		public ExpDesc		Exp;
@@ -182,7 +185,7 @@ namespace UniLua
 		}
 	}
 
-	public class Parser
+	internal class Parser
 	{
 		public static LuaProto Parse(
 			ILuaState lua, ILoadInfo loadinfo, string name )
@@ -271,7 +274,7 @@ namespace UniLua
 			NewUpvalue( fs, LuaDef.LUA_ENV, v );
 			Lexer.Next(); // read first token
 			StatList();
-			// check TK_EOS
+			Check( (int)TK.EOS );
 			CloseFunc();
 		}
 
@@ -325,7 +328,7 @@ namespace UniLua
 		{
 			++Lua.NumCSharpCalls;
 			CheckLimit( CurFunc, Lua.NumCSharpCalls,
-				LuaLimits.LUAI_MAXCCALLS, "C# levels" );
+				LuaLimits.LUAI_MAXCCALLS, "C levels" );
 		}
 
 		private void LeaveLevel()
@@ -335,8 +338,7 @@ namespace UniLua
 
 		private void SemanticError( string msg )
 		{
-			// TODO
-			Lexer.SyntaxError( msg );
+			Lexer.SemanticError( msg );
 		}
 
 		private void ErrorLimit( FuncState fs, int limit, string what )
@@ -689,6 +691,7 @@ namespace UniLua
 
 		private void GotoStat( int pc )
 		{
+			int line = Lexer.LineNumber;
 			string label;
 			if( TestNext( (int)TK.GOTO ) )
 				label = CheckName();
@@ -698,7 +701,7 @@ namespace UniLua
 				label = "break";
 			}
 
-			PendingGotos.Add( NewLebelEntry( label, Lexer.LineNumber, pc ) );
+			PendingGotos.Add( NewLebelEntry( label, line, pc ) );
 
 			// close it if label already defined
 			FindLabel( PendingGotos.Count-1 );
@@ -1216,14 +1219,8 @@ namespace UniLua
 
 		private string CheckName()
 		{
-			// ULDebug.Log( Lexer.Token );
+			Check( (int)TK.NAME );
 			var t = Lexer.Token as NameToken;
-
-			// TEST CODE
-			if( t == null )
-			{
-				ULDebug.LogError( Lexer.LineNumber + ":" + Lexer.Token );
-			}
 			string name = t.SemInfo;
 			Lexer.Next();
 			return name;
@@ -1371,7 +1368,7 @@ namespace UniLua
 				if( nv.Exp.Kind != ExpKind.VINDEXED )
 					CheckConflict( lh, nv.Exp );
 				CheckLimit( CurFunc, nvars + Lua.NumCSharpCalls,
-					LuaLimits.LUAI_MAXCCALLS, "C# levels" );
+					LuaLimits.LUAI_MAXCCALLS, "C levels" );
 				Assignment( nv, nvars+1 );
 			}
 			else
@@ -1461,7 +1458,7 @@ namespace UniLua
 		private void ErrorExpected( int token )
 		{
 			Lexer.SyntaxError( string.Format( "{0} expected",
-				((char)token).ToString() ) );
+				Lexer.Token2Str( token ) ) );
 		}
 
 		private void CheckMatch( int what, int who, int where )
@@ -1473,8 +1470,8 @@ namespace UniLua
 				else
 					Lexer.SyntaxError( string.Format(
 						"{0} expected (to close {1} at line {2})",
-						((char)what).ToString(),
-						((char)who).ToString(),
+						Lexer.Token2Str( what ),
+						Lexer.Token2Str( who ),
 						where ) );
 			}
 		}
@@ -1919,6 +1916,7 @@ namespace UniLua
 		{
 			var f = fs.Proto;
 			int idx = f.Upvalues.Count;
+			CheckLimit( fs, idx + 1, LuaLimits.MAXUPVAL, "upvalues" );
 			var upval = new UpvalDesc();
 			upval.InStack = (e.Kind == ExpKind.VLOCAL);
 			upval.Index = e.Info;

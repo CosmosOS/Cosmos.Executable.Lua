@@ -1,13 +1,16 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define DEBUG_DUMMY_TVALUE_MODIFY
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using System;
 	using System.Collections.Generic;
-	using ULDebug = UniLua.Tools.ULDebug;
 
-	public struct TValue
+	internal struct TValue
 	{
 		private const UInt64 CLOSURE_LUA = 0; // lua closure
 		private const UInt64 CLOSURE_CS = 1; // c# closure
@@ -46,8 +49,19 @@ namespace UniLua
 				case (int)LuaType.LUA_TNUMBER: return NValue == o.NValue;
 				case (int)LuaType.LUA_TUINT64: return UInt64Value == o.UInt64Value;
 				case (int)LuaType.LUA_TSTRING: return SValue() == o.SValue();
-				default: return System.Object.ReferenceEquals(OValue, o.OValue);
+				default: return SameObject(OValue, o.OValue);
 			}
+		}
+
+		// C# functions without upvalues are Lua's light C functions: one
+		// pushed twice is still one value, so that ipairs{} == ipairs{}
+		internal static bool SameObject(object a, object b)
+		{
+			if(System.Object.ReferenceEquals(a, b))
+				return true;
+			var ca = a as LuaCsClosureValue;
+			var cb = b as LuaCsClosureValue;
+			return ca != null && cb != null && ca.IsLight && cb.IsLight && ca.F == cb.F;
 		}
 		public static bool operator==(TValue lhs, TValue rhs)
 		{
@@ -61,7 +75,7 @@ namespace UniLua
 #if DEBUG_DUMMY_TVALUE_MODIFY
 		private void CheckLock() {
 			if(Lock_) {
-				UnityEngine.ULDebug.LogError("changing a lock value");
+				System.Diagnostics.Debug.WriteLine("changing a lock value");
 			}
 		}
 #endif
@@ -167,6 +181,15 @@ namespace UniLua
 			UInt64Value = 0;
 			OValue = v;
 		}
+		internal void SetUValue(LuaUserDataValue v) {
+#if DEBUG_DUMMY_TVALUE_MODIFY
+			CheckLock();
+#endif
+			Tt = (int)LuaType.LUA_TUSERDATA;
+			NValue = 0.0;
+			UInt64Value = 0;
+			OValue = v;
+		}
 		internal void SetClLValue(LuaLClosureValue v) {
 #if DEBUG_DUMMY_TVALUE_MODIFY
 			CheckLock();
@@ -209,7 +232,7 @@ namespace UniLua
 		}
 	}
 
-	public class StkId
+	internal class StkId
 	{
 		public TValue V;
 
@@ -237,7 +260,7 @@ namespace UniLua
 		}
 	}
 
-	public class LuaLClosureValue
+	internal class LuaLClosureValue
 	{
 		public LuaProto 		Proto;
 		public LuaUpvalue[]		Upvals;
@@ -251,28 +274,28 @@ namespace UniLua
 		}
 	}
 	
-	public class LuaUserDataValue
+	internal class LuaUserDataValue
 	{
 		public object Value;
 		public LuaTable MetaTable;
 		public int Length;
 	}
 
-	public class LocVar
+	internal class LocVar
 	{
 		public string VarName;
 		public int StartPc;
 		public int EndPc;
 	}
 
-	public class UpvalDesc
+	internal class UpvalDesc
 	{
 		public string Name;
 		public int Index;
 		public bool InStack;
 	}
 
-	public class LuaProto
+	internal class LuaProto
 	{
 		public List<Instruction> 	Code;
 		public List<StkId>			K;
@@ -290,6 +313,8 @@ namespace UniLua
 		public List<int>			LineInfo;
 		public List<LocVar>			LocVars;
 
+		public LuaLClosureValue		Cache; // last closure created, for reuse
+
 		public LuaProto()
 		{
 			Code = new List<Instruction>();
@@ -306,7 +331,7 @@ namespace UniLua
 		}
 	}
 	
-	public class LuaUpvalue
+	internal class LuaUpvalue
 	{
 		public StkId			V;
 		public StkId			Value;
@@ -320,7 +345,7 @@ namespace UniLua
 		}
 	}
 
-	public class LuaCsClosureValue
+	internal class LuaCsClosureValue
 	{
 		public CSharpFunctionDelegate 	F;
 		public StkId[]					Upvals;
@@ -328,6 +353,17 @@ namespace UniLua
 		public LuaCsClosureValue( CSharpFunctionDelegate f )
 		{
 			F = f;
+		}
+
+		public bool IsLight
+		{
+			get { return Upvals == null || Upvals.Length == 0; }
+		}
+
+		// equal light functions hash alike, as table keys (see TValue.SameObject)
+		public override int GetHashCode()
+		{
+			return IsLight ? F.GetHashCode() : base.GetHashCode();
 		}
 
 		public LuaCsClosureValue( CSharpFunctionDelegate f, int numUpvalues )
@@ -343,7 +379,7 @@ namespace UniLua
 		}
 	}
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		internal static StkId TheNilValue;
 
@@ -363,7 +399,7 @@ namespace UniLua
 			if( pos == 0 )
 				return false; // nothing recognized
 
-			while( pos < s.Length && Char.IsWhiteSpace( s[pos] ) ) ++pos;
+			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) ++pos;
 			return pos == s.Length; // OK if no trailing characters
 		}
 

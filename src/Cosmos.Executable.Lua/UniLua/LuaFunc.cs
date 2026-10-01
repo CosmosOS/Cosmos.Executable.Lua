@@ -1,19 +1,22 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define DEBUG_FIND_UPVALUE
 
 using System.Collections.Generic;
 
-using ULDebug = UniLua.Tools.ULDebug;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
-	public partial class LuaState
+	internal partial class LuaState
 	{
 
 		private LuaUpvalue F_FindUpval( StkId level )
 		{
 #if DEBUG_FIND_UPVALUE
-			ULDebug.Log( "[F_FindUpval] >>>>>>>>>>>>>>>>>>>> level:" + level );
+			System.Diagnostics.Debug.WriteLine( "[F_FindUpval] >>>>>>>>>>>>>>>>>>>> level:" + level );
 #endif
 
 			var node = OpenUpval.First;
@@ -22,7 +25,7 @@ namespace UniLua
 			{
 				var upval = node.Value;
 #if DEBUG_FIND_UPVALUE
-				ULDebug.Log("[F_FindUpval] >>>>>>>>>>>>>>>>>>>> upval.V:" + upval.V );
+				System.Diagnostics.Debug.WriteLine("[F_FindUpval] >>>>>>>>>>>>>>>>>>>> upval.V:" + upval.V );
 #endif
 				if(upval.V.Index < level.Index)
 					break;
@@ -49,7 +52,7 @@ namespace UniLua
 				OpenUpval.AddAfter( prev, ret );
 
 #if DEBUG_FIND_UPVALUE
-			ULDebug.Log("[F_FindUpval] >>>>>>>>>>>>>>>>>>>> create new one:" + ret.V );
+			System.Diagnostics.Debug.WriteLine("[F_FindUpval] >>>>>>>>>>>>>>>>>>>> create new one:" + ret.V );
 #endif
 
 			return ret;

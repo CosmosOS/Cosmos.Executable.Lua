@@ -1,14 +1,17 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // #define DEBUG_D_PRE_CALL
 // #define DEBUG_D_POS_CALL
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
-	using ULDebug = UniLua.Tools.ULDebug;
 	using InstructionPtr = Pointer<Instruction>;
 	using Exception = System.Exception;
 
-	public class LuaRuntimeException : Exception
+	internal class LuaRuntimeException : Exception
 	{
 		public ThreadStatus ErrCode { get; private set; }
 
@@ -18,7 +21,7 @@ namespace UniLua
 		}
 	}
 
-	public partial class LuaState
+	internal partial class LuaState
 	{
 		internal void D_Throw( ThreadStatus errCode )
 		{
@@ -33,10 +36,24 @@ namespace UniLua
 			{
 				func(ref ud);
 			}
-			catch( LuaRuntimeException e )
+			catch( Exception e )
 			{
+				// One clause that tells the exceptions apart: Cosmos kernels up
+				// to 3.0.89 enter the first typed clause whatever the type
 				NumCSharpCalls = oldNumCSharpCalls;
-				res = e.ErrCode;
+				if( e is LuaRuntimeException error )
+				{
+					res = error.ErrCode;
+				}
+				else
+				{
+					// Any other .NET exception, from a C# function such as a
+					// host's or from a file operation, is a Lua error with its
+					// message: pcall catches it, and it does not tear down the host.
+					Top.V.SetSValue( e.GetType().Name + ": " + e.Message );
+					IncrTop();
+					res = ThreadStatus.LUA_ERRRUN;
+				}
 			}
 			NumCSharpCalls = oldNumCSharpCalls;
 			return res;
@@ -70,7 +87,9 @@ namespace UniLua
 			int oldErrFunc			= ErrFunc;
 
 			ErrFunc = errFunc;
+			G.Host.ProtectedDepth++;
 			ThreadStatus status = D_RawRunProtected<T>( func, ref ud );
+			G.Host.ProtectedDepth--;
 			if( status != ThreadStatus.LUA_OK ) // an error occurred?
 			{
 				F_Close( Stack[oldTopIndex] );
@@ -78,9 +97,28 @@ namespace UniLua
 				CI = BaseCI[oldCIIndex];
 				AllowHook = oldAllowHook;
 				NumNonYieldable = oldNumNonYieldable;
+				D_ShrinkStack();
 			}
 			ErrFunc = oldErrFunc;
+			if( status != ThreadStatus.LUA_OK && G.Host.ExitCode.HasValue )
+				D_PropagateExit( status );
 			return status;
+		}
+
+		// os.exit is a Lua error that no pcall keeps: every protected call it
+		// reaches gives the state back as the call found it, then raises it
+		// again, and the outermost one throws LuaExitException to the host.
+		// A new throw at every level rather than one exception to the host:
+		// a Cosmos kernel finds the catch of a throw within a few dozen frames
+		// only, and rethrows a few times only.
+		internal void D_PropagateExit( ThreadStatus status )
+		{
+			if( G.Host.ProtectedDepth > 0 )
+				D_Throw( status );
+
+			int code = G.Host.ExitCode.Value;
+			G.Host.ExitCode = null;
+			throw new LuaExitException( code );
 		}
 
 		private void D_Call( StkId func, int nResults, bool allowYield )
@@ -88,7 +126,7 @@ namespace UniLua
 			if( ++NumCSharpCalls >= LuaLimits.LUAI_MAXCCALLS )
 			{
 				if( NumCSharpCalls == LuaLimits.LUAI_MAXCCALLS )
-					G_RunError( "CSharp Stack Overflow" );
+					G_RunError( "C stack overflow" );
 				else if( NumCSharpCalls >=
 						(LuaLimits.LUAI_MAXCCALLS + (LuaLimits.LUAI_MAXCCALLS>>3))
 					)
@@ -111,7 +149,7 @@ namespace UniLua
 			// prepare for Lua call
 
 #if DEBUG_D_PRE_CALL
-			ULDebug.Log( "============================ D_PreCall func:" + func );
+			System.Diagnostics.Debug.WriteLine( "============================ D_PreCall func:" + func );
 #endif
 
 			int funcIndex = func.Index;
@@ -149,6 +187,8 @@ namespace UniLua
 				CI.CallStatus = CallStatus.CIST_LUA;
 
 				Top = Stack[CI.TopIndex];
+				if( (HookMask & LuaDef.LUA_MASKCALL) != 0 )
+					CallHook( CI );
 
 				return false;
 			}
@@ -166,6 +206,9 @@ namespace UniLua
 				CI.TopIndex = Top.Index + LuaDef.LUA_MINSTACK;
 				CI.CallStatus = CallStatus.CIST_NONE;
 
+				if( (HookMask & LuaDef.LUA_MASKCALL) != 0 )
+					D_Hook( LuaDef.LUA_HOOKCALL, -1 );
+
 				// do the actual call
 				int n = cscl.F( this );
 				
@@ -180,16 +223,20 @@ namespace UniLua
 
 		private int D_PosCall( int firstResultIndex )
 		{
-			// TODO: hook
-			// be careful: CI may be changed after hook
+			if( (HookMask & (LuaDef.LUA_MASKRET | LuaDef.LUA_MASKLINE)) != 0 )
+			{
+				if( (HookMask & LuaDef.LUA_MASKRET) != 0 )
+					D_Hook( LuaDef.LUA_HOOKRET, -1 );
+				OldPc = BaseCI[CI.Index-1].SavedPc.Index; // 'OldPc' for caller function
+			}
 
 			int resIndex = CI.FuncIndex;
 			int wanted = CI.NumResults;
 
 #if DEBUG_D_POS_CALL
-			ULDebug.Log( "[D] ==== PosCall enter" );
-			ULDebug.Log( "[D] ==== PosCall res:" + res );
-			ULDebug.Log( "[D] ==== PosCall wanted:" + wanted );
+			System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall enter" );
+			System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall res:" + res );
+			System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall wanted:" + wanted );
 #endif
 
 			CI = BaseCI[CI.Index-1];
@@ -198,21 +245,21 @@ namespace UniLua
 			for( ; i!=0 && firstResultIndex < Top.Index; --i )
 			{
 #if DEBUG_D_POS_CALL
-				ULDebug.Log( "[D] ==== PosCall assign lhs res:" + res );
-				ULDebug.Log( "[D] ==== PosCall assign rhs firstResult:" + firstResult );
+				System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall assign lhs res:" + res );
+				System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall assign rhs firstResult:" + firstResult );
 #endif
 				Stack[resIndex++].V.SetObj(ref Stack[firstResultIndex++].V);
 			}
 			while( i-- > 0 )
 			{
 #if DEBUG_D_POS_CALL
-				ULDebug.Log( "[D] ==== PosCall new LuaNil()" );
+				System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall new LuaNil()" );
 #endif
 				Stack[resIndex++].V.SetNilValue();
 			}
 			Top = Stack[resIndex];
 #if DEBUG_D_POS_CALL
-			ULDebug.Log( "[D] ==== PosCall return " + (wanted - LuaDef.LUA_MULTRET) );
+			System.Diagnostics.Debug.WriteLine( "[D] ==== PosCall return " + (wanted - LuaDef.LUA_MULTRET) );
 #endif
 			return (wanted - LuaDef.LUA_MULTRET);
 		}
@@ -318,12 +365,32 @@ namespace UniLua
 			}
 		}
 
+		// luaD_shrinkstack: after an error, a stack far bigger than what is in
+		// use (as after a stack overflow) shrinks back; only then, so that
+		// pcalls in a loop do not regrow it each time
+		private void D_ShrinkStack()
+		{
+			int inuse = Top.Index;
+			for( int i=0; i<=CI.Index; ++i )
+			{
+				if( inuse < BaseCI[i].TopIndex )
+					inuse = BaseCI[i].TopIndex;
+			}
+			inuse++;
+			int goodsize = inuse + (inuse / 8) + 2*LuaDef.EXTRA_STACK;
+			if( goodsize > LuaConf.LUAI_MAXSTACK )
+				goodsize = LuaConf.LUAI_MAXSTACK;
+			if( inuse <= LuaConf.LUAI_MAXSTACK &&
+				(Stack.Length > LuaConf.LUAI_MAXSTACK || goodsize * 4 < Stack.Length) )
+				D_ReallocStack( goodsize );
+		}
+
 		private void D_ReallocStack(int size)
 		{
 			Utl.Assert(size <= LuaConf.LUAI_MAXSTACK || size == ERRORSTACKSIZE);
 			var newStack = new StkId[size];
 			int i = 0;
-			for( ; i<Stack.Length; ++i) {
+			for( ; i<Stack.Length && i<size; ++i) {
 				newStack[i] = Stack[i];
 				newStack[i].SetList(newStack);
 			}

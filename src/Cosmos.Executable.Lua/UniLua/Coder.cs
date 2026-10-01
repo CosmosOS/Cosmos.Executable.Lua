@@ -1,13 +1,17 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 using NotImplementedException = System.NotImplementedException;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using InstructionPtr = Pointer<Instruction>;
 	using Math = System.Math;
 	using Exception = System.Exception;
 
-	public struct Instruction
+	internal struct Instruction
 	{
 		public uint Value;
 
@@ -220,7 +224,7 @@ namespace UniLua
 		}
 	}
 
-	public static class Coder
+	internal static class Coder
 	{
 		public const int NO_JUMP = -1;
 		private const int NO_REG  = ((1<<Instruction.SIZE_A) - 1);
@@ -811,6 +815,13 @@ namespace UniLua
 		{
 			var o = new TValue();
 			o.SetNValue(r);
+			if( r == 0 || System.Double.IsNaN(r) ) // handle -0 and NaN
+			{
+				// keyed by the raw bits, so that -0 and 0 are two constants
+				var key = new TValue();
+				key.SetUInt64Value( (ulong)System.BitConverter.DoubleToInt64Bits(r) );
+				return AddK( fs, ref key, ref o );
+			}
 			return AddK( fs, ref o, ref o );
 		}
 

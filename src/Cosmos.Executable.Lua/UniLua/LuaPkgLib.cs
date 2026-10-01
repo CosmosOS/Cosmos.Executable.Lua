@@ -1,9 +1,13 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 // TODO
 
 #define LUA_COMPAT_LOADERS
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	using Environment = System.Environment;
 	using StringBuilder = System.Text.StringBuilder;
@@ -36,7 +40,8 @@ namespace UniLua
 		// 										 LUA_CDIR + "loadall.dll;" +
 		// 										 ".\\?.dll";
 
-		private const string LUA_PATH_DEFAULT = "?.lua;";
+		// relative to the state's working directory, like ./?.lua of the reference lua
+		private static readonly string LUA_PATH_DEFAULT = "?.lua;?" + LuaConf.LUA_DIRSEP + "init.lua";
 		private const string LUA_CPATH_DEFAULT = "?.dll;loadall.dll;";
 
 		private const string LUA_PATH_SEP	= ";";
@@ -186,9 +191,9 @@ namespace UniLua
 			return 1;
 		}
 
-		private static bool Readable( string filename )
+		private static bool Readable( ILuaState lua, string filename )
 		{
-			return LuaFile.Readable( filename );
+			return LuaFile.Readable( lua, filename );
 		}
 
 		private static bool PushNextTemplate( ILuaState lua,
@@ -221,11 +226,9 @@ namespace UniLua
 				var template = lua.ToString(-1);
 				string filename = template.Replace( LUA_PATH_MARK, name );
 				lua.Remove( -1 ); // remove path template
-				if( Readable( filename ) ) // does file exist and is readable?
+				if( Readable( lua, filename ) ) // does file exist and is readable?
 					return filename; // return that file name
-				lua.PushString( string.Format( "\n\tno file '{0}'", filename) );
-				lua.Remove( -2 ); // remove file name
-				sb.Append( lua.ToString(-1) ); // concatenate error msg. entry
+				sb.Append( string.Format( "\n\tno file '{0}'", filename) ); // concatenate error msg. entry
 			}
 			lua.PushString( sb.ToString() ); // create error message
 			return null; // not found
@@ -336,16 +339,30 @@ namespace UniLua
 			return 1;
 		}
 
+		// no C libraries to load here
 		private static int PKG_LoadLib( ILuaState lua )
 		{
-			// TODO
-			return 0;
+			lua.L_CheckString( 1 );
+			lua.L_CheckString( 2 );
+			lua.PushNil();
+			lua.PushString( "dynamic libraries not enabled; check your Lua installation" );
+			lua.PushString( "absent" );
+			return 3; // return nil, error message, and where
 		}
 
 		private static int PKG_SearchPath( ILuaState lua )
 		{
-			// TODO
-			return 0;
+			string f = SearchPath( lua, lua.L_CheckString( 1 ), lua.L_CheckString( 2 ),
+				lua.L_OptString( 3, "." ), lua.L_OptString( 4, LuaConf.LUA_DIRSEP ) );
+			if( f != null )
+			{
+				lua.PushString( f );
+				return 1;
+			}
+			// error message is on top of the stack
+			lua.PushNil();
+			lua.Insert( -2 );
+			return 2; // return nil + error message
 		}
 
 		private static int PKG_SeeAll( ILuaState lua )

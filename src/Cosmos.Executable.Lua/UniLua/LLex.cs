@@ -1,3 +1,7 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 
 using System;
 using System.IO;
@@ -6,14 +10,14 @@ using System.Collections.Generic;
 
 using NumberStyles = System.Globalization.NumberStyles;
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
-    public class LLexException : Exception
+    internal class LLexException : Exception
     {
         public LLexException( string info ) : base( info ) { }
     }
 
-    public enum TK
+    internal enum TK
     {
 		// reserved words
         AND = 257,
@@ -52,7 +56,7 @@ namespace UniLua
         EOS,
     }
 
-    public abstract class Token
+    internal abstract class Token
     {
         public abstract int TokenType{ get; }
 
@@ -69,7 +73,7 @@ namespace UniLua
         }
     }
 
-    public class LiteralToken : Token
+    internal class LiteralToken : Token
     {
         private int _Literal;
 
@@ -89,7 +93,7 @@ namespace UniLua
         }
     }
 
-    public class TypedToken : Token
+    internal class TypedToken : Token
     {
         private TK _Type;
 
@@ -109,7 +113,7 @@ namespace UniLua
         }
     }
 
-    public class StringToken : TypedToken
+    internal class StringToken : TypedToken
     {
         public string SemInfo;
         
@@ -124,7 +128,7 @@ namespace UniLua
         }
     }
 
-    public class NameToken : TypedToken
+    internal class NameToken : TypedToken
     {
         public string SemInfo;
 
@@ -139,7 +143,7 @@ namespace UniLua
         }
     }
 
-    public class NumberToken : TypedToken
+    internal class NumberToken : TypedToken
     {
         public double SemInfo;
 
@@ -154,7 +158,7 @@ namespace UniLua
         }
     }
 
-    public class LLex
+    internal class LLex
     {
         public const char EOZ = Char.MaxValue;
 
@@ -274,24 +278,22 @@ namespace UniLua
 
         private bool _CurrentIsDigit()
         {
-            return Char.IsDigit( (char)Current );
+            return Utl.IsDigit( Current );
         }
 
 		private bool _CurrentIsXDigit()
 		{
-			return _CurrentIsDigit() ||
-				('A' <= Current && Current <= 'F') ||
-				('a' <= Current && Current <= 'f');
+			return Utl.IsXDigit( Current );
 		}
 
         private bool _CurrentIsSpace()
         {
-            return Char.IsWhiteSpace( (char)Current );
+            return Utl.IsSpace( Current );
         }
 
         private bool _CurrentIsAlpha()
         {
-            return Char.IsLetter( (char)Current );
+            return Utl.IsAlpha( Current );
         }
 
 		private bool _IsReserved( string identifier, out TK type )
@@ -314,43 +316,28 @@ namespace UniLua
                 _Error( "chunk has too many lines" );
         }
 
-        private string _ReadLongString( int sep )
+        // a long comment keeps nothing, and returns null
+        private string _ReadLongString( int sep, bool isComment )
         {
-            _SaveAndNext();
+            _SaveAndNext(); // skip 2nd `['
 
-            if( _CurrentIsNewLine() )
-                _IncLineNumber();
+            if( _CurrentIsNewLine() ) // string starts with a newline?
+                _IncLineNumber(); // skip it
 
             while( true )
             {
                 switch( Current )
                 {
                     case EOZ:
-                        _LexError( _GetSavedString(),
-							"unfinished long string/comment",
-							(int)TK.EOS );
+                        _LexError( isComment ? "unfinished long comment"
+							: "unfinished long string", (int)TK.EOS );
                         break;
-
-                    case '[':
-                    {
-                        if( _SkipSep() == sep )
-                        {
-                            _SaveAndNext();
-                            if( sep == 0 )
-                            {
-                                _LexError( _GetSavedString(),
-									"nesting of [[...]] is deprecated",
-									(int)TK.EOS );
-                            }
-                        }
-                        break;
-                    }
 
                     case ']':
                     {
                         if( _SkipSep() == sep )
                         {
-                            _SaveAndNext();
+                            _SaveAndNext(); // skip 2nd `]'
                             goto endloop;
                         }
                         break;
@@ -361,105 +348,109 @@ namespace UniLua
                     {
                         _Save('\n');
                         _IncLineNumber();
+                        if( isComment ) _ClearSaved(); // avoid wasting space
                         break;
                     }
 
                     default:
                     {
-                        _SaveAndNext();
+                        if( isComment ) _Next();
+                        else _SaveAndNext();
                         break;
                     }
                 }
             }
             endloop:
+            if( isComment )
+                return null;
 			var r = _GetSavedString();
             return r.Substring( 2+sep, r.Length - 2*(2+sep) );
         }
 
-		private void _EscapeError( string info, string msg )
+		// the error shows the escape sequence read so far, as `near '\x4''
+		private void _EscapeError( int[] c, int n, string msg )
 		{
-			_LexError( "\\"+info, msg, (int)TK.STRING );
+			_ClearSaved();
+			_Save( '\\' );
+			for( int i=0; i<n && c[i] != EOZ; ++i )
+				_Save( (char)c[i] );
+			_LexError( msg, (int)TK.STRING );
 		}
 
-		private byte _ReadHexEscape()
+		private int _ReadHexEscape()
 		{
 			int r = 0;
-			var c = new char[3] { 'x', (char)0, (char)0 };
+			var c = new int[3] { 'x', 0, 0 };
 			// read two hex digits
 			for( int i=1; i<3; ++i )
 			{
 				_Next();
-				c[i] = (char)Current;
+				c[i] = Current;
 				if( !_CurrentIsXDigit() )
-				{
-					_EscapeError( new String(c, 0, i+1),
-						"hexadecimal digit expected" );
-					// error
-				}
-				r = (r << 4) + Int32.Parse( Current.ToString(),
-					NumberStyles.HexNumber );
+					_EscapeError( c, i+1, "hexadecimal digit expected" );
+				r = (r << 4) + Utl.HexaValue( Current );
 			}
-			return (byte)r;
+			return r;
 		}
 
-		private byte _ReadDecEscape()
+		private int _ReadDecEscape()
 		{
 			int r = 0;
-			var c = new char[3];
+			var c = new int[3];
 			// read up to 3 digits
 			int i = 0;
 			for( i=0; i<3 && _CurrentIsDigit(); ++i )
 			{
-				c[i] = (char)Current;
+				c[i] = Current;
 				r = r*10 + Current - '0';
 				_Next();
 			}
 			if( r > Byte.MaxValue )
-				_EscapeError( new String(c, 0, i),
-					"decimal escape too large" );
-			return (byte)r;
+				_EscapeError( c, i, "decimal escape too large" );
+			return r;
 		}
 
+        // keeps the delimiters in the saved text, for error messages
         private string _ReadString()
         {
             var del = Current;
-            _Next();
+            _SaveAndNext();
             while( Current != del )
             {
                 switch( Current )
                 {
                     case EOZ:
-                        _Error( "unfinished string" );
+                        _LexError( "unfinished string", (int)TK.EOS );
                         continue;
 
                     case '\n':
                     case '\r':
-                        _Error( "unfinished string" );
+                        _LexError( "unfinished string", (int)TK.STRING );
                         continue;
 
                     case '\\':
                     {
-                        byte c;
-                        _Next();
+                        int c;
+                        _Next(); // do not save the `\'
                         switch( Current )
                         {
-                            case 'a': c=(byte)'\a'; break;
-                            case 'b': c=(byte)'\b'; break;
-                            case 'f': c=(byte)'\f'; break;
-                            case 'n': c=(byte)'\n'; break;
-                            case 'r': c=(byte)'\r'; break;
-                            case 't': c=(byte)'\t'; break;
-                            case 'v': c=(byte)'\v'; break;
+                            case 'a': c='\a'; break;
+                            case 'b': c='\b'; break;
+                            case 'f': c='\f'; break;
+                            case 'n': c='\n'; break;
+                            case 'r': c='\r'; break;
+                            case 't': c='\t'; break;
+                            case 'v': c='\v'; break;
 							case 'x': c=_ReadHexEscape(); break;
 
                             case '\n':
-                            case '\r': _Save('\n'); _IncLineNumber(); continue;
+                            case '\r': _IncLineNumber(); _Save('\n'); continue;
 
 							case '\\':
 							case '\"':
-							case '\'': c=(byte)Current; break;
+							case '\'': c=Current; break;
 
-                            case EOZ: continue;
+                            case EOZ: continue; // will raise an error next loop
 
 							// zap following span of spaces
 							case 'z': {
@@ -477,7 +468,7 @@ namespace UniLua
                             default:
                             {
                                 if( !_CurrentIsDigit() )
-									_EscapeError( Current.ToString(),
+									_EscapeError( new int[] { Current }, 1,
 										"invalid escape sequence" );
 
 								// digital escape \ddd
@@ -506,8 +497,9 @@ namespace UniLua
                         continue;
                 }
             }
-            _Next();
-            return _GetSavedString();
+            _SaveAndNext(); // skip delimiter
+            var r = _GetSavedString();
+            return r.Substring( 1, r.Length - 2 );
         }
 
         private double _ReadNumber()
@@ -543,7 +535,7 @@ namespace UniLua
 			}
 			else
 			{
-                _Error( "malformed number: " + str );
+                _LexError( "malformed number", (int)TK.NUMBER );
 				return 0.0;
 			}
         }
@@ -570,22 +562,72 @@ namespace UniLua
 
         private void _Error( string error )
         {
-			Lua.O_PushString( string.Format(
-				"{0}:{1}: {2}",
-				Source, LineNumber, error ) );
-			Lua.D_Throw( ThreadStatus.LUA_ERRSYNTAX );
+			_LexError( error, Token != null ? Token.TokenType : 0 );
         }
 
-		private void _LexError( string info, string msg, int tokenType )
+		// llex.c's luaX_token2str
+		public string Token2Str( int token )
 		{
-			// TODO
-			_Error( msg + ":" + info );
+			if( token < FIRST_RESERVED ) // single-byte symbols?
+				return Utl.IsPrint( token )
+					? string.Format( "'{0}'", (char)token )
+					: string.Format( "char({0})", token );
+			switch( (TK)token )
+			{
+				case TK.CONCAT: return "'..'";
+				case TK.DOTS: return "'...'";
+				case TK.EQ: return "'=='";
+				case TK.GE: return "'>='";
+				case TK.LE: return "'<='";
+				case TK.NE: return "'~='";
+				case TK.DBCOLON: return "'::'";
+				case TK.EOS: return "<eof>";
+				case TK.NUMBER: return "<number>";
+				case TK.STRING: return "<string>";
+				case TK.NAME: return "<name>";
+				default: return "'" + ReservedWords[token - FIRST_RESERVED] + "'";
+			}
+		}
+		private const int FIRST_RESERVED = (int)TK.AND;
+		private static readonly string[] ReservedWords = {
+			"and", "break", "do", "else", "elseif", "end", "false", "for",
+			"function", "goto", "if", "in", "local", "nil", "not", "or",
+			"repeat", "return", "then", "true", "until", "while",
+		};
+
+		private string _TxtToken( int token )
+		{
+			switch( token )
+			{
+				case (int)TK.NAME:
+				case (int)TK.STRING:
+				case (int)TK.NUMBER:
+					return "'" + _GetSavedString() + "'";
+				default:
+					return Token2Str( token );
+			}
+		}
+
+		// "chunk:line: msg near token"; no `near' part for token 0
+		private void _LexError( string msg, int token )
+		{
+			msg = string.Format( "{0}:{1}: {2}",
+				LuaState.O_ChunkId( Source ), LineNumber, msg );
+			if( token != 0 )
+				msg = string.Format( "{0} near {1}", msg, _TxtToken( token ) );
+			Lua.O_PushString( msg );
+			Lua.D_Throw( ThreadStatus.LUA_ERRSYNTAX );
 		}
 
 		public void SyntaxError( string msg )
 		{
-			// TODO
-			_Error( msg );
+			_LexError( msg, Token.TokenType );
+		}
+
+		// an error about the meaning of the code: no `near' part
+		public void SemanticError( string msg )
+		{
+			_LexError( msg, 0 );
 		}
 
         private int _SkipSep()
@@ -617,15 +659,15 @@ namespace UniLua
                         _Next();
                         if( Current != '-' ) return new LiteralToken('-');
 
-                        // else is a long comment
+                        // else is a comment
                         _Next();
-                        if( Current == '[' )
+                        if( Current == '[' ) // long comment?
                         {
                             int sep = _SkipSep();
-                            _ClearSaved();
+                            _ClearSaved(); // `_SkipSep' may dirty the buffer
                             if( sep >= 0 )
                             {
-                                _ReadLongString( sep );
+                                _ReadLongString( sep, true );
                                 _ClearSaved();
                                 continue;
                             }
@@ -640,11 +682,11 @@ namespace UniLua
                     case '[': {
                         int sep = _SkipSep();
                         if( sep >= 0 ) {
-                            string seminfo = _ReadLongString( sep );
+                            string seminfo = _ReadLongString( sep, false );
                             return new StringToken( seminfo );
                         }
                         else if( sep == -1 ) return new LiteralToken('[');
-                        else _Error("invalid long string delimiter");
+                        else _LexError("invalid long string delimiter", (int)TK.STRING);
                         continue;
                     }
 
@@ -713,13 +755,16 @@ namespace UniLua
                         return new TypedToken( TK.EOS );
                     }
 
+                    case ' ':
+                    case '\f':
+                    case '\t':
+                    case '\v': {
+                        _Next();
+                        continue;
+                    }
+
                     default: {
-                        if( _CurrentIsSpace() )
-                        {
-                            _Next();
-                            continue;
-                        }
-                        else if( _CurrentIsDigit() )
+                        if( _CurrentIsDigit() )
                         {
                             return new NumberToken( _ReadNumber() );
                         }
@@ -745,6 +790,11 @@ namespace UniLua
                         else
                         {
                             var c = Current;
+                            // A character above the bytes C Lua reads would
+                            // take the number of a reserved word as a token
+                            if( c >= FIRST_RESERVED )
+                                _LexError( string.Format(
+									"unexpected symbol near char({0})", c ), 0 );
                             _Next();
                             return new LiteralToken(c);
                         }

@@ -1,8 +1,12 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
+
 using System;
 
 // #define DEBUG_RECORD_INS
 
-namespace UniLua
+namespace Cosmos.Executable.Lua
 {
 	public interface ILoadInfo
 	{
@@ -13,7 +17,7 @@ namespace UniLua
 	public delegate int CSharpFunctionDelegate(ILuaState state);
 	public interface ILuaAPI
 	{
-		LuaState NewThread();
+		ILuaState NewThread();
 
 		ThreadStatus Load( ILoadInfo loadinfo, string name, string mode );
 		DumpStatus Dump( LuaWriter writeFunc );
@@ -88,6 +92,7 @@ namespace UniLua
 		void PushValue( int index );
 		void PushGlobalTable();
 		void PushLightUserData( object o );
+		void NewUserData( object o );
 		void PushUInt64( UInt64 o );
 		bool PushThread();
 
@@ -132,9 +137,9 @@ namespace UniLua
 
 	internal delegate void PFuncDelegate<T>(ref T ud);
 
-	public partial class LuaState : ILuaState
+	internal partial class LuaState : ILuaState
 	{
-		LuaState ILuaAPI.NewThread()
+		ILuaState ILuaAPI.NewThread()
 		{
 			LuaState newLua = new LuaState(G);
 			Top.V.SetThValue(newLua);
@@ -238,7 +243,8 @@ namespace UniLua
 		ThreadStatus ILuaAPI.Load( ILoadInfo loadinfo, string name, string mode )
 		{
 			var param  = new LoadParameter(this, loadinfo, name, mode);
-			var status = D_PCall( DG_F_Load, ref param, Top.Index, ErrFunc );
+			// no message handler: an error of a reader function is load's result
+			var status = D_PCall( DG_F_Load, ref param, Top.Index, 0 );
 
 			if( status == ThreadStatus.LUA_OK ) {
 				var below = Stack[Top.Index-1];
@@ -552,6 +558,8 @@ namespace UniLua
 		ThreadStatus ILuaAPI.Resume( ILuaState from, int numArgs )
 		{
 			LuaState fromState = from as LuaState;
+			// restored after: resuming the running thread, an error, leaves it as it was
+			int oldNumNonYieldable = NumNonYieldable;
 			NumCSharpCalls = (fromState != null) ? fromState.NumCSharpCalls + 1 : 1;
 			NumNonYieldable = 0; // allow yields
 
@@ -569,7 +577,8 @@ namespace UniLua
 			{
 				while( status != ThreadStatus.LUA_OK && status != ThreadStatus.LUA_YIELD ) // error?
 				{
-					if( Recover( status ) ) // recover point?
+					// recover point? (none for os.exit, which ends the script)
+					if( !G.Host.ExitCode.HasValue && Recover( status ) )
 					{
 						var unrollParam = new UnrollParam();
 						unrollParam.L = this;
@@ -586,7 +595,7 @@ namespace UniLua
 				Utl.Assert( status == Status );
 			}
 
-			NumNonYieldable = 1; // do not allow yields
+			NumNonYieldable = oldNumNonYieldable;
 			NumCSharpCalls--;
 			Utl.Assert( NumCSharpCalls == ((fromState != null) ? fromState.NumCSharpCalls : 0) );
 			return status;
@@ -796,7 +805,7 @@ namespace UniLua
 			}
 			else if(addr.V.ClIsCsClosure()) {
 				var f = addr.V.ClCsValue();
-				if(!(1 <= n && n <= f.Upvals.Length))
+				if(f.Upvals == null || !(1 <= n && n <= f.Upvals.Length))
 					return null;
 				val = f.Upvals[n-1];
 				return "";
@@ -1123,13 +1132,14 @@ namespace UniLua
 
 		bool ILuaAPI.Compare( int index1, int index2, LuaEq op )
 		{
+			// as C Lua: an index with no value is never equal nor less
 			StkId addr1;
 			if( !Index2Addr( index1, out addr1 ) )
-				Utl.InvalidIndex();
+				return false;
 
 			StkId addr2;
 			if( !Index2Addr( index2, out addr2 ) )
-				Utl.InvalidIndex();
+				return false;
 
 			switch( op )
 			{
@@ -1157,7 +1167,7 @@ namespace UniLua
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
-				Utl.InvalidIndex();
+				return 0;
 
 			switch( addr.V.Tt )
 			{
@@ -1266,7 +1276,7 @@ namespace UniLua
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
-				Utl.InvalidIndex();
+				addr = TheNilValue; // an index with no value pushes nil, as in C Lua
 
 			Top.V.SetObj(ref addr.V);
 			ApiIncrTop();
@@ -1280,6 +1290,12 @@ namespace UniLua
 		void ILuaAPI.PushLightUserData( object o )
 		{
 			Top.V.SetPValue( o );
+			ApiIncrTop();
+		}
+
+		void ILuaAPI.NewUserData( object o )
+		{
+			Top.V.SetUValue( new LuaUserDataValue { Value = o } );
 			ApiIncrTop();
 		}
 
@@ -1305,7 +1321,7 @@ namespace UniLua
 		{
 			StkId addr;
 			if( !Index2Addr( index, out addr ) )
-				Utl.InvalidIndex();
+				return false; // no value, no metatable
 
 			LuaTable mt;
 			switch( addr.V.Tt )
@@ -1490,19 +1506,30 @@ namespace UniLua
 
 			if( addr.V.TtIsNumber() ) {
 				isnum = true;
-				return (uint)addr.V.NValue;
+				return Number2Unsigned( addr.V.NValue );
 			}
 
 			if( addr.V.TtIsString() ) {
 				var n = new TValue();
 				if(V_ToNumber(addr, ref n)) {
 					isnum = true;
-					return (uint)n.NValue;
+					return Number2Unsigned( n.NValue );
 				}
 			}
 
 			isnum = false;
 			return 0;
+		}
+
+		// lua_number2unsigned: modulo 2^32 and rounded to even, so that
+		// bit32.band(2^33-1) and bit32.band(-1) are 0xffffffff (a cast saturates)
+		private static uint Number2Unsigned( double n )
+		{
+			const double SUPUNSIGNED = 4294967296.0;
+			double m = n % SUPUNSIGNED;
+			if( m < 0 ) m += SUPUNSIGNED;
+			m = System.Math.Round( m, System.MidpointRounding.ToEven );
+			return unchecked( (uint)(ulong)m );
 		}
 
 		uint ILuaAPI.ToUnsigned( int index )
@@ -1559,8 +1586,7 @@ namespace UniLua
 				return null;
 
 			switch(addr.V.Tt) {
-				case (int)LuaType.LUA_TUSERDATA:
-					throw new System.NotImplementedException();
+				case (int)LuaType.LUA_TUSERDATA: { return addr.V.RawUValue().Value; }
 				case (int)LuaType.LUA_TLIGHTUSERDATA: { return addr.V.OValue; }
 				case (int)LuaType.LUA_TUINT64: { return addr.V.UInt64Value; }
 				default: return null;
@@ -1616,7 +1642,7 @@ namespace UniLua
 
 				Utl.Assert(func.V.ClIsCsClosure());
 				var clcs = func.V.ClCsValue();
-				if(index > clcs.Upvals.Length) {
+				if(clcs.Upvals == null || index > clcs.Upvals.Length) {
 					addr = default(StkId);
 					return false;
 				}

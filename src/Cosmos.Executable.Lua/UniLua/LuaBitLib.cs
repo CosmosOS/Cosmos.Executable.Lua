@@ -1,5 +1,9 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 
 	internal class LuaBitLib
@@ -146,7 +150,7 @@ namespace UniLua
 		{
 			int f = lua.L_CheckInteger( farg );
 			int w = lua.L_OptInt( farg+1, 1 );
-			lua.L_ArgCheck( 0 <= f, farg, "field cannot be nagetive" );
+			lua.L_ArgCheck( 0 <= f, farg, "field cannot be negative" );
 			lua.L_ArgCheck( 0 < w, farg+1, "width must be positive" );
 			if( f + w > LUA_NBITS )
 				lua.L_Error( "trying to access non-existent bits" );

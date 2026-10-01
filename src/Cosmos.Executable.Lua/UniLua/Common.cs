@@ -1,13 +1,20 @@
+// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+#nullable disable
+#pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
-namespace UniLua
+
+namespace Cosmos.Executable.Lua
 {
 	public static class LuaConf
 	{
 		public const int LUAI_BITSINT			= 32;
 
 #pragma warning disable 0429
+		// 200000 slots, not the reference 1000000: a slot is an object here,
+		// and a runaway recursion fills the stack before it fails, which costs
+		// tens of megabytes of a kernel's heap at a million
 		public const int LUAI_MAXSTACK = (LUAI_BITSINT >= 32)
-			? 1000000
+			? 200000
 			: 15000
 			;
 #pragma warning restore 0429
@@ -25,7 +32,11 @@ namespace UniLua
 	{
 		public const int MAX_INT 	= System.Int32.MaxValue - 2;
 		public const int MAXUPVAL 	= System.Byte.MaxValue;
-		public const int LUAI_MAXCCALLS = 200;
+		// 150, not the reference 200: a nested C# call (a metamethod, a sort
+		// comparator, a parser level...) takes up to about 1 KB of the thread's
+		// stack, and a Cosmos session thread has 256 KB, which overflows
+		// without a fault
+		public const int LUAI_MAXCCALLS = 150;
 		public const int MAXSTACK	= 250;
 	}
 
@@ -55,6 +66,18 @@ namespace UniLua
 		public const string LUA_ENV = "_ENV";
 
 		public const int BASE_CI_SIZE = 8;
+
+		// event codes and masks of the debug hooks
+		public const int LUA_HOOKCALL		= 0;
+		public const int LUA_HOOKRET		= 1;
+		public const int LUA_HOOKLINE		= 2;
+		public const int LUA_HOOKCOUNT		= 3;
+		public const int LUA_HOOKTAILCALL	= 4;
+
+		public const int LUA_MASKCALL		= 1 << LUA_HOOKCALL;
+		public const int LUA_MASKRET		= 1 << LUA_HOOKRET;
+		public const int LUA_MASKLINE		= 1 << LUA_HOOKLINE;
+		public const int LUA_MASKCOUNT		= 1 << LUA_HOOKCOUNT;
 	}
 
 	public static class LuaConstants
@@ -85,7 +108,7 @@ namespace UniLua
 		LUA_TDEADKEY,
 	}
 
-	public enum ClosureType
+	internal enum ClosureType
 	{
 		LUA,
 		CSHARP,
