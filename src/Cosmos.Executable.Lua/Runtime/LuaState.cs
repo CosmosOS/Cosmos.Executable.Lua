@@ -1,4 +1,4 @@
-// Part of UniLua (see LICENSE.txt in this directory), adapted for Cosmos.
+// Part of UniLua (see THIRD-PARTY-NOTICES.txt for its license), adapted for Cosmos.
 #nullable disable
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
