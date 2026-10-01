@@ -62,7 +62,7 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 The standard libraries are those of Lua 5.3 built with `LUA_COMPAT_5_2`, as the reference one is, so `bit32`, `math.pow` and the others are there, except `io.popen`. There is no `__gc` and no weak tables, so close the files you open: a write reaches the file at once, unless `file:setvbuf` asks for a buffer. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
 
-The tests run the official [Lua 5.3 test suite](https://www.lua.org/tests/) (lua-5.3.4-tests), but for `gc.lua` and `main.lua`, with the four lines these limitations break patched in `LuaTestSuiteTests.cs`.
+The tests run the official [Lua 5.3 test suite](https://www.lua.org/tests/) (lua-5.3.4-tests), each file alone and then all together through its `all.lua`, which loads them again from `string.dump`: all of it but `gc.lua`, with the four lines these limitations break patched in `LuaTestSuiteTests.cs`.
 
 ## Authors
 

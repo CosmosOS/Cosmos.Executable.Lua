@@ -10,10 +10,12 @@ namespace Cosmos.Executable.Lua.Tests;
 
 /// <summary>
 /// Runs the files of the official Lua 5.3 test suite (lua-5.3-tests, from
-/// lua-5.3.4-tests) as its all.lua runs them, with <c>_port</c> set (no
-/// tests of the platform of the reference implementation) and the slow
-/// tests on. Left out: gc, which tests the collector, weak tables and
-/// <c>__gc</c>; main, which runs the lua program; all, which runs the others.
+/// lua-5.3.4-tests) one by one, then all together through all.lua, which
+/// loads most of them again from <c>string.dump</c>; with <c>_port</c> set
+/// (no tests of the platform of the reference implementation) and the slow
+/// tests on. Left out: gc.lua, which tests the collector, weak tables and
+/// <c>__gc</c>; main.lua, which runs the lua program, is there for all.lua
+/// and tests nothing with <c>_port</c> set.
 /// </summary>
 public class LuaTestSuiteTests
 {
@@ -26,6 +28,9 @@ public class LuaTestSuiteTests
     /// </summary>
     private static readonly (string File, string Line, string Replacement)[] Patches =
     [
+        // No collector to test
+        ("all.lua", "local f = assert(loadfile('gc.lua'))", "local f = function () end  -- no collector to test"),
+
         // No weak tables: there is no collection to wait for
         ("closure.lua", "while x[1] do   -- repeat until GC", "x[1] = nil; while x[1] do   -- repeat until GC"),
 
@@ -39,6 +44,7 @@ public class LuaTestSuiteTests
         ("errors.lua", "local maxClevel = 200", "local maxClevel = 150"),
     ];
 
+    [TestCase("all")]
     [TestCase("api")]
     [TestCase("attrib")]
     [TestCase("big")]
