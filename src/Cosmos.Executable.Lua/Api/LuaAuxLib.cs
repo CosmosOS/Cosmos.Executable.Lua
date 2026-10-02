@@ -56,6 +56,7 @@ namespace Cosmos.Executable.Lua
 		long	L_OptInteger( int narg, long def );
 		double	L_OptNumber( int narg, double def );
 		string 	L_OptString( int narg, string def );
+		int 	L_CheckOption( int narg, string def, string[] lst );
 		bool 	L_CallMeta( int obj, string name );
 		void	L_Traceback( ILuaState otherLua, string msg, int level );
 		long	L_Len( int index );
@@ -265,6 +266,16 @@ namespace Cosmos.Executable.Lua
 			{
 				return L_CheckString( narg );
 			}
+		}
+
+		// luaL_checkoption: the index of the option the argument names in 'lst'
+		public int L_CheckOption( int narg, string def, string[] lst )
+		{
+			string name = (def != null) ? L_OptString( narg, def ) : L_CheckString( narg );
+			for( int i=0; i<lst.Length; ++i )
+				if( lst[i] == name )
+					return i;
+			return L_ArgError( narg, string.Format( "invalid option '{0}'", name ) );
 		}
 
 		public int L_TypeError( int index, string typeName )

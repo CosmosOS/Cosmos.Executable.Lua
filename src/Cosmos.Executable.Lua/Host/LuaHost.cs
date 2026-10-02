@@ -111,8 +111,8 @@ internal sealed class LuaHost
 
     /// <summary>
     /// The files of the state that are open, which <see cref="CloseFiles"/>
-    /// closes: there is no collector to close those a script forgot, and a
-    /// kernel has few file descriptors.
+    /// closes: the collector closes those a script lost, but not those it
+    /// keeps until the end, and a kernel has few file descriptors.
     /// </summary>
     public List<LuaFileHandle> OpenFiles { get; } = [];
 

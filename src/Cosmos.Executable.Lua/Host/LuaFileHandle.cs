@@ -14,8 +14,9 @@ namespace Cosmos.Executable.Lua;
 /// takes its bytes as they are, in text mode as in binary mode, as on
 /// POSIX. The console is text, which the standard files encode to and
 /// decode from UTF-8. A write reaches the file at once, unless the script
-/// asked <c>setvbuf</c> for a buffer: no collector flushes the buffer of a
-/// file a script forgot to close (see <see cref="BufferMode"/>).
+/// asked <c>setvbuf</c> for a buffer, which closing the file flushes: by
+/// the script, by the collector for a file the script lost, or at the end
+/// of the interpreter (see <see cref="BufferMode"/>).
 /// </remarks>
 internal sealed class LuaFileHandle
 {

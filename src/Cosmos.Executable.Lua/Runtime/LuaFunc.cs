@@ -32,6 +32,7 @@ namespace Cosmos.Executable.Lua
 
 			/* not found: create a new upvalue after 'prev' */
 			var uv = new LuaUpvalue();
+			C_Alloc( LuaGCSize.UpVal );
 			uv.V = level; // current value lives in the stack
 			if( prev == null )
 				OpenUpval.AddFirst( uv );

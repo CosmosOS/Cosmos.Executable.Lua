@@ -41,6 +41,7 @@ public sealed class LuaInterpreter : IDisposable
     {
         State = LuaAPI.NewState();
         State.L_OpenLibs();
+        ((LuaState)State).C_GC(LuaGCOption.LUA_GCGEN); // GC in generational mode, as lua.c sets it
         _host = LuaHost.Of(State);
     }
 
@@ -327,9 +328,14 @@ public sealed class LuaInterpreter : IDisposable
         }
     }
 
-    /// <summary>Closes the files the scripts left open. The state can still run code, which may open others.</summary>
+    /// <summary>
+    /// Calls the finalizers (<c>__gc</c>) of the objects that have one, as
+    /// <c>lua_close</c> does, then closes the files the scripts left open.
+    /// The state can still run code, but finalizes nothing more.
+    /// </summary>
     public void Dispose()
     {
+        ((LuaState)State).C_FreeAllObjects();
         _host.CloseFiles();
     }
 

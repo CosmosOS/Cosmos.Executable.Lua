@@ -661,8 +661,10 @@ namespace Cosmos.Executable.Lua
 			}
 			else
 			{
+				C_AllocString( s );
 				Top.V.SetSValue( s );
 				ApiIncrTop();
+				C_CheckGC();
 				return s;
 			}
 		}
@@ -671,6 +673,7 @@ namespace Cosmos.Executable.Lua
 		// frame of the C# function, as luaO_pushfstring
 		internal void O_PushString( string s )
 		{
+			C_AllocString( s );
 			Top.V.SetSValue( s );
 			IncrTop();
 		}
@@ -692,12 +695,16 @@ namespace Cosmos.Executable.Lua
 				Utl.ApiCheck( n <= LuaLimits.MAXUPVAL, "upvalue index too large" );
 
 				LuaCsClosureValue cscl = new LuaCsClosureValue( f, n );
+				C_Alloc( LuaGCSize.CClosure + (long)LuaGCSize.TValue * n );
 				int index = Top.Index - n;
 				Top = Stack[index];
 				for( int i=0; i<n; ++i )
 					{ cscl.Upvals[i].V.SetObj( ref Stack[index+i].V ); }
 
 				Top.V.SetClCsValue( cscl );
+				ApiIncrTop();
+				C_CheckGC();
+				return;
 			}
 			ApiIncrTop();
 		}
@@ -821,6 +828,7 @@ namespace Cosmos.Executable.Lua
 			ApiIncrTop();
 			if( narray > 0 || nrec > 0 )
 				{ tbl.Resize( narray, nrec ); }
+			C_CheckGC();
 		}
 
 		void ILuaAPI.NewTable()
@@ -964,16 +972,17 @@ namespace Cosmos.Executable.Lua
 				mt = below.V.HValue();
 			}
 
-			// TODO: Cosmos has no finalizers nor weak references: the '__gc'
-			// of tables and userdata is never called (luaC_checkfinalizer),
-			// and a '__mode' leaves the keys and values of a table strong
 			switch( addr.V.Tt )
 			{
 				case (int)LuaType.LUA_TTABLE:
 					addr.V.HValue().MetaTable = mt;
+					if( mt != null )
+						C_CheckFinalizer( addr.V.HValue(), mt );
 					break;
 				case (int)LuaType.LUA_TUSERDATA:
 					addr.V.RawUValue().MetaTable = mt;
+					if( mt != null )
+						C_CheckFinalizer( addr.V.RawUValue(), mt );
 					break;
 				default:
 					G.MetaTables[addr.V.BaseTt()] = mt;
@@ -1156,6 +1165,7 @@ namespace Cosmos.Executable.Lua
 			}
 
 			var cl = new LuaLClosureValue( proto );
+			L.C_Alloc( LuaGCSize.LClosure + (long)(LuaGCSize.UpVal + 8) * cl.Upvals.Length );
 			Utl.Assert( cl.Upvals.Length == cl.Proto.Upvalues.Count );
 
 			L.Top.V.SetClLValue( cl );
@@ -1288,6 +1298,7 @@ namespace Cosmos.Executable.Lua
 				Top.V.SetSValue( "" ); // push empty string
 				ApiIncrTop();
 			}
+			C_CheckGC();
 		}
 
 		void ILuaAPI.Len( int index )
@@ -1304,8 +1315,10 @@ namespace Cosmos.Executable.Lua
 		void ILuaAPI.NewUserDataUV( object o, int nuvalue )
 		{
 			Utl.ApiCheck( 0 <= nuvalue && nuvalue < short.MaxValue, "invalid value" );
+			C_Alloc( LuaGCSize.Udata + (long)LuaGCSize.TValue * nuvalue );
 			Top.V.SetUValue( new LuaUserDataValue( nuvalue ) { Value = o } );
 			ApiIncrTop();
+			C_CheckGC();
 		}
 
 		void ILuaAPI.NewUserData( object o )
@@ -1393,7 +1406,9 @@ namespace Cosmos.Executable.Lua
 
 		ILuaState ILuaAPI.NewThread()
 		{
+			C_CheckGC();
 			LuaState L1 = new LuaState( G );
+			C_Alloc( LuaGCSize.Thread + (long)LuaGCSize.TValue * L1.Stack.Length );
 			Top.V.SetThValue( L1 );
 			ApiIncrTop();
 

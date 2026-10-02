@@ -60,9 +60,11 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 ### Limitations
 
-The standard libraries are those of Lua 5.4 built with `LUA_COMPAT_5_3`, as the reference one is, so `math.pow` and the others are there, except `io.popen`. There is no `__gc` and no weak tables, so close the files you open, or give them to a `<close>` variable: a write reaches the file at once, unless `file:setvbuf` asks for a buffer. `collectgarbage` asks .NET for a collection; its other options change nothing. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
+The standard libraries are those of Lua 5.4 built with `LUA_COMPAT_5_3`, as the reference one is, so `math.pow` and the others are there, except `io.popen`. A write reaches a file at once, unless `file:setvbuf` asks for a buffer. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
 
-The tests run the official [Lua 5.4 test suite](https://www.lua.org/tests/) (lua-5.4.9-tests), each file alone and then all together through its `all.lua`, which loads them again from `string.dump`: all of it but `gc.lua` and `gengc.lua`, with the lines these limitations break patched in `LuaTestSuiteTests.cs`.
+The state runs the collector of Lua 5.4 over its own objects, so weak tables, `__gc` finalizers and `collectgarbage("count")` behave as in the reference implementation, and the .NET collector, the kernel's on Cosmos, frees what it lets go. Each cycle is a whole one: the incremental and generational modes only pace the cycles.
+
+The tests run the official [Lua 5.4 test suite](https://www.lua.org/tests/) (lua-5.4.9-tests), as its authors wrote it, each file alone and then all together through its `all.lua`, which loads them again from `string.dump`.
 
 ## Authors
 

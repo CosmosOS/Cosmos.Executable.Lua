@@ -170,14 +170,8 @@ namespace Cosmos.Executable.Lua
 		// lua_setwarnf: the warning function, as lauxlib sets it
 		public LuaWarnDelegate WarnF;
 
-		// What 'collectgarbage' reports of the collector: the .NET one runs
-		// on its own, so these are only the settings a script asked for
-		// TODO: Cosmos gives no control over its collector (stop, steps,
-		// incremental or generational mode)
-		public bool GCStopped;
-		public bool GCGenerational;
-		public int GCPause = 200;
-		public int GCStepMul = 100;
+		// the collector of the state's objects (see LuaGC.cs)
+		public GCState		GC = new GCState();
 
 		// What the libraries reach the machine through: shared by the
 		// coroutines of a state, separate from other states

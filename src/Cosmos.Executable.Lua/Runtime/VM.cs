@@ -720,7 +720,9 @@ namespace Cosmos.Executable.Lua
 					var sb = new StringBuilder( tl );
 					for( int k = n; k >= 1; --k )
 						sb.Append( Stack[top - k].V.SValue() );
-					Stack[top - n].V.SetSValue( sb.ToString() ); // create result
+					string result = sb.ToString();
+					C_AllocString( result );
+					Stack[top - n].V.SetSValue( result ); // create result
 				}
 				total -= n - 1; // got 'n' strings to create one new
 				Top = Stack[Top.Index - (n - 1)]; // popped 'n' strings and pushed one
@@ -836,6 +838,7 @@ namespace Cosmos.Executable.Lua
 		private void PushClosure( LuaProto p, LuaUpvalue[] encup, int stackBase, StkId ra )
 		{
 			var ncl = new LuaLClosureValue( p );
+			C_Alloc( LuaGCSize.LClosure + 8L * p.Upvalues.Count );
 			ra.V.SetClLValue( ncl ); // anchor new closure in stack
 			for( int i = 0; i < p.Upvalues.Count; ++i ) // fill in its upvalues
 			{
@@ -1182,6 +1185,7 @@ namespace Cosmos.Executable.Lua
 						ra.V.SetHValue( t );
 						if( b != 0 || c != 0 )
 							t.Resize( c, b );
+						C_CheckGC();
 						break;
 					}
 					case OpCode.OP_SELF:
@@ -1386,6 +1390,7 @@ namespace Cosmos.Executable.Lua
 						int n = i.GETARG_B(); // number of elements to concatenate
 						Top = Stack[ra.Index + n]; // mark the end of concat operands
 						V_Concat( n );
+						C_CheckGC(); // 'V_Concat' ensures correct top
 						trap = ci.Trap;
 						break;
 					}
@@ -1696,6 +1701,8 @@ namespace Cosmos.Executable.Lua
 						LuaProto p = cl.Proto.P[i.GETARG_Bx()];
 						Top = Stack[ci.TopIndex];
 						PushClosure( p, cl.Upvals, stackBase, ra );
+						Top = Stack[ra.Index + 1];
+						C_CheckGC();
 						break;
 					}
 					case OpCode.OP_VARARG:

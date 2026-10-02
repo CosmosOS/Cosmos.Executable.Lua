@@ -274,7 +274,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	internal class LuaLClosureValue
+	internal class LuaLClosureValue : LuaGCObject
 	{
 		public LuaProto 		Proto;
 		public LuaUpvalue[]		Upvals;
@@ -289,7 +289,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 	
-	internal class LuaUserDataValue
+	internal class LuaUserDataValue : LuaGCObject
 	{
 		public object Value;
 		public LuaTable MetaTable;
@@ -336,7 +336,7 @@ namespace Cosmos.Executable.Lua
 		public int Line;
 	}
 
-	internal class LuaProto
+	internal class LuaProto : LuaGCObject
 	{
 		public List<Instruction> 	Code;
 		public List<StkId>			K;
@@ -367,7 +367,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 	
-	internal class LuaUpvalue
+	internal class LuaUpvalue : LuaGCObject
 	{
 		public StkId			V;		// points to stack or to its own value
 		public StkId			Value;	// the value (when closed)
@@ -381,7 +381,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	internal class LuaCsClosureValue
+	internal class LuaCsClosureValue : LuaGCObject
 	{
 		public CSharpFunctionDelegate 	F;
 		public StkId[]					Upvals;

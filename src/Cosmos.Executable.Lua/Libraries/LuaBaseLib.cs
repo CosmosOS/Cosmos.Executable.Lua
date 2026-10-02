@@ -90,86 +90,84 @@ namespace Cosmos.Executable.Lua
 			return 0;
 		}
 
-		private static int PushMode( ILuaState lua, bool generational )
+		private static int PushMode( ILuaState lua, int oldmode )
 		{
-			lua.PushString( generational ? "generational" : "incremental" );
+			if( oldmode == -1 )
+				lua.PushNil(); // invalid call to 'lua_gc'
+			else
+				lua.PushString( (oldmode == (int)LuaGCOption.LUA_GCINC) ? "incremental" : "generational" );
 			return 1;
 		}
 
-		// the .NET garbage collector runs on its own: "collect" asks it for a
-		// collection, "count" gives the heap it measured at the last one, and
-		// the other options only keep what the script set
-		// TODO: Cosmos gives no control over its collector, so "stop",
-		// "step" and the modes and their parameters change nothing
+		private static readonly string[] GCOptionNames = new string[] { "stop", "restart", "collect",
+			"count", "step", "setpause", "setstepmul",
+			"isrunning", "generational", "incremental" };
+		private static readonly LuaGCOption[] GCOptions = new LuaGCOption[] { LuaGCOption.LUA_GCSTOP,
+			LuaGCOption.LUA_GCRESTART, LuaGCOption.LUA_GCCOLLECT,
+			LuaGCOption.LUA_GCCOUNT, LuaGCOption.LUA_GCSTEP, LuaGCOption.LUA_GCSETPAUSE, LuaGCOption.LUA_GCSETSTEPMUL,
+			LuaGCOption.LUA_GCISRUNNING, LuaGCOption.LUA_GCGEN, LuaGCOption.LUA_GCINC };
+
 		public static int B_CollectGarbage( ILuaState lua )
 		{
-			var g = ((LuaState)lua).G;
-			string opt = lua.L_OptString( 1, "collect" );
-			switch( opt )
+			var L = (LuaState)lua;
+			var o = GCOptions[lua.L_CheckOption( 1, "collect", GCOptionNames )];
+			switch( o )
 			{
-				case "count":
+				case LuaGCOption.LUA_GCCOUNT:
 				{
-					// Not GC.GetTotalMemory, whose forced-collection path needs
-					// RhWaitForPendingFinalizers, which a Cosmos kernel does not export
-					long bytes = System.GC.GetGCMemoryInfo().HeapSizeBytes;
-					lua.PushNumber( bytes / 1024.0 );
+					int k = L.C_GC( o );
+					int b = L.C_GC( LuaGCOption.LUA_GCCOUNTB );
+					if( k == -1 ) break;
+					lua.PushNumber( (double)k + ((double)b / 1024) );
 					return 1;
 				}
-				case "step":
+				case LuaGCOption.LUA_GCSTEP:
 				{
-					lua.L_OptInteger( 2, 0 );
-					lua.PushBoolean( true ); // a "cycle" ends with every step
+					int step = (int)lua.L_OptInteger( 2, 0 );
+					int res = L.C_GC( o, step );
+					if( res == -1 ) break;
+					lua.PushBoolean( res != 0 );
 					return 1;
 				}
-				case "setpause":
+				case LuaGCOption.LUA_GCSETPAUSE:
+				case LuaGCOption.LUA_GCSETSTEPMUL:
 				{
-					int previous = g.GCPause;
-					g.GCPause = (int)lua.L_OptInteger( 2, 0 );
+					int p = (int)lua.L_OptInteger( 2, 0 );
+					int previous = L.C_GC( o, p );
+					if( previous == -1 ) break;
 					lua.PushInteger( previous );
 					return 1;
 				}
-				case "setstepmul":
+				case LuaGCOption.LUA_GCISRUNNING:
 				{
-					int previous = g.GCStepMul;
-					g.GCStepMul = (int)lua.L_OptInteger( 2, 0 );
-					lua.PushInteger( previous );
+					int res = L.C_GC( o );
+					if( res == -1 ) break;
+					lua.PushBoolean( res != 0 );
 					return 1;
 				}
-				case "isrunning":
-					lua.PushBoolean( !g.GCStopped );
-					return 1;
-				case "generational":
+				case LuaGCOption.LUA_GCGEN:
 				{
-					lua.L_OptInteger( 2, 0 );
-					lua.L_OptInteger( 3, 0 );
-					bool previous = g.GCGenerational;
-					g.GCGenerational = true;
-					return PushMode( lua, previous );
+					int minormul = (int)lua.L_OptInteger( 2, 0 );
+					int majormul = (int)lua.L_OptInteger( 3, 0 );
+					return PushMode( lua, L.C_GC( o, minormul, majormul ) );
 				}
-				case "incremental":
+				case LuaGCOption.LUA_GCINC:
 				{
-					lua.L_OptInteger( 2, 0 );
-					lua.L_OptInteger( 3, 0 );
-					lua.L_OptInteger( 4, 0 );
-					bool previous = g.GCGenerational;
-					g.GCGenerational = false;
-					return PushMode( lua, previous );
+					int pause = (int)lua.L_OptInteger( 2, 0 );
+					int stepmul = (int)lua.L_OptInteger( 3, 0 );
+					int stepsize = (int)lua.L_OptInteger( 4, 0 );
+					return PushMode( lua, L.C_GC( o, pause, stepmul, stepsize ) );
 				}
-				case "collect":
-					System.GC.Collect();
-					lua.PushInteger( 0 );
-					return 1;
-				case "stop":
-					g.GCStopped = true;
-					lua.PushInteger( 0 );
-					return 1;
-				case "restart":
-					g.GCStopped = false;
-					lua.PushInteger( 0 );
-					return 1;
 				default:
-					return lua.L_ArgError( 1, string.Format( "invalid option '{0}'", opt ) );
+				{
+					int res = L.C_GC( o );
+					if( res == -1 ) break;
+					lua.PushInteger( res );
+					return 1;
+				}
 			}
+			lua.PushNil(); // invalid call (inside a finalizer)
+			return 1;
 		}
 
 		private static int DoFileContinuation( ILuaState lua )

@@ -410,8 +410,6 @@ namespace Cosmos.Executable.Lua
 			if( lua.L_GetSubTable( LuaDef.LUA_REGISTRYINDEX, HOOKKEY ) == 0 )
 			{
 				/* table just created; initialize it */
-				// TODO: Cosmos has no weak tables: the hook table keeps every
-				// thread it hooked alive
 				lua.PushString( "k" );
 				lua.SetField( -2, "__mode" ); // hooktable.__mode = "k"
 				lua.PushValue( -1 );

@@ -11,7 +11,7 @@ using System.Collections.Generic;
 namespace Cosmos.Executable.Lua
 {
 
-	internal class LuaTable {
+	internal partial class LuaTable : LuaGCObject {
 		public LuaTable MetaTable;
 		public uint NoTagMethodFlags;
 
@@ -109,7 +109,8 @@ namespace Cosmos.Executable.Lua
 			var n = GetHashNode(ref key.V);
 			// check whether `key' is somewhere in the chain
 			for(;;) {
-				if(L.V_RawEqualObj(ref n.Key.V, ref key.V))
+				if(L.V_RawEqualObj(ref n.Key.V, ref key.V) ||
+					(n.Key.V.Tt == LuaState.LUA_TDEADKEY && IsDeadKeyOf(ref n.Key.V, ref key.V)))
 					{ return ArrayPart.Length + n.Index; }
 				n = n.Next;
 
@@ -194,6 +195,7 @@ namespace Cosmos.Executable.Lua
 						{ SetInt(i+1, ref oldArrayPart[i].V); }
 				}
 				// shrink array
+				L.C_Alloc((long)LuaGCSize.TValue * (nasize - oasize));
 				var newArrayPart = new StkId[nasize];
 				for(int i=0; i<nasize; ++i) {
 					newArrayPart[i] = oldArrayPart[i];
@@ -279,6 +281,7 @@ namespace Cosmos.Executable.Lua
 		private void InitLuaTable(LuaState lua)
 		{
 			L = lua;
+			L.C_Alloc(LuaGCSize.Table);
 			ArrayPart = DummyArrayPart;
 			SetNodeVector(0);
 		}
@@ -309,6 +312,7 @@ namespace Cosmos.Executable.Lua
 		{
 			Utl.Assert(size >= ArrayPart.Length);
 
+			L.C_Alloc((long)LuaGCSize.TValue * (size - ArrayPart.Length));
 			var newArrayPart = new StkId[size];
 			int i = 0;
 			for( ; i<ArrayPart.Length; ++i) {
@@ -323,6 +327,8 @@ namespace Cosmos.Executable.Lua
 
 		private void SetNodeVector(int size)
 		{
+			if(HashPart != null && HashPart != DummyHashPart)
+				L.C_Alloc(-(long)LuaGCSize.Node * HashPart.Length); // the old part goes
 			if(size == 0) {
 				HashPart = DummyHashPart;
 				LastFree = size;
@@ -333,6 +339,7 @@ namespace Cosmos.Executable.Lua
 			if(lsize > MAXBITS) { L.G_RunError("table overflow"); }
 
 			size = (1 << lsize);
+			L.C_Alloc((long)LuaGCSize.Node * size);
 			HashPart = new HNode[size];
 			for(int i=0; i<size; ++i) {
 				HashPart[i] = NewHNode();

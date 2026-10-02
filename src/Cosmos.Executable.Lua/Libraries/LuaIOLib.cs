@@ -15,10 +15,7 @@ namespace Cosmos.Executable.Lua;
 /// directory.
 /// </summary>
 /// <remarks>
-/// Not here: <c>io.popen</c>, which needs processes, and the closing of a
-/// forgotten file by the garbage collector (<c>__gc</c>), which UniLua does
-/// not run: close what you open, in a to-be-closed variable or by hand, or
-/// read it with <c>io.lines(name)</c> in a generic for, which closes it.
+/// Not here: <c>io.popen</c>, which needs processes.
 /// </remarks>
 internal static class LuaIOLib
 {
@@ -544,9 +541,9 @@ internal static class LuaIOLib
     }
 
     /// <summary>
-    /// f_gc, which is also __close: the reference implementation's
-    /// collector calls __gc, which only a script does here, and the end of
-    /// the scope of a to-be-closed variable calls __close.
+    /// f_gc, which is also __close: the collector calls __gc on a file a
+    /// script lost, and the end of the scope of a to-be-closed variable
+    /// calls __close.
     /// </summary>
     private static int F_Gc(ILuaState lua)
     {
