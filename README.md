@@ -16,7 +16,7 @@ Add the package to your kernel .csproj:
 
 ```xml
 <ItemGroup>
-    <PackageReference Include="Cosmos.Executable.Lua" Version="4.0.0" />
+    <PackageReference Include="Cosmos.Executable.Lua" Version="4.0.1" />
 </ItemGroup>
 ```
 
@@ -51,7 +51,11 @@ A C# function raises a Lua error with `state.L_Error(...)`, or by throwing: a .N
 
 ### Strings
 
-Lua strings hold bytes, as in C Lua: on the `ILuaState` API a Lua string is a .NET string with one character, `\0` to `\xFF`, per byte. `LuaInterpreter` takes and gives text, as UTF-8, and so do the console, file names and `os.getenv`; files give and take their bytes as they are, in text mode as in binary mode. So `#"é"` is 2, and the `utf8` library reads the bytes of UTF-8 text. A C# function converts text with `LuaText`:
+As in C Lua, a Lua string is a sequence of bytes, not characters. Text is stored as UTF-8, so `#"é"` is 2, and the `utf8` library works as expected.
+
+Most of the time you don't need to care: `LuaInterpreter` converts the code, arguments and error messages for you, and so do the console, file names and `os.getenv`. Files are read and written byte for byte, in text and binary mode.
+
+You only see the bytes in your own C# functions. On `ILuaState`, a Lua string is a .NET string with one character (`\0` to `\xFF`) per byte. Use `LuaText` to convert:
 
 ```csharp
 state.PushString(LuaText.Encode("héllo")); // the 6 bytes of "héllo"
@@ -60,11 +64,15 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 ### Limitations
 
-The language and the standard libraries are those of Lua 5.5 as the reference build makes them, except `io.popen`: `global` is a reserved word only where it starts a declaration (`LUA_COMPAT_GLOBAL`), and `math.pow` and the other deprecated functions are gone. Files are buffered as C's are: a write reaches the file when the buffer fills, on `flush`, or when the script, the collector or the end of the interpreter closes the file. On a Cosmos kernel the local time is UTC, `os.getenv` returns nil, and `os.tmpname` fails, as the kernel has no `/tmp` yet.
+The interpreter behaves like the reference build of Lua 5.5 and passes the official [Lua 5.5 test suite](https://www.lua.org/tests/) (lua-5.5.1-tests), unmodified. Like the reference build, it treats `global` as a keyword only at the start of a declaration, and drops `math.pow` and the other deprecated functions.
 
-The state runs the collector of Lua 5.5 over its own objects, so weak tables, `__gc` finalizers and `collectgarbage("count")` behave as in the reference implementation, and the .NET collector, the kernel's on Cosmos, frees what it lets go. Each cycle is a whole one: the incremental and generational modes, and the parameters `collectgarbage("param")` sets, only pace the cycles.
+What is different:
 
-The tests run the official [Lua 5.5 test suite](https://www.lua.org/tests/) (lua-5.5.1-tests), as its authors wrote it, each file alone and then all together through its `all.lua`, which loads them again from `string.dump`.
+- `io.popen` is not supported.
+- The garbage collector always runs full cycles. Weak tables, `__gc` and `collectgarbage("count")` work as usual, but the incremental and generational modes and `collectgarbage("param")` only change how often a cycle runs.
+- On Cosmos, the local time is UTC, `os.getenv` returns nil, and `os.tmpname` fails because the kernel has no `/tmp` yet.
+
+Note that files are buffered as in C: a write reaches the file only when the buffer is full, on `flush`, or when the file is closed.
 
 ## Authors
 
