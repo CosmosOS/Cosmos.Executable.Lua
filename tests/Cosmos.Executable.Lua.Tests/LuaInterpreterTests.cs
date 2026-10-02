@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using NUnit.Framework;
 
 namespace Cosmos.Executable.Lua.Tests;
@@ -63,6 +64,16 @@ public class LuaInterpreterTests : LuaTest
         Lua.DoFile("args.lua", "one", "two");
 
         Assert.That(Output, Is.EqualTo("args.lua\tone\ttwo\t2\tone\ttwo\n"));
+    }
+
+    [Test]
+    public void DoFileTakesMoreArgumentsThanAFunctionHasRoomFor()
+    {
+        File.WriteAllText(Path.Combine(Directory, "args.lua"), "print(#arg, select('#', ...), arg[100], select(100, ...))");
+
+        Lua.DoFile("args.lua", Enumerable.Range(1, 100).Select(i => "a" + i).ToArray());
+
+        Assert.That(Output, Is.EqualTo("100\t100\ta100\ta100\n"));
     }
 
     [Test]

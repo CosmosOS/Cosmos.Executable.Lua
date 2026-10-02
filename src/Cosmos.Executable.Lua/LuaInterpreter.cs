@@ -136,6 +136,15 @@ public sealed class LuaInterpreter : IDisposable
 
         int top = State.GetTop();
         ThrowIfFailed(State.L_LoadFile(fileName), top);
+
+        // a function starts with room for LUA_MINSTACK values only: make
+        // room for the arguments, as lua.c's pushargs does
+        if (!State.CheckStack(arguments.Length + 3))
+        {
+            State.SetTop(top);
+            throw new LuaException("stack overflow (too many arguments to script)");
+        }
+
         foreach (string argument in arguments)
         {
             State.PushString(LuaText.Encode(argument));
