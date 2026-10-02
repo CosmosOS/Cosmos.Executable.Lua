@@ -8,7 +8,7 @@
   </a>
 </p>
 
-> Cosmos.Executable.Lua is a Lua 5.3 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
+> Cosmos.Executable.Lua is a Lua 5.4 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
 
 ## Usage
 
@@ -16,7 +16,7 @@ Add the package to your kernel .csproj:
 
 ```xml
 <ItemGroup>
-    <PackageReference Include="Cosmos.Executable.Lua" Version="2.0.0" />
+    <PackageReference Include="Cosmos.Executable.Lua" Version="3.0.0" />
 </ItemGroup>
 ```
 
@@ -60,9 +60,9 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 ### Limitations
 
-The standard libraries are those of Lua 5.3 built with `LUA_COMPAT_5_2`, as the reference one is, so `bit32`, `math.pow` and the others are there, except `io.popen`. There is no `__gc` and no weak tables, so close the files you open: a write reaches the file at once, unless `file:setvbuf` asks for a buffer. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
+The standard libraries are those of Lua 5.4 built with `LUA_COMPAT_5_3`, as the reference one is, so `math.pow` and the others are there, except `io.popen`. There is no `__gc` and no weak tables, so close the files you open, or give them to a `<close>` variable: a write reaches the file at once, unless `file:setvbuf` asks for a buffer. `collectgarbage` asks .NET for a collection; its other options change nothing. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
 
-The tests run the official [Lua 5.3 test suite](https://www.lua.org/tests/) (lua-5.3.4-tests), each file alone and then all together through its `all.lua`, which loads them again from `string.dump`: all of it but `gc.lua`, with the four lines these limitations break patched in `LuaTestSuiteTests.cs`.
+The tests run the official [Lua 5.4 test suite](https://www.lua.org/tests/) (lua-5.4.9-tests), each file alone and then all together through its `all.lua`, which loads them again from `string.dump`: all of it but `gc.lua` and `gengc.lua`, with the lines these limitations break patched in `LuaTestSuiteTests.cs`.
 
 ## Authors
 
@@ -80,4 +80,4 @@ Feel free to check [issues page](https://github.com/CosmosOS/Cosmos.Executable.L
 
 Copyright © 2026 [CosmosOS](https://github.com/CosmosOS).
 
-This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, and code ported from Lua 5.3, Copyright © 1994–2020 Lua.org, PUC-Rio, both under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).
+This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, and code ported from Lua 5.3 and Lua 5.4, Copyright © 1994–2026 Lua.org, PUC-Rio, both under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).

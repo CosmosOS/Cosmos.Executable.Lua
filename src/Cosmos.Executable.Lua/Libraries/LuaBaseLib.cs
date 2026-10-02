@@ -38,6 +38,7 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "tostring", 		LuaBaseLib.B_ToString ),
 				new NameFuncPair( "type", 			LuaBaseLib.B_Type ),
 				new NameFuncPair( "xpcall", 		LuaBaseLib.B_XPCall ),
+				new NameFuncPair( "warn", 			LuaBaseLib.B_Warn ),
 			};
 
 			// set global _G
@@ -72,10 +73,37 @@ namespace Cosmos.Executable.Lua
 			return B_Error( lua ); // call 'error'
 		}
 
+		/*
+		** Creates a warning with all given arguments.
+		** Check first for errors; otherwise an error may interrupt
+		** the composition of a warning, leaving it unfinished.
+		*/
+		public static int B_Warn( ILuaState lua )
+		{
+			int n = lua.GetTop(); // number of arguments
+			lua.L_CheckString( 1 ); // at least one argument
+			for( int i = 2; i <= n; i++ )
+				lua.L_CheckString( i ); // make sure all arguments are strings
+			for( int i = 1; i < n; i++ ) // compose warning
+				lua.Warning( lua.ToString( i ), true );
+			lua.Warning( lua.ToString( n ), false ); // close warning
+			return 0;
+		}
+
+		private static int PushMode( ILuaState lua, bool generational )
+		{
+			lua.PushString( generational ? "generational" : "incremental" );
+			return 1;
+		}
+
 		// the .NET garbage collector runs on its own: "collect" asks it for a
-		// collection, "count" gives the heap it measured at the last one
+		// collection, "count" gives the heap it measured at the last one, and
+		// the other options only keep what the script set
+		// TODO: Cosmos gives no control over its collector, so "stop",
+		// "step" and the modes and their parameters change nothing
 		public static int B_CollectGarbage( ILuaState lua )
 		{
+			var g = ((LuaState)lua).G;
 			string opt = lua.L_OptString( 1, "collect" );
 			switch( opt )
 			{
@@ -87,23 +115,58 @@ namespace Cosmos.Executable.Lua
 					lua.PushNumber( bytes / 1024.0 );
 					return 1;
 				}
-
 				case "step":
-				case "isrunning":
-					lua.PushBoolean( true );
+				{
+					lua.L_OptInteger( 2, 0 );
+					lua.PushBoolean( true ); // a "cycle" ends with every step
 					return 1;
-
+				}
+				case "setpause":
+				{
+					int previous = g.GCPause;
+					g.GCPause = (int)lua.L_OptInteger( 2, 0 );
+					lua.PushInteger( previous );
+					return 1;
+				}
+				case "setstepmul":
+				{
+					int previous = g.GCStepMul;
+					g.GCStepMul = (int)lua.L_OptInteger( 2, 0 );
+					lua.PushInteger( previous );
+					return 1;
+				}
+				case "isrunning":
+					lua.PushBoolean( !g.GCStopped );
+					return 1;
+				case "generational":
+				{
+					lua.L_OptInteger( 2, 0 );
+					lua.L_OptInteger( 3, 0 );
+					bool previous = g.GCGenerational;
+					g.GCGenerational = true;
+					return PushMode( lua, previous );
+				}
+				case "incremental":
+				{
+					lua.L_OptInteger( 2, 0 );
+					lua.L_OptInteger( 3, 0 );
+					lua.L_OptInteger( 4, 0 );
+					bool previous = g.GCGenerational;
+					g.GCGenerational = false;
+					return PushMode( lua, previous );
+				}
 				case "collect":
 					System.GC.Collect();
 					lua.PushInteger( 0 );
 					return 1;
-
-				case "stop": case "restart":
-				case "setpause": case "setstepmul":
-					lua.L_OptInteger( 2, 0 );
+				case "stop":
+					g.GCStopped = true;
 					lua.PushInteger( 0 );
 					return 1;
-
+				case "restart":
+					g.GCStopped = false;
+					lua.PushInteger( 0 );
+					return 1;
 				default:
 					return lua.L_ArgError( 1, string.Format( "invalid option '{0}'", opt ) );
 			}
@@ -153,9 +216,9 @@ namespace Cosmos.Executable.Lua
 			}
 			else // error (message is on top of the stack)
 			{
-				lua.PushNil();
+				lua.PushNil(); // luaL_pushfail
 				lua.Insert(-2); // put before error message
-				return 2; // return nil plus error message
+				return 2; // return fail plus error message
 			}
 		}
 
@@ -240,50 +303,58 @@ namespace Cosmos.Executable.Lua
 			return LoadAux( lua, status, env );
 		}
 
-		private static int FinishPCall( ILuaState lua, bool status )
+		/*
+		** Continuation function for 'pcall' and 'xpcall'. Both functions
+		** already pushed a 'true' before doing the call, so in case of success
+		** 'finishpcall' only has to return everything in the stack minus
+		** 'extra' values (where 'extra' is exactly the number of items to be
+		** ignored).
+		*/
+		private static int FinishPCall( ILuaState lua, ThreadStatus status, int extra )
 		{
-			// no space for extra boolean?
-			if(!lua.CheckStack(1)) {
-				lua.SetTop(0); // create space for return values
-				lua.PushBoolean(false);
-				lua.PushString("stack overflow");
-				return 2;
+			if( status != ThreadStatus.LUA_OK && status != ThreadStatus.LUA_YIELD ) // error?
+			{
+				lua.PushBoolean( false ); // first result (false)
+				lua.PushValue( -2 ); // error message
+				return 2; // return false, msg
 			}
-			lua.PushBoolean( status );
-			lua.Replace( 1 );
-			return lua.GetTop();
+			else
+				return lua.GetTop() - extra; // return all results
 		}
 
 		private static int PCallContinuation( ILuaState lua )
 		{
-			int context;
-			ThreadStatus status = lua.GetContext( out context );
-			return FinishPCall( lua, status == ThreadStatus.LUA_YIELD );
+			int extra;
+			ThreadStatus status = lua.GetContext( out extra );
+			return FinishPCall( lua, status, extra );
 		}
 		private static CSharpFunctionDelegate DG_PCallContinuation = PCallContinuation;
 
 		public static int B_PCall( ILuaState lua )
 		{
 			lua.L_CheckAny( 1 );
-			lua.PushNil();
-			lua.Insert( 1 ); // create space for status result
-
+			lua.PushBoolean( true ); // first result if no errors
+			lua.Insert( 1 ); // put it in place
 			ThreadStatus status = lua.PCallK( lua.GetTop() - 2,
 				LuaDef.LUA_MULTRET, 0, 0, DG_PCallContinuation );
-
-			return FinishPCall( lua, status == ThreadStatus.LUA_OK );
+			return FinishPCall( lua, status, 0 );
 		}
 
+		/*
+		** Do a protected call with error handling. After 'lua_rotate', the
+		** stack will have <f, err, true, f, [args...]>; so, the function passes
+		** 2 to 'finishpcall' to skip the 2 first values when returning results.
+		*/
 		public static int B_XPCall( ILuaState lua )
 		{
 			int n = lua.GetTop();
 			lua.L_CheckType( 2, LuaType.LUA_TFUNCTION ); // check error function
-			lua.PushValue( 1 ); // exchange function...
-			lua.Copy( 2, 1); // ...and error handler
-			lua.Replace( 2 );
-			ThreadStatus status = lua.PCallK( n-2, LuaDef.LUA_MULTRET,
-				1, 0, DG_PCallContinuation );
-			return FinishPCall( lua, status == ThreadStatus.LUA_OK );
+			lua.PushBoolean( true ); // first result
+			lua.PushValue( 1 ); // function
+			lua.Rotate( 3, 2 ); // move them below function's arguments
+			ThreadStatus status = lua.PCallK( n - 2, LuaDef.LUA_MULTRET,
+				2, 2, DG_PCallContinuation );
+			return FinishPCall( lua, status, 2 );
 		}
 
 		public static int B_RawEqual( ILuaState lua )
@@ -297,8 +368,8 @@ namespace Cosmos.Executable.Lua
 		public static int B_RawLen( ILuaState lua )
 		{
 			LuaType t = lua.Type( 1 );
-			lua.L_ArgCheck( t == LuaType.LUA_TTABLE || t == LuaType.LUA_TSTRING,
-				1, "table or string expected" );
+			lua.L_ArgExpected( t == LuaType.LUA_TTABLE || t == LuaType.LUA_TSTRING,
+				1, "table or string" );
 			lua.PushInteger( lua.RawLen( 1 ) );
 			return 1;
 		}
@@ -357,8 +428,8 @@ namespace Cosmos.Executable.Lua
 		{
 			LuaType t = lua.Type( 2 );
 			lua.L_CheckType( 1, LuaType.LUA_TTABLE );
-			lua.L_ArgCheck( t == LuaType.LUA_TNIL || t == LuaType.LUA_TTABLE,
-				2, "nil or table expected" );
+			lua.L_ArgExpected( t == LuaType.LUA_TNIL || t == LuaType.LUA_TTABLE,
+				2, "nil or table" );
 			if( lua.L_GetMetaField( 1, "__metatable" ) )
 				return lua.L_Error( "cannot change a protected metatable" );
 			lua.SetTop( 2 );
@@ -374,7 +445,7 @@ namespace Cosmos.Executable.Lua
 			int pos = 0;
 			result = 0;
 			while( pos < s.Length && Utl.IsSpace( s[pos] ) ) pos++; // skip initial spaces
-			if( pos < s.Length && s[pos] == '-' ) { pos++; neg = true; } // handle signal
+			if( pos < s.Length && s[pos] == '-' ) { pos++; neg = true; } // handle sign
 			else if( pos < s.Length && s[pos] == '+' ) pos++;
 			if( pos >= s.Length || !Utl.IsAlnum( s[pos] ) ) // no digit?
 				return false;
@@ -397,7 +468,6 @@ namespace Cosmos.Executable.Lua
 		{
 			if( lua.IsNoneOrNil( 2 ) ) // standard conversion?
 			{
-				lua.L_CheckAny( 1 );
 				if( lua.Type( 1 ) == LuaType.LUA_TNUMBER ) // already a number?
 				{
 					lua.SetTop( 1 ); // yes; return it
@@ -407,6 +477,7 @@ namespace Cosmos.Executable.Lua
 				if( s != null && lua.StringToNumber( s ) == s.Length + 1 )
 					return 1; // successful conversion to number
 				// else not a number
+				lua.L_CheckAny( 1 ); // (but there must be some parameter)
 			}
 			else
 			{
@@ -421,7 +492,7 @@ namespace Cosmos.Executable.Lua
 					return 1;
 				} // else not a number
 			}
-			lua.PushNil(); // not a number
+			lua.PushNil(); // not a number (luaL_pushfail)
 			return 1;
 		}
 
@@ -432,27 +503,6 @@ namespace Cosmos.Executable.Lua
 			var tname = lua.TypeName( t );
 			lua.PushString( tname );
 			return 1;
-		}
-
-		private static int PairsMeta( ILuaState lua, string method, bool isZero
-			, CSharpFunctionDelegate iter )
-		{
-			lua.L_CheckAny( 1 );
-			if( !lua.L_GetMetaField( 1, method ) ) // no metamethod?
-			{
-				lua.PushCSharpFunction( iter ); // will return generator,
-				lua.PushValue( 1 );
-				if( isZero )
-					lua.PushInteger( 0 );
-				else
-					lua.PushNil();
-			}
-			else
-			{
-				lua.PushValue( 1 );
-				lua.Call( 1, 3 );
-			}
-			return 3;
 		}
 
 		public static int B_Next( ILuaState lua )
@@ -471,45 +521,67 @@ namespace Cosmos.Executable.Lua
 		}
 		static CSharpFunctionDelegate DG_B_Next = B_Next;
 
+		private static int PairsCont( ILuaState lua )
+		{
+			return 3;
+		}
+		static CSharpFunctionDelegate DG_PairsCont = PairsCont;
+
 		public static int B_Pairs( ILuaState lua )
 		{
-			return PairsMeta( lua, "__pairs", false, DG_B_Next );
+			lua.L_CheckAny( 1 );
+			if( !lua.L_GetMetaField( 1, "__pairs" ) ) // no metamethod?
+			{
+				lua.PushCSharpFunction( DG_B_Next ); // will return generator,
+				lua.PushValue( 1 ); // state,
+				lua.PushNil(); // and initial value
+			}
+			else
+			{
+				lua.PushValue( 1 ); // argument 'self' to metamethod
+				lua.CallK( 1, 3, 0, DG_PairsCont ); // get 3 values from metamethod
+			}
+			return 3;
 		}
 
-		// traversal function for 'ipairs', which respects '__index'
+		/*
+		** Traversal function for 'ipairs'
+		*/
 		private static int IpairsAux( ILuaState lua )
 		{
-			long i = unchecked( lua.L_CheckInteger( 2 ) + 1 );
+			long i = lua.L_CheckInteger( 2 );
+			i = unchecked( i + 1 ); // luaL_intop
 			lua.PushInteger( i );
 			return lua.GetI( 1, i ) == LuaType.LUA_TNIL ? 1 : 2;
 		}
 		static CSharpFunctionDelegate DG_IpairsAux = IpairsAux;
 
+		/*
+		** 'ipairs' function. Returns 'ipairsaux', given "table", 0.
+		** (The given "table" may not be a table.)
+		*/
 		public static int B_Ipairs( ILuaState lua )
 		{
-			return PairsMeta( lua, "__ipairs", true, DG_IpairsAux );
+			lua.L_CheckAny( 1 );
+			lua.PushCSharpFunction( DG_IpairsAux ); // iteration function
+			lua.PushValue( 1 ); // state
+			lua.PushInteger( 0 ); // initial value
+			return 3;
 		}
 
 		public static int B_Print( ILuaState lua )
 		{
-			StringBuilder sb = new StringBuilder();
-			int n = lua.GetTop();
-			lua.GetGlobal( "tostring" );
-			for( int i=1; i<=n; ++i )
+			var host = LuaHost.Of( lua );
+			int n = lua.GetTop(); // number of arguments
+			for( int i = 1; i <= n; i++ ) // for each argument
 			{
-				lua.PushValue( -1 );
-				lua.PushValue( i );
-				lua.Call( 1, 1 );
-				string s = lua.ToString( -1 );
-				if( s == null )
-					return lua.L_Error("'tostring' must return a string to 'print'");
-				if( i > 1 )
-					sb.Append( "\t" );
-				sb.Append( s );
-				lua.Pop( 1 );
+				string s = lua.L_ToString( i ); // convert it to string
+				if( i > 1 ) // not the first element?
+					host.WriteOut( "\t" ); // add a tab before it
+				host.WriteOut( s ); // print it
+				lua.Pop( 1 ); // pop result
 			}
-			sb.Append( '\n' );
-			LuaHost.Of( lua ).WriteOut( sb.ToString() );
+			host.WriteOut( "\n" );
 			return 0;
 		}
 

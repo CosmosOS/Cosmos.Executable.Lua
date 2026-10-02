@@ -6,7 +6,7 @@ using System.Globalization;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// Numbers as Lua 5.3 writes them: an integer in decimal, and a float as
+/// Numbers as Lua 5.4 writes them: an integer in decimal, and a float as
 /// <c>%.14g</c>, with <c>.0</c> added when that looks like an integer:
 /// <c>tostring(1/3)</c> is <c>0.33333333333333</c>, <c>tostring(2^53)</c>
 /// is <c>9.007199254741e+15</c> and <c>tostring(3.0)</c> is <c>3.0</c>, on

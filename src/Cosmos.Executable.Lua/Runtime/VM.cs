@@ -3,20 +3,6 @@
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
 
-// #define DEBUG_NEW_FRAME
-// #define DEBUG_INSTRUCTION
-// #define DEBUG_INSTRUCTION_WITH_STACK
-
-// #define DEBUG_OP_GETTABUP
-// #define DEBUG_OP_GETUPVAL
-// #define DEBUG_OP_GETTABLE
-// #define DEBUG_OP_EQ
-// #define DEBUG_OP_SETLIST
-// #define DEBUG_OP_CLOSURE
-// #define DEBUG_OP_SETTABLE
-
-// #define DEBUG_RECORD_INS
-
 using System;
 using System.Collections.Generic;
 
@@ -24,972 +10,40 @@ namespace Cosmos.Executable.Lua
 {
 	using StringBuilder = System.Text.StringBuilder;
 
+	/*
+	** Rounding modes for float->integer coercion
+	 */
+	internal enum F2Imod
+	{
+		F2Ieq,		/* no rounding; accepts only integral values */
+		F2Ifloor,	/* takes the floor of the number */
+		F2Iceil		/* takes the ceil of the number */
+	}
+
+	// lvm.c of Lua 5.4: the virtual machine
 	internal partial class LuaState
 	{
-		// limit for table tag-method chains (to avoid loops)
+		/* limit for table tag-method chains (to avoid infinite loops) */
 		private const int MAXTAGLOOP = 2000;
 
-		private struct ExecuteEnvironment
+		/*
+		** Try to convert a value from string to a number value.
+		** If the value is not a string or is a string not representing
+		** a valid numeral, do not modify 'result' and return false.
+		*/
+		private static bool L_StrToN( ref TValue obj, out TValue result )
 		{
-			public StkId[]			Stack;
-			public List<StkId> 		K;
-			public int 				Base;
-			public Instruction 		I;
-
-			public StkId RA
+			if( !obj.TtIsString() ) // is object not a string?
 			{
-				get { return Stack[Base + I.GETARG_A()]; }
+				result = new TValue();
+				return false;
 			}
-
-			public StkId RB
-			{
-				get { return Stack[Base + I.GETARG_B()]; }
-			}
-
-			public StkId RK( int x )
-			{
-				return Instruction.ISK( x ) ? K[Instruction.INDEXK(x)] : Stack[Base+x];
-			}
-
-			public StkId RKB
-			{
-				get { return RK( I.GETARG_B() ); }
-			}
-
-			public StkId RKC
-			{
-				get { return RK( I.GETARG_C() ); }
-			}
+			return O_Str2Num( obj.SValue(), out result );
 		}
 
-		private void V_Execute()
-		{
-			ExecuteEnvironment env;
-			CallInfo ci = CI;
-newframe:
-			Utl.Assert(ci == CI);
-			var cl = Stack[ci.FuncIndex].V.ClLValue();
-
-			env.Stack = Stack;
-			env.K = cl.Proto.K;
-			env.Base = ci.BaseIndex;
-
-#if DEBUG_NEW_FRAME
-			System.Diagnostics.Debug.WriteLine( "#### NEW FRAME #########################################################################" );
-			System.Diagnostics.Debug.WriteLine( "## cl:" + cl );
-			System.Diagnostics.Debug.WriteLine( "## Base:" + env.Base );
-			System.Diagnostics.Debug.WriteLine( "########################################################################################" );
-#endif
-
-			while( true )
-			{
-				Instruction i = ci.SavedPc.ValueInc;
-				env.I = i;
-				if( (HookMask & (LuaDef.LUA_MASKLINE | LuaDef.LUA_MASKCOUNT)) != 0 &&
-					(--HookCount == 0 || (HookMask & LuaDef.LUA_MASKLINE) != 0) )
-				{
-					TraceExec( ci );
-					env.Base = ci.BaseIndex;
-				}
-
-#if DEBUG_SRC_INFO
-				int line = 0;
-				string src = "";
-				if(ci.IsLua) {
-					line = GetCurrentLine(ci);
-					src = GetCurrentLuaFunc(ci).Proto.Source;
-				}
-#endif
-
-				StkId ra = env.RA;
-
-#if DEBUG_DUMP_INS_STACK
-#if DEBUG_DUMP_INS_STACK_EX
-				DumpStack( env.Base, i.ToString() );
-#else
-				DumpStack( env.Base );
-#endif
-#endif
-
-#if DEBUG_INSTRUCTION
-				System.Diagnostics.Debug.WriteLine( System.DateTime.Now + " [VM] ======================================================================== Instruction: " + i
-#if DEBUG_INSTRUCTION_WITH_STACK
-				+ "\n" + DumpStackToString( env.Base.Index )
-#endif
-				);
-#endif
-
-#if DEBUG_RECORD_INS
-				InstructionHistory.Enqueue(i);
-				if( InstructionHistory.Count > 100 ) {
-					InstructionHistory.Dequeue();
-				}
-#endif
-
-				switch( i.GET_OPCODE() )
-				{
-					case OpCode.OP_MOVE:
-					{
-						var rb = env.RB;
-
-#if DEBUG_OP_MOVE
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_MOVE rb:" + rb );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_MOVE ra:" + ra );
-#endif
-
-						ra.V.SetObj(ref rb.V);
-						break;
-					}
-
-					case OpCode.OP_LOADK:
-					{
-						var rb = env.K[i.GETARG_Bx()];
-						ra.V.SetObj(ref rb.V);
-						break;
-					}
-
-					case OpCode.OP_LOADKX:
-					{
-						Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_EXTRAARG );
-						var rb = env.K[ci.SavedPc.ValueInc.GETARG_Ax()];
-						ra.V.SetObj(ref rb.V);
-						break;
-					}
-
-					case OpCode.OP_LOADBOOL:
-					{
-						ra.V.SetBValue(i.GETARG_B() != 0);
-						if( i.GETARG_C() != 0 )
-							ci.SavedPc.Index += 1; // skip next instruction (if C)
-						break;
-					}
-
-					case OpCode.OP_LOADNIL:
-					{
-						int b = i.GETARG_B();
-						int index = ra.Index;
-						do {
-							Stack[index++].V.SetNilValue();
-						} while (b-- > 0);
-						break;
-					}
-
-					case OpCode.OP_GETUPVAL:
-					{
-						int b = i.GETARG_B();
-						ra.V.SetObj(ref cl.Upvals[b].V.V);
-						
-#if DEBUG_OP_GETUPVAL
-						// for( var j=0; j<cl.Upvals.Length; ++j)
-						// {
-						// 	ULDebug.Log("[VM] ==== GETUPVAL upval:" + cl.Upvals[j] );
-						// }
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== GETUPVAL b:" + b );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== GETUPVAL ra:" + ra );
-#endif
-						break;
-					}
-
-					case OpCode.OP_GETTABUP:
-					{
-						int b = i.GETARG_B();
-						var key = env.RKC;
-						V_GetTable( cl.Upvals[b].V, key, ra );
-#if DEBUG_OP_GETTABUP
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_GETTABUP key:" + key );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_GETTABUP val:" + ra );
-#endif
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_GETTABLE:
-					{
-						var tbl = env.RB;
-						var key = env.RKC;
-						var val = ra;
-						V_GetTable( tbl, key, val );
-#if DEBUG_OP_GETTABLE
-						System.Diagnostics.Debug.WriteLine("[VM] ==== OP_GETTABLE key:"+key.ToString());
-						System.Diagnostics.Debug.WriteLine("[VM] ==== OP_GETTABLE val:"+val.ToString());
-#endif
-						break;
-					}
-
-					case OpCode.OP_SETTABUP:
-					{
-						int a = i.GETARG_A();
-
-						var key = env.RKB;
-						var val = env.RKC;
-						V_SetTable( cl.Upvals[a].V, key, val );
-#if DEBUG_OP_SETTABUP
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABUP key:" + key.Value );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABUP val:" + val.Value );
-#endif
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_SETUPVAL:
-					{
-						int b = i.GETARG_B();
-						var uv = cl.Upvals[b];
-						uv.V.V.SetObj(ref ra.V);
-#if DEBUG_OP_SETUPVAL
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== SETUPVAL b:" + b );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== SETUPVAL ra:" + ra );
-#endif
-						break;
-					}
-
-					case OpCode.OP_SETTABLE:
-					{
-						var key = env.RKB;
-						var val = env.RKC;
-#if DEBUG_OP_SETTABLE
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABLE key:" + key.ToString() );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETTABLE val:" + val.ToString() );
-#endif
-						V_SetTable( ra, key, val );
-						break;
-					}
-
-					case OpCode.OP_NEWTABLE:
-					{
-						int b = i.GETARG_B();
-						int c = i.GETARG_C();
-						var tbl = new LuaTable(this);
-						ra.V.SetHValue(tbl);
-						if(b > 0 || c > 0)
-							{ tbl.Resize(b, c); }
-						break;
-					}
-
-					case OpCode.OP_SELF:
-					{
-						// OP_SELF put function referenced by a table on ra
-						// and the table on ra+1
-						//
-						// RB:  table
-						// RKC: key
-						var ra1 = Stack[ra.Index+1];
-						var rb  = env.RB;
-						ra1.V.SetObj(ref rb.V);
-						V_GetTable( rb, env.RKC, ra );
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_ADD:
-					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						double nb, nc;
-						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
-							{ ra.V.SetIValue(unchecked(rkb.V.IValue() + rkc.V.IValue())); }
-						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
-							{ ra.V.SetFltValue(nb + nc); }
-						else
-							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_ADD); }
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_SUB:
-					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						double nb, nc;
-						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
-							{ ra.V.SetIValue(unchecked(rkb.V.IValue() - rkc.V.IValue())); }
-						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
-							{ ra.V.SetFltValue(nb - nc); }
-						else
-							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_SUB); }
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_MUL:
-					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						double nb, nc;
-						if(rkb.V.TtIsInteger() && rkc.V.TtIsInteger())
-							{ ra.V.SetIValue(unchecked(rkb.V.IValue() * rkc.V.IValue())); }
-						else if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
-							{ ra.V.SetFltValue(nb * nc); }
-						else
-							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_MUL); }
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_DIV: // float division (always with floats)
-					{
-						var rkb = env.RKB;
-						var rkc = env.RKC;
-						double nb, nc;
-						if(V_ToNumber(ref rkb.V, out nb) && V_ToNumber(ref rkc.V, out nc))
-							{ ra.V.SetFltValue(nb / nc); }
-						else
-							{ T_TryBinTM(rkb, rkc, ra, TMS.TM_DIV); }
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_MOD: case OpCode.OP_POW: case OpCode.OP_IDIV:
-					case OpCode.OP_BAND: case OpCode.OP_BOR: case OpCode.OP_BXOR:
-					case OpCode.OP_SHL: case OpCode.OP_SHR:
-					{
-						V_Arith( ra, env.RKB, env.RKC,
-							(TMS)((int)TMS.TM_ADD + (int)(i.GET_OPCODE() - OpCode.OP_ADD)) );
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_UNM:
-					{
-						var rb = env.RB;
-						if(rb.V.TtIsInteger())
-							{ ra.V.SetIValue(unchecked(0 - rb.V.IValue())); }
-						else if(rb.V.TtIsFloat())
-							{ ra.V.SetFltValue(-rb.V.FltValue); }
-						else {
-							V_Arith(ra, rb, rb, TMS.TM_UNM);
-							env.Base = ci.BaseIndex;
-						}
-						break;
-					}
-
-					case OpCode.OP_BNOT:
-					{
-						var rb = env.RB;
-						V_Arith(ra, rb, rb, TMS.TM_BNOT);
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_NOT:
-					{
-						var rb = env.RB;
-						ra.V.SetBValue(IsFalse(ref rb.V));
-						break;
-					}
-
-					case OpCode.OP_LEN:
-					{
-						V_ObjLen( ra, env.RB );
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_CONCAT:
-					{
-						int b = i.GETARG_B();
-						int c = i.GETARG_C();
-						Top = Stack[env.Base + c + 1];
-						V_Concat( c - b + 1 );
-						env.Base = ci.BaseIndex;
-
-						ra = env.RA; // 'V_Concat' may invoke TMs and move the stack
-						StkId rb = env.RB;
-						ra.V.SetObj(ref rb.V);
-
-						Top = Stack[ci.TopIndex]; // restore top
-						break;
-					}
-
-					case OpCode.OP_JMP:
-					{
-						V_DoJump( ci, i, 0 );
-						break;
-					}
-
-					case OpCode.OP_EQ:
-					{
-						var lhs = env.RKB;
-						var rhs = env.RKC;
-						var expectEq = i.GETARG_A() != 0;
-#if DEBUG_OP_EQ
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ lhs:" + lhs );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ rhs:" + rhs );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ expectEq:" + expectEq );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_EQ (lhs.V == rhs.V):" + (lhs.V == rhs.V) );
-#endif
-						if(EqualObj(ref lhs.V, ref rhs.V, false) != expectEq)
-						{
-							ci.SavedPc.Index += 1; // skip next jump instruction
-						}
-						else
-						{
-							V_DoNextJump( ci );
-						}
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_LT:
-					{
-						var expectCmpResult = i.GETARG_A() != 0;
-						if( V_LessThan( env.RKB, env.RKC ) != expectCmpResult )
-							ci.SavedPc.Index += 1;
-						else
-							V_DoNextJump( ci );
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_LE:
-					{
-						var expectCmpResult = i.GETARG_A() != 0;
-						if( V_LessEqual( env.RKB, env.RKC ) != expectCmpResult )
-							ci.SavedPc.Index += 1;
-						else
-							V_DoNextJump( ci );
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_TEST:
-					{
-						if((i.GETARG_C() != 0) ?
-							IsFalse(ref ra.V) : !IsFalse(ref ra.V))
-						{
-							ci.SavedPc.Index += 1;
-						}
-						else V_DoNextJump( ci );
-
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_TESTSET:
-					{
-						var rb = env.RB;
-						if((i.GETARG_C() != 0) ?
-							IsFalse(ref rb.V) : !IsFalse(ref rb.V))
-						{
-							ci.SavedPc.Index += 1;
-						}
-						else
-						{
-							ra.V.SetObj(ref rb.V);
-							V_DoNextJump( ci );
-						}
-						env.Base = ci.BaseIndex;
-						break;
-					}
-
-					case OpCode.OP_CALL:
-					{
-						int b = i.GETARG_B();
-						int nresults = i.GETARG_C() - 1;
-						if( b != 0) { Top = Stack[ra.Index + b]; } 	// else previous instruction set top
-						if( D_PreCall( ra, nresults ) ) { // C# function?
-							if( nresults >= 0 )
-								Top = Stack[ci.TopIndex];
-							env.Base = ci.BaseIndex;
-						}
-						else { // Lua function
-							ci = CI;
-							ci.CallStatus |= CallStatus.CIST_REENTRY;
-							goto newframe;
-						}
-						break;
-					}
-
-					case OpCode.OP_TAILCALL:
-					{
-						int b = i.GETARG_B();
-						if( b != 0) { Top = Stack[ra.Index + b]; } 	// else previous instruction set top
-						
-						Utl.Assert( i.GETARG_C() - 1 == LuaDef.LUA_MULTRET );
-
-						var called = D_PreCall( ra, LuaDef.LUA_MULTRET );
-
-						// C# function ?
-						if( called )
-						{
-							env.Base = ci.BaseIndex;
-						}
-
-						// LuaFunciton
-						else
-						{
-							var nci = CI;				// called frame
-							var oci = BaseCI[CI.Index-1]; // caller frame
-							StkId nfunc = Stack[nci.FuncIndex];// called function
-							StkId ofunc = Stack[oci.FuncIndex];// caller function
-							var ncl = nfunc.V.ClLValue();
-							var ocl = ofunc.V.ClLValue();
-
-							// last stack slot filled by 'precall'
-							int lim = nci.BaseIndex + ncl.Proto.NumParams;
-
-							if(cl.Proto.P.Count > 0)
-								{ F_Close( Stack[env.Base] ); }
-
-							// move new frame into old one
-							var nindex = nfunc.Index;
-							var oindex = ofunc.Index;
-							while(nindex < lim) {
-								Stack[oindex++].V.SetObj(ref Stack[nindex++].V);
-							}
-
-							oci.BaseIndex = ofunc.Index + (nci.BaseIndex - nfunc.Index);
-							oci.TopIndex = ofunc.Index + (Top.Index - nfunc.Index);
-							Top = Stack[oci.TopIndex];
-							oci.SavedPc = nci.SavedPc;
-							oci.CallStatus |= CallStatus.CIST_TAIL;
-							ci = CI = oci;
-
-							ocl = ofunc.V.ClLValue();
-							Utl.Assert(Top.Index == oci.BaseIndex + ocl.Proto.MaxStackSize);
-
-							goto newframe;
-						}
-
-						break;
-					}
-
-					case OpCode.OP_RETURN:
-					{
-						int b = i.GETARG_B();
-						if( cl.Proto.P.Count > 0 ) { F_Close(Stack[env.Base]); }
-						b = D_PosCall( ra.Index, b != 0 ? b - 1 : Top.Index - ra.Index );
-						if( (ci.CallStatus & CallStatus.CIST_REENTRY) == 0 )
-						{
-							return;
-						}
-						else
-						{
-							ci = CI;
-							if( b != 0 ) Top = Stack[ci.TopIndex];
-							goto newframe;
-						}
-					}
-
-					case OpCode.OP_FORLOOP:
-					{
-						var ra1 = Stack[ra.Index + 1];
-						var ra2 = Stack[ra.Index + 2];
-						var ra3 = Stack[ra.Index + 3];
-
-						if( ra.V.TtIsInteger() ) // integer loop?
-						{
-							long step = ra2.V.IValue();
-							long idx = unchecked(ra.V.IValue() + step); // increment index
-							long limit = ra1.V.IValue();
-							if( (0 < step) ? idx <= limit : limit <= idx )
-							{
-								ci.SavedPc.Index += i.GETARG_sBx(); // jump back
-								ra.V.SetIValue(idx); // update internal index...
-								ra3.V.SetIValue(idx); // ...and external index
-							}
-						}
-						else // floating loop
-						{
-							double step = ra2.V.FltValue;
-							double idx = ra.V.FltValue + step; // increment index
-							double limit = ra1.V.FltValue;
-							if( (0 < step) ? idx <= limit : limit <= idx )
-							{
-								ci.SavedPc.Index += i.GETARG_sBx(); // jump back
-								ra.V.SetFltValue(idx); // update internal index...
-								ra3.V.SetFltValue(idx); // ...and external index
-							}
-						}
-						break;
-					}
-
-					case OpCode.OP_FORPREP:
-					{
-						var init = ra;
-						var plimit = Stack[ra.Index + 1];
-						var pstep = Stack[ra.Index + 2];
-						long ilimit;
-						bool stopnow;
-						if( init.V.TtIsInteger() && pstep.V.TtIsInteger() &&
-							ForLimit( ref plimit.V, out ilimit, pstep.V.IValue(), out stopnow ) )
-						{
-							// all values are integer
-							long initv = stopnow ? 0 : init.V.IValue();
-							plimit.V.SetIValue(ilimit);
-							init.V.SetIValue(unchecked(initv - pstep.V.IValue()));
-						}
-						else // try making all control values floats
-						{
-							double ninit, nlimit, nstep;
-							if( !V_ToNumber(ref plimit.V, out nlimit) )
-								G_RunError("'for' limit must be a number");
-							plimit.V.SetFltValue(nlimit);
-							if( !V_ToNumber(ref pstep.V, out nstep) )
-								G_RunError("'for' step must be a number");
-							pstep.V.SetFltValue(nstep);
-							if( !V_ToNumber(ref init.V, out ninit) )
-								G_RunError("'for' initial value must be a number");
-							init.V.SetFltValue(ninit - nstep);
-						}
-						ci.SavedPc.Index += i.GETARG_sBx();
-						break;
-					}
-
-					case OpCode.OP_TFORCALL:
-					{
-						int rai = ra.Index;
-						int cbi = ra.Index + 3;
-						Stack[cbi+2].V.SetObj(ref Stack[rai+2].V);
-						Stack[cbi+1].V.SetObj(ref Stack[rai+1].V);
-						Stack[cbi].V.SetObj(ref Stack[rai].V);
-
-						StkId callBase = Stack[cbi];
-						Top = Stack[cbi+3]; // func. +2 args (state and index)
-
-						D_Call( callBase, i.GETARG_C(), true );
-
-						env.Base = ci.BaseIndex;
-
-						Top = Stack[ci.TopIndex];
-						i = ci.SavedPc.ValueInc;	// go to next instruction
-						env.I = i;
-						ra = env.RA;
-
-						DumpStack( env.Base );
-#if DEBUG_INSTRUCTION
-						System.Diagnostics.Debug.WriteLine( "[VM] ============================================================ OP_TFORCALL Instruction: " + i );
-#endif
-
-						Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORLOOP );
-						goto l_tforloop;
-					}
-
-					case OpCode.OP_TFORLOOP:
-l_tforloop:
-					{
-						StkId ra1 = Stack[ra.Index + 1];
-						if(!ra1.V.TtIsNil())	// continue loop?
-						{
-							ra.V.SetObj(ref ra1.V);
-							ci.SavedPc += i.GETARG_sBx();
-						}
-						break;
-					}
-
-					// sets the values for a range of array elements in a table(RA)
-					// RA -> table
-					// RB -> number of elements to set
-					// C  -> encodes the block number of the table to be initialized
-					// the values used to initialize the table are located in
-					//   R(A+1), R(A+2) ...
-					case OpCode.OP_SETLIST:
-					{
-						int n = i.GETARG_B();
-						int c = i.GETARG_C();
-						if( n == 0 ) n = (Top.Index - ra.Index) - 1;
-						if( c == 0 )
-						{
-							Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_EXTRAARG );
-							c = ci.SavedPc.ValueInc.GETARG_Ax();
-						}
-
-						var tbl = ra.V.HValue();
-						Utl.Assert( tbl != null );
-
-						long last = ((long)(c-1) * LuaDef.LFIELDS_PER_FLUSH) + n;
-						int rai = ra.Index;
-						for(; n>0; --n) {
-							tbl.SetInt(last--, ref Stack[rai+n].V);
-						}
-#if DEBUG_OP_SETLIST
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETLIST ci.Top:" + ci.Top.Index );
-						System.Diagnostics.Debug.WriteLine( "[VM] ==== OP_SETLIST Top:" + Top.Index );
-#endif
-						Top = Stack[ci.TopIndex]; // correct top (in case of previous open call)
-						break;
-					}
-
-					case OpCode.OP_CLOSURE:
-					{
-						LuaProto p = cl.Proto.P[ i.GETARG_Bx() ];
-						V_PushClosure( p, cl.Upvals, env.Base, ra );
-#if DEBUG_OP_CLOSURE
-						System.Diagnostics.Debug.WriteLine( "OP_CLOSURE:" + ra.Value );
-						var racl = ra.Value as LuaLClosure;
-						if( racl != null )
-						{
-							for( int ii=0; ii<racl.Upvals.Count; ++ii )
-							{
-								System.Diagnostics.Debug.WriteLine( ii + " ) " + racl.Upvals[ii] );
-							}
-						}
-#endif
-						break;
-					}
-
-					/// <summary>
-					/// VARARG implements the vararg operator `...' in expressions.
-					/// VARARG copies B-1 parameters into a number of registers
-					/// starting from R(A), padding with nils if there aren't enough values.
-					/// If B is 0, VARARG copies as many values as it can based on
-					/// the number of parameters passed.
-					/// If a fixed number of values is required, B is a value greater than 1.
-					/// If any number of values is required, B is 0.
-					/// </summary>
-					case OpCode.OP_VARARG:
-					{
-						int b = i.GETARG_B() - 1;
-						int n = (env.Base - ci.FuncIndex) - cl.Proto.NumParams - 1;
-						if( b < 0 ) // B == 0?
-						{
-							b = n;
-							D_CheckStack(n);
-							ra = env.RA; // previous call may change the stack
-							Top = Stack[ra.Index + n];
-						}
-
-						var p = ra.Index;
-						var q = env.Base - n;
-						for(int j=0; j<b; ++j) {
-							if(j < n) {
-								Stack[p++].V.SetObj(ref Stack[q++].V);
-							}
-							else {
-								Stack[p++].V.SetNilValue();
-							}
-						}
-						break;
-					}
-
-					case OpCode.OP_EXTRAARG:
-					{
-						Utl.Assert( false );
-						V_NotImplemented( i );
-						break;
-					}
-
-					default:
-						V_NotImplemented( i );
-						break;
-				}
-			}
-		}
-
-		private void V_NotImplemented( Instruction i )
-		{
-			System.Diagnostics.Debug.WriteLine( "[VM] ==================================== Not Implemented Instruction: " + i );
-			// throw new NotImplementedException();
-		}
-
-		private StkId FastTM( LuaTable et, TMS tm )
-		{
-			if( et == null )
-				return null;
-
-			if( (et.NoTagMethodFlags & (1u << (int)tm)) != 0u )
-				return null;
-
-			return T_GetTM( et, tm );
-		}
-
-		private void V_GetTable( StkId t, StkId key, StkId val )
-		{
-			for( int loop=0; loop<MAXTAGLOOP; ++loop ) {
-				StkId tmObj;
-				if(t.V.TtIsTable()) {
-					var tbl = t.V.HValue();
-					var res = tbl.Get( ref key.V );
-					if( !res.V.TtIsNil() ) {
-						val.V.SetObj(ref res.V);
-						return;
-					}
-
-					tmObj = FastTM( tbl.MetaTable, TMS.TM_INDEX );
-					if( tmObj == null ) {
-						val.V.SetObj(ref res.V);
-						return;
-					}
-
-					// else will try the tag method
-				}
-				else {
-					tmObj = T_GetTMByObj(ref t.V, TMS.TM_INDEX);
-					if(tmObj.V.TtIsNil())
-						G_TypeError( t, "index" );
-				}
-
-				if(tmObj.V.TtIsFunction()) {
-					CallTM( ref tmObj.V, ref t.V, ref key.V, val, true );
-					return;
-				}
-
-				t = tmObj;
-			}
-			G_RunError( "'__index' chain too long; possible loop" );
-		}
-
-		private void V_SetTable(StkId t, StkId key, StkId val)
-		{
-			for( int loop=0; loop<MAXTAGLOOP; ++loop ) {
-				StkId tmObj;
-				if(t.V.TtIsTable()) {
-					var tbl = t.V.HValue();
-					var oldval = tbl.Get(ref key.V);
-					if(!oldval.V.TtIsNil()) {
-						tbl.Set(ref key.V, ref val.V);
-						return;
-					}
-
-					// check meta method
-					tmObj = FastTM(tbl.MetaTable, TMS.TM_NEWINDEX);
-					if( tmObj == null ) {
-						tbl.Set(ref key.V, ref val.V);
-						return;
-					}
-
-					// else will try the tag method
-				}
-				else {
-					tmObj = T_GetTMByObj(ref t.V, TMS.TM_NEWINDEX);
-					if(tmObj.V.TtIsNil())
-						G_TypeError( t, "index" );
-				}
-
-				if(tmObj.V.TtIsFunction()) {
-					CallTM( ref tmObj.V, ref t.V, ref key.V, val, false );
-					return;
-				}
-
-				t = tmObj;
-			}
-			G_RunError( "'__newindex' chain too long; possible loop" );
-		}
-
-		// getcached: the last closure of `p' if it has the upvalues a new one
-		// would get, as Lua 5.3 reuses it (functions alike are then equal)
-		private LuaLClosureValue GetCached( LuaProto p, LuaUpvalue[] encup, int stackBase )
-		{
-			var c = p.Cache;
-			if( c != null )
-			{
-				for( int i=0; i<p.Upvalues.Count; ++i )
-				{
-					var uv = p.Upvalues[i];
-					var v = uv.InStack ? Stack[stackBase + uv.Index] : encup[uv.Index].V;
-					if( c.Upvals[i].V != v )
-						return null; // wrong upvalue; cannot reuse closure
-				}
-			}
-			return c;
-		}
-
-		private void V_PushClosure( LuaProto p, LuaUpvalue[] encup, int stackBase, StkId ra )
-		{
-			var cached = GetCached( p, encup, stackBase );
-			if( cached != null )
-			{
-				ra.V.SetClLValue(cached);
-				return;
-			}
-			var ncl = new LuaLClosureValue( p );
-			ra.V.SetClLValue(ncl);
-			for( int i=0; i<p.Upvalues.Count; ++i )
-			{
-				// ULDebug.Log( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ V_PushClosure i:" + i );
-				// ULDebug.Log( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ V_PushClosure InStack:" + p.Upvalues[i].InStack );
-				// ULDebug.Log( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ V_PushClosure Index:" + p.Upvalues[i].Index );
-
-				if( p.Upvalues[i].InStack ) // upvalue refers to local variable
-					ncl.Upvals[i] = F_FindUpval(
-						Stack[stackBase + p.Upvalues[i].Index] );
-				else	// get upvalue from enclosing function
-					ncl.Upvals[i] = encup[ p.Upvalues[i].Index ];
-			}
-			p.Cache = ncl; // save it on cache for reuse
-		}
-
-		private void V_ObjLen( StkId ra, StkId rb )
-		{
-			StkId tmObj = null;
-
-			var rbt = rb.V.HValue();
-			if( rbt != null )
-			{
-				tmObj = FastTM( rbt.MetaTable, TMS.TM_LEN );
-				if( tmObj != null )
-					goto calltm;
-				ra.V.SetIValue(rbt.Length);
-				return;
-			}
-
-			if( rb.V.TtIsString() )
-			{
-				ra.V.SetIValue(rb.V.SValue().Length);
-				return;
-			}
-
-			tmObj = T_GetTMByObj(ref rb.V, TMS.TM_LEN);
-			if(tmObj.V.TtIsNil())
-				G_TypeError( rb, "get length of" );
-
-calltm:
-			CallTM( ref tmObj.V, ref rb.V, ref rb.V, ra, true );
-		}
-
-		private void V_Concat( int total )
-		{
-			Utl.Assert( total >= 2 );
-
-			do
-			{
-				var top = Top;
-				int n = 2; // number of elements handled in this pass (at least 2)
-				var lhs = Stack[top.Index - 2];
-				var rhs = Stack[top.Index - 1];
-				if(!(lhs.V.TtIsString() || lhs.V.TtIsNumber()) || !ToString(ref rhs.V))
-				{
-					T_TryBinTM( lhs, rhs, lhs, TMS.TM_CONCAT );
-				}
-				else if(rhs.V.SValue().Length == 0) { // second operand is empty?
-					ToString(ref lhs.V); // result is first operand
-				}
-				else if(lhs.V.TtIsString() && lhs.V.SValue().Length == 0) {
-					lhs.V.SetObj(ref rhs.V); // result is second operand
-				}
-				else
-				{
-					// at least two non-empty string values; get as many as possible
-					for( n = 1; n < total && ToString(ref Stack[top.Index-n-1].V); ++n ) { }
-
-					StringBuilder sb = new StringBuilder();
-					for( int k = n; k >= 1; --k )
-						sb.Append( Stack[top.Index-k].V.SValue() );
-
-					var dest = Stack[top.Index - n];
-					dest.V.SetSValue(sb.ToString());
-				}
-				total -= n-1; // got 'n' strings to create 1 new
-				Top = Stack[Top.Index - (n-1)]; // popped 'n' strings and pushed one
-			} while( total > 1 ); // repeat until only 1 result left
-		}
-
-		private void V_DoJump( CallInfo ci, Instruction i, int e )
-		{
-			int a = i.GETARG_A();
-			if( a > 0 )
-				F_Close(Stack[ci.BaseIndex + (a-1)]);
-			ci.SavedPc += i.GETARG_sBx() + e;
-		}
-
-		private void V_DoNextJump( CallInfo ci )
-		{
-			Instruction i = ci.SavedPc.Value;
-			V_DoJump( ci, i, 1 );
-		}
-
-		// luaV_tonumber_: a number as a float, from an integer, a float or a
-		// string that is a numeral
+		/*
+		** Try to convert a value to a float.
+		*/
 		internal static bool V_ToNumber( ref TValue obj, out double n )
 		{
 			if( obj.TtIsFloat() ) {
@@ -1001,40 +55,47 @@ calltm:
 				return true;
 			}
 			TValue v;
-			if( obj.TtIsString() && O_Str2Num( obj.SValue(), out v ) ) {
-				n = v.NValue(); // convert result of 'O_Str2Num' to a float
+			if( L_StrToN( ref obj, out v ) ) { // string coercible to number?
+				n = v.NValue(); // convert result of 'luaO_str2num' to a float
+				return true;
+			}
+			n = 0.0;
+			return false; // conversion failed
+		}
+
+		// tonumberns: a number as a float, without string coercion
+		internal static bool ToNumberNS( ref TValue obj, out double n )
+		{
+			if( obj.TtIsFloat() ) {
+				n = obj.FltValue;
+				return true;
+			}
+			if( obj.TtIsInteger() ) {
+				n = (double)obj.IValue();
 				return true;
 			}
 			n = 0.0;
 			return false;
 		}
 
-		// luaV_tointeger: a number as an integer, rounding a float as 'mode'
-		// says: 0 accepts only integral values, 1 takes the floor, 2 the ceil
-		internal static bool V_ToInteger( ref TValue obj, out long p, int mode )
-		{
-			if( obj.TtIsInteger() ) {
-				p = obj.IValue();
-				return true;
-			}
-			if( obj.TtIsFloat() )
-				return FloatToInteger( obj.FltValue, out p, mode );
-			TValue v;
-			if( obj.TtIsString() && O_Str2Num( obj.SValue(), out v ) )
-				return V_ToInteger( ref v, out p, mode );
-			p = 0;
-			return false;
-		}
-
-		internal static bool FloatToInteger( double n, out long p, int mode )
+		/*
+		** try to convert a float to an integer, rounding according to 'mode'.
+		*/
+		internal static bool FltToInteger( double n, out long p, F2Imod mode )
 		{
 			double f = Math.Floor( n );
 			if( n != f ) { // not an integral value?
-				if( mode == 0 ) { p = 0; return false; } // fails if mode demands integral value
-				else if( mode > 1 ) // needs ceil?
+				if( mode == F2Imod.F2Ieq ) { p = 0; return false; } // fails if mode demands integral value
+				else if( mode == F2Imod.F2Iceil ) // needs ceil?
 					f += 1; // convert floor to ceil (remember: n != f)
 			}
 			return NumberToInteger( f, out p );
+		}
+
+		// the same, the mode as in Lua 5.4: 0 integral values only, 1 floor, 2 ceil
+		internal static bool FloatToInteger( double n, out long p, int mode )
+		{
+			return FltToInteger( n, out p, (F2Imod)mode );
 		}
 
 		// lua_numbertointeger: an integral float in the range of integers
@@ -1048,387 +109,517 @@ calltm:
 			return false;
 		}
 
-		// forlimit: a 'for' limit as an integer, keeping what the loop does
-		private static bool ForLimit( ref TValue obj, out long p, long step, out bool stopnow )
+		/*
+		** try to convert a value to an integer, rounding according to 'mode',
+		** without string coercion.
+		*/
+		internal static bool V_ToIntegerNS( ref TValue obj, out long p, F2Imod mode )
 		{
-			stopnow = false; // usually, let loops run
-			if( !V_ToInteger( ref obj, out p, (step < 0 ? 2 : 1) ) ) { // not fit in integer?
-				double n; // try to convert to float
-				if( !V_ToNumber( ref obj, out n ) ) // cannot convert to float?
-					return false; // not a number
-				if( 0 < n ) { // if true, float is larger than max integer
-					p = LuaConf.LUA_MAXINTEGER;
-					if( step < 0 ) stopnow = true;
-				}
-				else { // float is smaller than min integer
-					p = LuaConf.LUA_MININTEGER;
-					if( step >= 0 ) stopnow = true;
-				}
+			if( obj.TtIsFloat() )
+				return FltToInteger( obj.FltValue, out p, mode );
+			else if( obj.TtIsInteger() ) {
+				p = obj.IValue();
+				return true;
 			}
-			return true;
+			p = 0;
+			return false;
 		}
 
-		// a number converted to the string Lua writes for it, in place
-		private static bool V_ToString(ref TValue v)
+		/*
+		** try to convert a value to an integer.
+		*/
+		internal static bool V_ToInteger( ref TValue obj, out long p, F2Imod mode )
 		{
-			if( v.TtIsInteger() )
-				v.SetSValue(LuaNumber.ToString(v.IValue()));
-			else if( v.TtIsFloat() )
-				v.SetSValue(LuaNumber.ToString(v.FltValue));
+			TValue v;
+			if( L_StrToN( ref obj, out v ) ) // does 'obj' point to a numerical string?
+				return V_ToIntegerNS( ref v, out p, mode );
+			return V_ToIntegerNS( ref obj, out p, mode );
+		}
+
+		// the same, the mode as in Lua 5.4: 0 integral values only, 1 floor, 2 ceil
+		internal static bool V_ToInteger( ref TValue obj, out long p, int mode )
+		{
+			return V_ToInteger( ref obj, out p, (F2Imod)mode );
+		}
+
+		/*
+		** Try to convert a 'for' limit to an integer, preserving the semantics
+		** of the loop. Return true if the loop must not run; otherwise, '*p'
+		** gets the integer limit.
+		** (The following explanation assumes a positive step; it is valid for
+		** negative steps mutatis mutandis.)
+		** If the limit is an integer or can be converted to an integer,
+		** rounding down, that is the limit.
+		** Otherwise, check whether the limit can be converted to a float. If
+		** the float is too large, clip it to LUA_MAXINTEGER.  If the float
+		** is too negative, the loop should not run, because any initial
+		** integer value is greater than such limit; so, the function returns
+		** true to signal that. (For this latter case, no integer limit would be
+		** correct; even a limit of LUA_MININTEGER would run the loop once for
+		** an initial value equal to LUA_MININTEGER.)
+		*/
+		private bool ForLimit( long init, ref TValue lim, out long p, long step )
+		{
+			if( !V_ToInteger( ref lim, out p, (step < 0 ? F2Imod.F2Iceil : F2Imod.F2Ifloor) ) )
+			{
+				/* not coercible to in integer */
+				double flim; // try to convert to float
+				if( !V_ToNumber( ref lim, out flim ) ) // cannot convert to float?
+					G_ForError( ref lim, "limit" );
+				/* else 'flim' is a float out of integer bounds */
+				if( 0 < flim ) { // if it is positive, it is too large
+					if( step < 0 ) return true; // initial value must be less than it
+					p = LuaConf.LUA_MAXINTEGER; // truncate
+				}
+				else { // it is less than min integer
+					if( step > 0 ) return true; // initial value must be greater than it
+					p = LuaConf.LUA_MININTEGER; // truncate
+				}
+			}
+			return (step > 0 ? init > p : init < p); // not to run?
+		}
+
+		/*
+		** Prepare a numerical for loop (opcode OP_FORPREP).
+		** Return true to skip the loop. Otherwise,
+		** after preparation, stack will be as follows:
+		**   ra : internal index (safe copy of the control variable)
+		**   ra + 1 : loop counter (integer loops) or limit (float loops)
+		**   ra + 2 : step
+		**   ra + 3 : control variable
+		*/
+		private bool ForPrep( int ra )
+		{
+			StkId pinit = Stack[ra];
+			StkId plimit = Stack[ra + 1];
+			StkId pstep = Stack[ra + 2];
+			if( pinit.V.TtIsInteger() && pstep.V.TtIsInteger() ) // integer loop?
+			{
+				long init = pinit.V.IValue();
+				long step = pstep.V.IValue();
+				long limit;
+				if( step == 0 )
+					G_RunError( "'for' step is zero" );
+				Stack[ra + 3].V.SetIValue( init ); // control variable
+				if( ForLimit( init, ref plimit.V, out limit, step ) )
+					return true; // skip the loop
+				else // prepare loop counter
+				{
+					ulong count;
+					unchecked
+					{
+						if( step > 0 ) { // ascending loop?
+							count = (ulong)limit - (ulong)init;
+							if( step != 1 ) // avoid division in the too common case
+								count /= (ulong)step;
+						}
+						else { // step < 0; descending loop
+							count = (ulong)init - (ulong)limit;
+							/* 'step+1' avoids negating 'mininteger' */
+							count /= (ulong)(-(step + 1)) + 1u;
+						}
+						/* store the counter in place of the limit (which won't be
+						   needed anymore) */
+						plimit.V.SetIValue( (long)count );
+					}
+				}
+			}
+			else // try making all values floats
+			{
+				double init; double limit; double step;
+				if( !V_ToNumber( ref plimit.V, out limit ) )
+					G_ForError( ref plimit.V, "limit" );
+				if( !V_ToNumber( ref pstep.V, out step ) )
+					G_ForError( ref pstep.V, "step" );
+				if( !V_ToNumber( ref pinit.V, out init ) )
+					G_ForError( ref pinit.V, "initial value" );
+				if( step == 0 )
+					G_RunError( "'for' step is zero" );
+				if( (0 < step) ? (limit < init) : (init < limit) )
+					return true; // skip the loop
+				else
+				{
+					/* make sure internal values are all floats */
+					plimit.V.SetFltValue( limit );
+					pstep.V.SetFltValue( step );
+					pinit.V.SetFltValue( init ); // internal index
+					Stack[ra + 3].V.SetFltValue( init ); // control variable
+				}
+			}
+			return false;
+		}
+
+		/*
+		** Execute a step of a float numerical for loop, returning
+		** true iff the loop must continue. (The integer case is
+		** written online with opcode OP_FORLOOP, for performance.)
+		*/
+		private bool FloatForLoop( int ra )
+		{
+			double step = Stack[ra + 2].V.FltValue;
+			double limit = Stack[ra + 1].V.FltValue;
+			double idx = Stack[ra].V.FltValue; // internal index
+			idx = idx + step; // increment index
+			if( (0 < step) ? (idx <= limit) : (limit <= idx) )
+			{
+				Stack[ra].V.SetFltValue( idx ); // update internal index
+				Stack[ra + 3].V.SetFltValue( idx ); // and control variable
+				return true; // jump back
+			}
 			else
-				return false;
-			return true;
+				return false; // finish the loop
 		}
 
-		// luaV_div: integer division, rounding towards minus infinity
-		internal static long V_Div( LuaState L, long m, long n )
+		/*
+		** Finish the table access 'val = t[key]'.
+		** if 'isTable' is false, 't' is not a table; otherwise, the entry
+		** t[k] is empty.
+		*/
+		internal void V_FinishGet( ref TValue t, ref TValue key, int val, bool isTable )
 		{
-			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
-				if( n == 0 )
-					L.G_RunError( "attempt to divide by zero" );
-				return unchecked(0 - m); // n==-1; avoid overflow with 0x80000...//-1
-			}
-			long q = m / n; // perform C division
-			if( (m ^ n) < 0 && m % n != 0 ) // 'm/n' would be negative non-integer?
-				q -= 1; // correct result for different rounding
-			return q;
-		}
-
-		// luaV_mod: integer modulus, of the sign of the divisor
-		internal static long V_Mod( LuaState L, long m, long n )
-		{
-			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
-				if( n == 0 )
-					L.G_RunError( "attempt to perform 'n%0'" );
-				return 0; // m % -1 == 0; avoid overflow with 0x80000...%-1
-			}
-			long r = m % n;
-			if( r != 0 && (m ^ n) < 0 ) // 'm/n' would be non-integer negative?
-				r += n; // correct result for different rounding
-			return r;
-		}
-
-		// luaV_shiftl: shift left, or right for a negative 'y', logical
-		internal static long V_ShiftL( long x, long y )
-		{
-			const int NBITS = 64;
-			if( y < 0 ) { // shift right?
-				if( y <= -NBITS ) return 0;
-				return (long)((ulong)x >> (int)-y);
-			}
-			else { // shift left
-				if( y >= NBITS ) return 0;
-				return x << (int)y;
-			}
-		}
-
-		private void CallTM( ref TValue f, ref TValue p1, ref TValue p2, StkId p3, bool hasres )
-		{
-			var result = p3.Index;
-			var func = Top;
-			StkId.inc(ref Top).V.SetObj(ref f); 	// push function
-			StkId.inc(ref Top).V.SetObj(ref p1);	// push 1st argument
-			StkId.inc(ref Top).V.SetObj(ref p2);	// push 2nd argument
-			if( !hasres ) 		// no result? p3 is 3rd argument
-				StkId.inc(ref Top).V.SetObj(ref p3.V);
-			D_CheckStack(0);
-			D_Call( func, (hasres ? 1 : 0), CI.IsLua );
-			if( hasres )		// if has result, move it ot its place
+			for( int loop = 0; loop < MAXTAGLOOP; loop++ )
 			{
-				Top = Stack[Top.Index - 1];
-				Stack[result].V.SetObj(ref Top.V);
-			}
-		}
-
-		private bool CallBinTM( StkId p1, StkId p2, StkId res, TMS tm )
-		{
-			var tmObj = T_GetTMByObj(ref p1.V, tm);
-			if(tmObj.V.TtIsNil())
-				tmObj = T_GetTMByObj(ref p2.V, tm);
-			if(tmObj.V.TtIsNil())
-				return false;
-
-			CallTM( ref tmObj.V, ref p1.V, ref p2.V, res, true );
-			return true;
-		}
-
-		// an arithmetic or bitwise operation, by its metamethod if an operand
-		// is not a number (ORDER TM follows ORDER OP from TM_ADD)
-		private void V_Arith( StkId ra, StkId rb, StkId rc, TMS tm )
-		{
-			var res = new TValue();
-			if( O_RawArith( this, (LuaOp)(tm - TMS.TM_ADD), ref rb.V, ref rc.V, ref res ) )
-				ra.V.SetObj( ref res );
-			else
-				T_TryBinTM( rb, rc, ra, tm );
-		}
-
-		// luaT_trybinTM: the metamethod of a binary operation, or the error
-		// of an operand it cannot apply to
-		private void T_TryBinTM( StkId p1, StkId p2, StkId res, TMS tm )
-		{
-			if( CallBinTM( p1, p2, res, tm ) )
-				return;
-
-			switch( tm )
-			{
-				case TMS.TM_CONCAT:
-					G_ConcatError( p1, p2 );
-					break;
-				case TMS.TM_BAND: case TMS.TM_BOR: case TMS.TM_BXOR:
-				case TMS.TM_SHL: case TMS.TM_SHR: case TMS.TM_BNOT: {
-					double dummy;
-					if( V_ToNumber( ref p1.V, out dummy ) && V_ToNumber( ref p2.V, out dummy ) )
-						G_ToIntError( p1, p2 );
-					else
-						G_OpIntError( p1, p2, "perform bitwise operation on" );
-					break;
+				StkId tm; // metamethod
+				if( !isTable ) // 't' is not a table?
+				{
+					Utl.Assert( !t.TtIsTable() );
+					tm = T_GetTMByObj( ref t, TMS.TM_INDEX );
+					if( tm.V.TtIsNil() )
+						G_TypeError( ref t, "index" ); // no metamethod
+					/* else will try the metamethod */
 				}
-				default:
-					G_OpIntError( p1, p2, "perform arithmetic on" );
-					break;
+				else // 't' is a table
+				{
+					tm = FastTM( t.HValue().MetaTable, TMS.TM_INDEX ); // table's metamethod
+					if( tm == null ) // no metamethod?
+					{
+						Stack[val].V.SetNilValue(); // result is nil
+						return;
+					}
+					/* else will try the metamethod */
+				}
+				if( tm.V.TtIsFunction() ) // is metamethod a function?
+				{
+					T_CallTMRes( ref tm.V, ref t, ref key, val ); // call it
+					return;
+				}
+				t = ref tm.V; // else try to access 'tm[key]'
+				isTable = t.TtIsTable();
+				if( isTable ) // fast track?
+				{
+					var slot = t.HValue().Get( ref key );
+					if( !slot.V.TtIsNil() )
+					{
+						Stack[val].V.SetObj( ref slot.V ); // done
+						return;
+					}
+				}
+				/* else repeat (tail call 'luaV_finishget') */
 			}
+			G_RunError( "'__index' chain too long; possible loop" );
 		}
 
-		private bool CallOrderTM( StkId p1, StkId p2, TMS tm, out bool error )
+		/*
+		** Finish a table assignment 't[key] = val'.
+		** If 'isTable' is false, 't' is not a table. Otherwise, the entry
+		** 't[key]' is empty (or absent).
+		*/
+		internal void V_FinishSet( ref TValue t, ref TValue key, ref TValue val, bool isTable )
 		{
-			if( !CallBinTM( p1, p2, Top, tm ) )
+			for( int loop = 0; loop < MAXTAGLOOP; loop++ )
 			{
-				error = true; // no metamethod
-				return false;
+				StkId tm; // '__newindex' metamethod
+				if( isTable ) // is 't' a table?
+				{
+					var h = t.HValue(); // save 't' table
+					tm = FastTM( h.MetaTable, TMS.TM_NEWINDEX ); // get metamethod
+					if( tm == null ) // no metamethod?
+					{
+						h.Set( ref key, ref val ); // set new value
+						return;
+					}
+					/* else will try the metamethod */
+				}
+				else // not a table; check metamethod
+				{
+					tm = T_GetTMByObj( ref t, TMS.TM_NEWINDEX );
+					if( tm.V.TtIsNil() )
+						G_TypeError( ref t, "index" );
+				}
+				/* try the metamethod */
+				if( tm.V.TtIsFunction() )
+				{
+					T_CallTM( ref tm.V, ref t, ref key, ref val );
+					return;
+				}
+				t = ref tm.V; // else repeat assignment over 'tm'
+				isTable = t.TtIsTable();
+				if( isTable )
+				{
+					var h = t.HValue();
+					var slot = h.Get( ref key );
+					if( !slot.V.TtIsNil() )
+					{
+						slot.V.SetObj( ref val );
+						return; // done
+					}
+				}
+				/* else 'return luaV_finishset(L, t, key, val, slot)' (loop) */
 			}
-
-			error = false;
-			return !IsFalse(ref Top.V);
+			G_RunError( "'__newindex' chain too long; possible loop" );
 		}
 
-		// LTintfloat: whether integer 'i' is less than float 'f'; compared as
-		// floats if 'i' has an exact representation as a float, else as
-		// integers if 'f' is in their range
-		private static bool LTIntFloat( long i, double f )
+		// The value t[key] of a table 't', nil if absent (luaV_fastget)
+		private static StkId FastGet( LuaTable h, ref TValue key )
 		{
-			if( !IntFitsFloat( i ) ) {
-				if( f >= -(double)LuaConf.LUA_MININTEGER ) // -minint == maxint + 1
-					return true; // f >= maxint + 1 > i
-				else if( f > (double)LuaConf.LUA_MININTEGER ) // minint < f <= maxint ?
-					return i < (long)f; // compare them as integers
-				else // f <= minint <= i (or 'f' is NaN)  -->  not(i < f)
-					return false;
-			}
-			return (double)i < f; // compare them as floats
+			return key.TtIsInteger() ? h.GetInt( key.IValue() ) : h.Get( ref key );
 		}
 
-		private static bool LEIntFloat( long i, double f )
+		// 'val = t[key]', by its metamethods if need be (luaV_gettable)
+		internal void V_GetTable( ref TValue t, ref TValue key, int val )
 		{
-			if( !IntFitsFloat( i ) ) {
-				if( f >= -(double)LuaConf.LUA_MININTEGER ) // -minint == maxint + 1
-					return true; // f >= maxint + 1 > i
-				else if( f >= (double)LuaConf.LUA_MININTEGER ) // minint <= f <= maxint ?
-					return i <= (long)f; // compare them as integers
-				else // f < minint <= i (or 'f' is NaN)  -->  not(i <= f)
-					return false;
+			if( t.TtIsTable() )
+			{
+				var slot = FastGet( t.HValue(), ref key );
+				if( !slot.V.TtIsNil() )
+				{
+					Stack[val].V.SetObj( ref slot.V );
+					return;
+				}
+				V_FinishGet( ref t, ref key, val, true );
 			}
-			return (double)i <= f; // compare them as floats
+			else
+				V_FinishGet( ref t, ref key, val, false );
 		}
 
-		// l_intfitsf: whether an integer converts to a float without rounding
+		// 't[key] = val', by its metamethods if need be (luaV_settable)
+		internal void V_SetTable( ref TValue t, ref TValue key, ref TValue val )
+		{
+			if( t.TtIsTable() )
+			{
+				var slot = FastGet( t.HValue(), ref key );
+				if( !slot.V.TtIsNil() )
+				{
+					slot.V.SetObj( ref val ); // luaV_finishfastset
+					return;
+				}
+				V_FinishSet( ref t, ref key, ref val, true );
+			}
+			else
+				V_FinishSet( ref t, ref key, ref val, false );
+		}
+
+		/*
+		** Compare two strings 'ts1' x 'ts2', returning an integer less-equal-
+		** -greater than zero if 'ts1' is less-equal-greater than 'ts2'.
+		** (The strings hold bytes, which the C locale compares as such.)
+		*/
+		private static int L_StrCmp( string ts1, string ts2 )
+		{
+			return string.CompareOrdinal( ts1, ts2 );
+		}
+
+		/*
+		** 'l_intfitsf' checks whether a given integer is in the range that
+		** can be converted to a float without rounding. Used in comparisons.
+		*/
+		private const ulong MAXINTFITSF = (ulong)1 << 53;
+
 		private static bool IntFitsFloat( long i )
 		{
-			const long NBM = 1L << 53;
-			return -NBM <= i && i <= NBM;
+			return unchecked(MAXINTFITSF + (ulong)i) <= (2 * MAXINTFITSF);
 		}
 
+		/*
+		** Check whether integer 'i' is less than float 'f'. If 'i' has an
+		** exact representation as a float ('l_intfitsf'), compare numbers as
+		** floats. Otherwise, use the equivalence 'i < f <=> i < ceil(f)'.
+		** If 'ceil(f)' is out of integer range, either 'f' is greater than
+		** all integers or less than all integers.
+		** (The test with 'l_intfitsf' is only for performance; the else
+		** case is correct for all values, but it is slow due to the conversion
+		** from float to int.)
+		** When 'f' is NaN, comparisons must result in false.
+		*/
+		private static bool LTIntFloat( long i, double f )
+		{
+			if( IntFitsFloat( i ) )
+				return (double)i < f; // compare them as floats
+			else { // i < f <=> i < ceil(f)
+				long fi;
+				if( FltToInteger( f, out fi, F2Imod.F2Iceil ) ) // fi = ceil(f)
+					return i < fi; // compare them as integers
+				else // 'f' is either greater or less than all integers
+					return f > 0; // greater?
+			}
+		}
+
+		/*
+		** Check whether integer 'i' is less than or equal to float 'f'.
+		** See comments on previous function.
+		*/
+		private static bool LEIntFloat( long i, double f )
+		{
+			if( IntFitsFloat( i ) )
+				return (double)i <= f; // compare them as floats
+			else { // i <= f <=> i <= floor(f)
+				long fi;
+				if( FltToInteger( f, out fi, F2Imod.F2Ifloor ) ) // fi = floor(f)
+					return i <= fi; // compare them as integers
+				else // 'f' is either greater or less than all integers
+					return f > 0; // greater?
+			}
+		}
+
+		/*
+		** Check whether float 'f' is less than integer 'i'.
+		** See comments on previous function.
+		*/
+		private static bool LTFloatInt( double f, long i )
+		{
+			if( IntFitsFloat( i ) )
+				return f < (double)i; // compare them as floats
+			else { // f < i <=> floor(f) < i
+				long fi;
+				if( FltToInteger( f, out fi, F2Imod.F2Ifloor ) ) // fi = floor(f)
+					return fi < i; // compare them as integers
+				else // 'f' is either greater or less than all integers
+					return f < 0; // less?
+			}
+		}
+
+		/*
+		** Check whether float 'f' is less than or equal to integer 'i'.
+		** See comments on previous function.
+		*/
+		private static bool LEFloatInt( double f, long i )
+		{
+			if( IntFitsFloat( i ) )
+				return f <= (double)i; // compare them as floats
+			else { // f <= i <=> ceil(f) <= i
+				long fi;
+				if( FltToInteger( f, out fi, F2Imod.F2Iceil ) ) // fi = ceil(f)
+					return fi <= i; // compare them as integers
+				else // 'f' is either greater or less than all integers
+					return f < 0; // less?
+			}
+		}
+
+		/*
+		** Return 'l < r', for numbers.
+		*/
 		private static bool LTNum( ref TValue l, ref TValue r )
 		{
+			Utl.Assert( l.TtIsNumber() && r.TtIsNumber() );
 			if( l.TtIsInteger() ) {
 				long li = l.IValue();
 				if( r.TtIsInteger() )
 					return li < r.IValue(); // both are integers
-				return LTIntFloat( li, r.FltValue ); // 'l' is int and 'r' is float
+				else // 'l' is int and 'r' is float
+					return LTIntFloat( li, r.FltValue ); // l < r ?
 			}
-			double lf = l.FltValue; // 'l' must be float
-			if( r.TtIsFloat() )
-				return lf < r.FltValue; // both are float
-			if( double.IsNaN( lf ) ) // 'r' is int and 'l' is float
-				return false; // NaN < i is always false
-			return !LEIntFloat( r.IValue(), lf ); // not (r <= l) ?
+			else {
+				double lf = l.FltValue; // 'l' must be float
+				if( r.TtIsFloat() )
+					return lf < r.FltValue; // both are float
+				else // 'l' is float and 'r' is int
+					return LTFloatInt( lf, r.IValue() );
+			}
 		}
 
+		/*
+		** Return 'l <= r', for numbers.
+		*/
 		private static bool LENum( ref TValue l, ref TValue r )
 		{
+			Utl.Assert( l.TtIsNumber() && r.TtIsNumber() );
 			if( l.TtIsInteger() ) {
 				long li = l.IValue();
 				if( r.TtIsInteger() )
 					return li <= r.IValue(); // both are integers
-				return LEIntFloat( li, r.FltValue ); // 'l' is int and 'r' is float
+				else // 'l' is int and 'r' is float
+					return LEIntFloat( li, r.FltValue ); // l <= r ?
 			}
-			double lf = l.FltValue; // 'l' must be float
-			if( r.TtIsFloat() )
-				return lf <= r.FltValue; // both are float
-			if( double.IsNaN( lf ) ) // 'r' is int and 'l' is float
-				return false; // NaN <= i is always false
-			return !LTIntFloat( r.IValue(), lf ); // not (r < l) ?
+			else {
+				double lf = l.FltValue; // 'l' must be float
+				if( r.TtIsFloat() )
+					return lf <= r.FltValue; // both are float
+				else // 'l' is float and 'r' is int
+					return LEFloatInt( lf, r.IValue() );
+			}
 		}
 
-		private bool V_LessThan( StkId lhs, StkId rhs )
+		/*
+		** return 'l < r' for non-numbers.
+		*/
+		private bool LessThanOthers( ref TValue l, ref TValue r )
 		{
-			// compare number
-			if(lhs.V.TtIsNumber() && rhs.V.TtIsNumber()) {
-				return LTNum(ref lhs.V, ref rhs.V);
-			}
-
-			// compare string
-			if(lhs.V.TtIsString() && rhs.V.TtIsString()) {
-				return string.CompareOrdinal(lhs.V.SValue(), rhs.V.SValue()) < 0;
-			}
-
-			bool error;
-			var res = CallOrderTM( lhs, rhs, TMS.TM_LT, out error );
-			if( error )
-			{
-				G_OrderError( lhs, rhs );
-				return false;
-			}
-			return res;
+			Utl.Assert( !l.TtIsNumber() || !r.TtIsNumber() );
+			if( l.TtIsString() && r.TtIsString() ) // both are strings?
+				return L_StrCmp( l.SValue(), r.SValue() ) < 0;
+			else
+				return T_CallOrderTM( ref l, ref r, TMS.TM_LT );
 		}
 
-		private bool V_LessEqual( StkId lhs, StkId rhs )
+		/*
+		** Main operation less than; return 'l < r'.
+		*/
+		internal bool V_LessThan( ref TValue l, ref TValue r )
 		{
-			// compare number
-			if(lhs.V.TtIsNumber() && rhs.V.TtIsNumber()) {
-				return LENum(ref lhs.V, ref rhs.V);
-			}
-
-			// compare string
-			if(lhs.V.TtIsString() && rhs.V.TtIsString()) {
-				return string.CompareOrdinal(lhs.V.SValue(), rhs.V.SValue()) <= 0;
-			}
-
-			// first try `le'
-			bool error;
-			var res = CallOrderTM( lhs, rhs, TMS.TM_LE, out error );
-			if( !error )
-				return res;
-
-			// else try `lt': a <= b is not (b < a)
-			CI.CallStatus |= CallStatus.CIST_LEQ; // mark it is doing 'lt' for 'le'
-			res = CallOrderTM( rhs, lhs, TMS.TM_LT, out error );
-			CI.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
-			if( error )
-				G_OrderError( lhs, rhs );
-			return !res; // result is negated
+			if( l.TtIsNumber() && r.TtIsNumber() ) // both operands are numbers?
+				return LTNum( ref l, ref r );
+			else return LessThanOthers( ref l, ref r );
 		}
 
-		private void V_FinishOp()
+		/*
+		** return 'l <= r' for non-numbers.
+		*/
+		private bool LessEqualOthers( ref TValue l, ref TValue r )
 		{
-			int ciIndex = CI.Index;
-			int stackBase = CI.BaseIndex;
-			Instruction i = (CI.SavedPc - 1).Value; // interrupted instruction
-			OpCode op = i.GET_OPCODE();
-			switch( op )
-			{
-				case OpCode.OP_ADD: case OpCode.OP_SUB: case OpCode.OP_MUL: case OpCode.OP_DIV:
-				case OpCode.OP_IDIV: case OpCode.OP_BAND: case OpCode.OP_BOR: case OpCode.OP_BXOR:
-				case OpCode.OP_SHL: case OpCode.OP_SHR: case OpCode.OP_BNOT:
-				case OpCode.OP_MOD: case OpCode.OP_POW: case OpCode.OP_UNM: case OpCode.OP_LEN:
-				case OpCode.OP_GETTABUP: case OpCode.OP_GETTABLE: case OpCode.OP_SELF:
-				{
-					var tmp = Stack[stackBase + i.GETARG_A()];
-					Top = Stack[Top.Index-1];
-					tmp.V.SetObj(ref Stack[Top.Index].V);
-					break;
-				}
+			Utl.Assert( !l.TtIsNumber() || !r.TtIsNumber() );
+			if( l.TtIsString() && r.TtIsString() ) // both are strings?
+				return L_StrCmp( l.SValue(), r.SValue() ) <= 0;
+			else
+				return T_CallOrderTM( ref l, ref r, TMS.TM_LE );
+		}
 
-				case OpCode.OP_LE: case OpCode.OP_LT: case OpCode.OP_EQ:
-				{
-					bool res = !IsFalse(ref Stack[Top.Index-1].V);
-					Top = Stack[Top.Index-1];
-					var ci = BaseCI[ciIndex];
-					if( (ci.CallStatus & CallStatus.CIST_LEQ) != 0 ) // `<=' using `<' instead?
-					{
-						Utl.Assert( op == OpCode.OP_LE );
-						ci.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
-						res = !res; // negate result
-					}
-
-					Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_JMP );
-					if( (res ? 1 : 0) != i.GETARG_A() ) // condition failed?
-					{
-						ci.SavedPc.Index++; // skip jump instruction
-					}
-					break;
-				}
-
-				case OpCode.OP_CONCAT:
-				{
-					StkId top = Stack[Top.Index - 1]; // top when `CallBinTM' was called
-					int b = i.GETARG_B(); // first element to concatenate
-					int total = top.Index-1 - (stackBase+b); // yet to concatenate
-					var tmp = Stack[top.Index-2];
-					tmp.V.SetObj(ref top.V); // put TM result in proper position
-					if(total > 1) // are there elements to concat?
-					{
-						Top = Stack[top.Index-1]; // top is one after last element (at top-2)
-						V_Concat( total );
-					}
-					// move final result to final position
-					var ci = BaseCI[ciIndex];
-					var tmp2 = Stack[ci.BaseIndex + i.GETARG_A()];
-					tmp2.V.SetObj(ref Stack[Top.Index-1].V);
-					Top = Stack[ci.TopIndex];
-					break;
-				}
-
-				case OpCode.OP_TFORCALL:
-				{
-					var ci = BaseCI[ciIndex];
-					Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_TFORLOOP );
-					Top = Stack[ci.TopIndex]; // restore top
-					break;
-				}
-
-				case OpCode.OP_CALL:
-				{
-					if( i.GETARG_C() - 1 >= 0 ) // numResults >= 0?
-					{
-						var ci = BaseCI[ciIndex];
-						Top = Stack[ci.TopIndex]; // restore top
-					}
-					break;
-				}
-
-				case OpCode.OP_TAILCALL: case OpCode.OP_SETTABUP:  case OpCode.OP_SETTABLE:
-					break;
-
-				default:
-					Utl.Assert( false );
-					break;
-			}
+		/*
+		** Main operation less than or equal to; return 'l <= r'.
+		*/
+		internal bool V_LessEqual( ref TValue l, ref TValue r )
+		{
+			if( l.TtIsNumber() && r.TtIsNumber() ) // both operands are numbers?
+				return LENum( ref l, ref r );
+			else return LessEqualOthers( ref l, ref r );
 		}
 
 		internal bool V_RawEqualObj( ref TValue t1, ref TValue t2 )
 		{
-			return V_EqualObject( ref t1, ref t2, true );
+			return V_EqualObj( ref t1, ref t2, true );
 		}
 
-		private bool EqualObj( ref TValue t1, ref TValue t2, bool rawEq )
-		{
-			return V_EqualObject( ref t1, ref t2, rawEq );
-		}
-
-		// luaV_equalobj: 't1 == t2', by '__eq' of either operand unless raw
-		private bool V_EqualObject( ref TValue t1, ref TValue t2, bool rawEq )
+		/*
+		** Main operation for equality of Lua values; return 't1 == t2'.
+		** 'rawEq' means raw equality (no metamethods)
+		*/
+		internal bool V_EqualObj( ref TValue t1, ref TValue t2, bool rawEq )
 		{
 			if( t1.Tt != t2.Tt ) // not the same variant?
 			{
 				if( t1.BaseTt() != t2.BaseTt() || t1.BaseTt() != (int)LuaType.LUA_TNUMBER )
 					return false; // only numbers can be equal with different variants
-				// two numbers with different variants: compare them as integers
-				long i1, i2;
-				return V_ToInteger( ref t1, out i1, 0 ) && V_ToInteger( ref t2, out i2, 0 ) && i1 == i2;
+				else { // two numbers with different variants
+					/* One of them is an integer. If the other does not have an
+					   integer value, they cannot be equal; otherwise, compare their
+					   integer values. */
+					long i1, i2;
+					return V_ToIntegerNS( ref t1, out i1, F2Imod.F2Ieq ) &&
+						V_ToIntegerNS( ref t2, out i2, F2Imod.F2Ieq ) &&
+						i1 == i2;
+				}
 			}
 
-			// values have same type and same variant
+			/* values have same type and same variant */
 			StkId tm = null;
 			switch( t1.Tt )
 			{
@@ -1446,38 +637,1214 @@ calltm:
 				{
 					var ud1 = t1.RawUValue();
 					var ud2 = t2.RawUValue();
-					if(ud1 == ud2)
-						return true;
-					if(rawEq)
-						return false;
+					if( ud1 == ud2 ) return true;
+					else if( rawEq ) return false;
 					tm = FastTM( ud1.MetaTable, TMS.TM_EQ );
 					if( tm == null )
 						tm = FastTM( ud2.MetaTable, TMS.TM_EQ );
-					break;
+					break; // will try TM
 				}
 				case (int)LuaType.LUA_TTABLE:
 				{
 					var tbl1 = t1.HValue();
 					var tbl2 = t2.HValue();
-					if( System.Object.ReferenceEquals( tbl1, tbl2 ) )
-						return true;
-					if( rawEq )
-						return false;
+					if( System.Object.ReferenceEquals( tbl1, tbl2 ) ) return true;
+					else if( rawEq ) return false;
 					tm = FastTM( tbl1.MetaTable, TMS.TM_EQ );
 					if( tm == null )
 						tm = FastTM( tbl2.MetaTable, TMS.TM_EQ );
-					break;
+					break; // will try TM
 				}
 				default:
-					return TValue.SameObject(t1.OValue, t2.OValue);
+					return TValue.SameObject( t1.OValue, t2.OValue );
 			}
 			if( tm == null ) // no TM?
 				return false; // objects are different
-			CallTM(ref tm.V, ref t1, ref t2, Top, true ); // call TM
-			return !IsFalse(ref Top.V);
+			else
+			{
+				T_CallTMRes( ref tm.V, ref t1, ref t2, Top.Index ); // call TM
+				return !IsFalse( ref Top.V );
+			}
+		}
+
+		// a number converted to the string Lua writes for it, in place (luaO_tostring)
+		private static bool V_ToString( ref TValue v )
+		{
+			if( v.TtIsInteger() )
+				v.SetSValue( LuaNumber.ToString( v.IValue() ) );
+			else if( v.TtIsFloat() )
+				v.SetSValue( LuaNumber.ToString( v.FltValue ) );
+			else
+				return false;
+			return true;
+		}
+
+		private static bool IsEmptyStr( ref TValue o )
+		{
+			return o.TtIsString() && o.SValue().Length == 0;
+		}
+
+		/*
+		** Main operation for concatenation: concat 'total' values in the stack,
+		** from 'L->top - total' up to 'L->top - 1'.
+		*/
+		internal void V_Concat( int total )
+		{
+			if( total == 1 )
+				return; // "all" values already concatenated
+			do
+			{
+				int top = Top.Index;
+				int n = 2; // number of elements handled in this pass (at least 2)
+				if( !(Stack[top - 2].V.TtIsString() || Stack[top - 2].V.TtIsNumber()) ||
+					!ToString( ref Stack[top - 1].V ) )
+					T_TryConcatTM(); // may invalidate 'top'
+				else if( IsEmptyStr( ref Stack[top - 1].V ) ) // second operand is empty?
+					ToString( ref Stack[top - 2].V ); // result is first operand
+				else if( IsEmptyStr( ref Stack[top - 2].V ) ) // first operand is empty string?
+					Stack[top - 2].V.SetObj( ref Stack[top - 1].V ); // result is second op.
+				else
+				{
+					/* at least two non-empty string values; get as many as possible */
+					int tl = Stack[top - 1].V.SValue().Length;
+					/* collect total length and number of strings */
+					for( n = 1; n < total && ToString( ref Stack[top - n - 1].V ); n++ )
+					{
+						int l = Stack[top - n - 1].V.SValue().Length;
+						if( l >= int.MaxValue - tl ) {
+							Top = Stack[top - total]; // pop strings to avoid wasting stack
+							G_RunError( "string length overflow" );
+						}
+						tl += l;
+					}
+					var sb = new StringBuilder( tl );
+					for( int k = n; k >= 1; --k )
+						sb.Append( Stack[top - k].V.SValue() );
+					Stack[top - n].V.SetSValue( sb.ToString() ); // create result
+				}
+				total -= n - 1; // got 'n' strings to create one new
+				Top = Stack[Top.Index - (n - 1)]; // popped 'n' strings and pushed one
+			} while( total > 1 ); // repeat until only 1 result left
+		}
+
+		/*
+		** Main operation 'ra = #rb'.
+		*/
+		internal void V_ObjLen( int ra, ref TValue rb )
+		{
+			StkId tm;
+			switch( rb.Tt )
+			{
+				case (int)LuaType.LUA_TTABLE:
+				{
+					var h = rb.HValue();
+					tm = FastTM( h.MetaTable, TMS.TM_LEN );
+					if( tm != null ) break; // metamethod? break switch to call it
+					Stack[ra].V.SetIValue( h.Length ); // else primitive len
+					return;
+				}
+				case (int)LuaType.LUA_TSTRING:
+				{
+					Stack[ra].V.SetIValue( rb.SValue().Length );
+					return;
+				}
+				default: // try metamethod
+				{
+					tm = T_GetTMByObj( ref rb, TMS.TM_LEN );
+					if( tm.V.TtIsNil() ) // no metamethod?
+						G_TypeError( ref rb, "get length of" );
+					break;
+				}
+			}
+			T_CallTMRes( ref tm.V, ref rb, ref rb, ra );
+		}
+
+		/*
+		** Integer division; return 'm // n', that is, floor(m/n).
+		** C division truncates its result (rounds towards zero).
+		** 'floor(q) == trunc(q)' when 'q >= 0' or when 'q' is integer,
+		** otherwise 'floor(q) == trunc(q) - 1'.
+		*/
+		internal static long V_Div( LuaState L, long m, long n )
+		{
+			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
+				if( n == 0 )
+					L.G_RunError( "attempt to divide by zero" );
+				return unchecked(0 - m); // n==-1; avoid overflow with 0x80000...//-1
+			}
+			else {
+				long q = m / n; // perform C division
+				if( (m ^ n) < 0 && m % n != 0 ) // 'm/n' would be negative non-integer?
+					q -= 1; // correct result for different rounding
+				return q;
+			}
+		}
+
+		/*
+		** Integer modulus; return 'm % n'. (Assume that C '%' with
+		** negative operands follows C99 behavior. See previous comment
+		** about luaV_idiv.)
+		*/
+		internal static long V_Mod( LuaState L, long m, long n )
+		{
+			if( unchecked((ulong)n + 1UL) <= 1UL ) { // special cases: -1 or 0
+				if( n == 0 )
+					L.G_RunError( "attempt to perform 'n%0'" );
+				return 0; // m % -1 == 0; avoid overflow with 0x80000...%-1
+			}
+			else {
+				long r = m % n;
+				if( r != 0 && (r ^ n) < 0 ) // 'm/n' would be non-integer negative?
+					r += n; // correct result for different rounding
+				return r;
+			}
+		}
+
+		/* number of bits in an integer */
+		private const int NBITS = 64;
+
+		/*
+		** Shift left operation. (Shift right just negates 'y'.)
+		*/
+		internal static long V_ShiftL( long x, long y )
+		{
+			if( y < 0 ) { // shift right?
+				if( y <= -NBITS ) return 0;
+				else return (long)((ulong)x >> (int)-y);
+			}
+			else { // shift left
+				if( y >= NBITS ) return 0;
+				else return x << (int)y;
+			}
+		}
+
+		internal static long V_ShiftR( long x, long y )
+		{
+			return V_ShiftL( x, unchecked(0 - y) );
+		}
+
+		// luai_numpow
+		private static double NumPow( double a, double b )
+		{
+			return (b == 2) ? a * a : Math.Pow( a, b );
+		}
+
+		/*
+		** create a new Lua closure, push it in the stack, and initialize
+		** its upvalues.
+		*/
+		private void PushClosure( LuaProto p, LuaUpvalue[] encup, int stackBase, StkId ra )
+		{
+			var ncl = new LuaLClosureValue( p );
+			ra.V.SetClLValue( ncl ); // anchor new closure in stack
+			for( int i = 0; i < p.Upvalues.Count; ++i ) // fill in its upvalues
+			{
+				if( p.Upvalues[i].InStack ) // upvalue refers to local variable?
+					ncl.Upvals[i] = F_FindUpval( Stack[stackBase + p.Upvalues[i].Index] );
+				else // get upvalue from enclosing function
+					ncl.Upvals[i] = encup[p.Upvalues[i].Index];
+			}
+		}
+
+		/*
+		** finish execution of an opcode interrupted by a yield
+		*/
+		private void V_FinishOp()
+		{
+			CallInfo ci = CI;
+			int stackBase = ci.FuncIndex + 1;
+			var code = ci.SavedPc;
+			Instruction inst = (code - 1).Value; // interrupted instruction
+			OpCode op = inst.GET_OPCODE();
+			switch( op ) // finish its execution
+			{
+				case OpCode.OP_MMBIN: case OpCode.OP_MMBINI: case OpCode.OP_MMBINK:
+				{
+					Top = Stack[Top.Index - 1];
+					Stack[stackBase + (code - 2).Value.GETARG_A()].V.SetObj( ref Top.V );
+					break;
+				}
+				case OpCode.OP_UNM: case OpCode.OP_BNOT: case OpCode.OP_LEN:
+				case OpCode.OP_GETTABUP: case OpCode.OP_GETTABLE: case OpCode.OP_GETI:
+				case OpCode.OP_GETFIELD: case OpCode.OP_SELF:
+				{
+					Top = Stack[Top.Index - 1];
+					Stack[stackBase + inst.GETARG_A()].V.SetObj( ref Top.V );
+					break;
+				}
+				case OpCode.OP_LT: case OpCode.OP_LE:
+				case OpCode.OP_LTI: case OpCode.OP_LEI:
+				case OpCode.OP_GTI: case OpCode.OP_GEI:
+				case OpCode.OP_EQ: // note that 'OP_EQI'/'OP_EQK' cannot yield
+				{
+					bool res = !IsFalse( ref Stack[Top.Index - 1].V );
+					Top = Stack[Top.Index - 1];
+					if( (ci.CallStatus & CallStatus.CIST_LEQ) != 0 ) // "<=" using "<" instead?
+					{
+						ci.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
+						res = !res; // negate result
+					}
+					Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_JMP );
+					if( (res ? 1 : 0) != inst.GETARG_k() ) // condition failed?
+						ci.SavedPc.Index++; // skip jump instruction
+					break;
+				}
+				case OpCode.OP_CONCAT:
+				{
+					int top = Top.Index - 1; // top when 'luaT_tryconcatTM' was called
+					int a = inst.GETARG_A(); // first element to concatenate
+					int total = top - 1 - (stackBase + a); // yet to concatenate
+					Stack[top - 2].V.SetObj( ref Stack[top].V ); // put TM result in proper position
+					Top = Stack[top - 1]; // top is one after last element (at top-2)
+					V_Concat( total ); // concat them (may yield again)
+					break;
+				}
+				case OpCode.OP_CLOSE: // yielded closing variables
+				{
+					ci.SavedPc.Index--; // repeat instruction to close other vars.
+					break;
+				}
+				case OpCode.OP_RETURN: // yielded closing variables
+				{
+					int ra = stackBase + inst.GETARG_A();
+					/* adjust top to signal correct number of returns, in case the
+					   return is "up to top" ('isIT') */
+					Top = Stack[ra + ci.NRes];
+					/* repeat instruction to close other vars. and complete the return */
+					ci.SavedPc.Index--;
+					break;
+				}
+				default:
+				{
+					/* only these other opcodes can yield */
+					Utl.Assert( op == OpCode.OP_TFORCALL || op == OpCode.OP_CALL ||
+						op == OpCode.OP_TAILCALL || op == OpCode.OP_SETTABUP || op == OpCode.OP_SETTABLE ||
+						op == OpCode.OP_SETI || op == OpCode.OP_SETFIELD );
+					break;
+				}
+			}
+		}
+
+		/*
+		** {==================================================================
+		** Function 'luaV_execute': main interpreter loop
+		** ===================================================================
+		*/
+
+		private void V_Execute( CallInfo ci )
+		{
+			LuaLClosureValue cl;
+			List<StkId> k;
+			List<Instruction> code;
+			int stackBase;
+			bool trap;
+
+		startfunc:
+			trap = HookMask != 0;
+		returning: // trap already set
+			cl = Stack[ci.FuncIndex].V.ClLValue();
+			k = cl.Proto.K;
+			code = cl.Proto.Code;
+			if( trap )
+				trap = G_TraceCall();
+			stackBase = ci.FuncIndex + 1;
+
+			/* main loop of interpreter */
+			for( ;; )
+			{
+				if( trap ) // stack reallocation or hooks?
+				{
+					trap = G_TraceExec( ci ); // handle hooks
+					stackBase = ci.FuncIndex + 1; // correct stack
+				}
+				Instruction i = code[ci.SavedPc.Index++];
+				OpCode opcode = i.GET_OPCODE();
+				// the A field of an 'isJ' instruction is part of its jump
+				StkId ra = (opcode != OpCode.OP_JMP) ? Stack[stackBase + i.GETARG_A()] : null;
+
+				switch( opcode )
+				{
+					case OpCode.OP_MOVE:
+					{
+						ra.V.SetObj( ref Stack[stackBase + i.GETARG_B()].V );
+						break;
+					}
+					case OpCode.OP_LOADI:
+					{
+						ra.V.SetIValue( i.GETARG_sBx() );
+						break;
+					}
+					case OpCode.OP_LOADF:
+					{
+						ra.V.SetFltValue( (double)i.GETARG_sBx() );
+						break;
+					}
+					case OpCode.OP_LOADK:
+					{
+						ra.V.SetObj( ref k[i.GETARG_Bx()].V );
+						break;
+					}
+					case OpCode.OP_LOADKX:
+					{
+						ra.V.SetObj( ref k[code[ci.SavedPc.Index].GETARG_Ax()].V );
+						ci.SavedPc.Index++;
+						break;
+					}
+					case OpCode.OP_LOADFALSE:
+					{
+						ra.V.SetBValue( false );
+						break;
+					}
+					case OpCode.OP_LFALSESKIP:
+					{
+						ra.V.SetBValue( false );
+						ci.SavedPc.Index++; // skip next instruction
+						break;
+					}
+					case OpCode.OP_LOADTRUE:
+					{
+						ra.V.SetBValue( true );
+						break;
+					}
+					case OpCode.OP_LOADNIL:
+					{
+						int b = i.GETARG_B();
+						int r = ra.Index;
+						do {
+							Stack[r++].V.SetNilValue();
+						} while( b-- > 0 );
+						break;
+					}
+					case OpCode.OP_GETUPVAL:
+					{
+						ra.V.SetObj( ref cl.Upvals[i.GETARG_B()].V.V );
+						break;
+					}
+					case OpCode.OP_SETUPVAL:
+					{
+						var uv = cl.Upvals[i.GETARG_B()];
+						uv.V.V.SetObj( ref ra.V );
+						break;
+					}
+					case OpCode.OP_GETTABUP:
+					{
+						StkId upval = cl.Upvals[i.GETARG_B()].V;
+						StkId rc = k[i.GETARG_C()]; // key must be a short string
+						if( upval.V.TtIsTable() )
+						{
+							var slot = upval.V.HValue().GetStr( rc.V.SValue() );
+							if( !slot.V.TtIsNil() ) {
+								ra.V.SetObj( ref slot.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishGet( ref upval.V, ref rc.V, ra.Index, upval.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_GETTABLE:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						StkId rc = Stack[stackBase + i.GETARG_C()];
+						if( rb.V.TtIsTable() )
+						{
+							var slot = FastGet( rb.V.HValue(), ref rc.V );
+							if( !slot.V.TtIsNil() ) {
+								ra.V.SetObj( ref slot.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishGet( ref rb.V, ref rc.V, ra.Index, rb.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_GETI:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						int c = i.GETARG_C();
+						if( rb.V.TtIsTable() )
+						{
+							var slot = rb.V.HValue().GetInt( c );
+							if( !slot.V.TtIsNil() ) {
+								ra.V.SetObj( ref slot.V );
+								break;
+							}
+						}
+						var key = new TValue();
+						key.SetIValue( c );
+						Top = Stack[ci.TopIndex];
+						V_FinishGet( ref rb.V, ref key, ra.Index, rb.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_GETFIELD:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						StkId rc = k[i.GETARG_C()]; // key must be a short string
+						if( rb.V.TtIsTable() )
+						{
+							var slot = rb.V.HValue().GetStr( rc.V.SValue() );
+							if( !slot.V.TtIsNil() ) {
+								ra.V.SetObj( ref slot.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishGet( ref rb.V, ref rc.V, ra.Index, rb.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_SETTABUP:
+					{
+						StkId upval = cl.Upvals[i.GETARG_A()].V;
+						StkId rb = k[i.GETARG_B()]; // key must be a short string
+						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()];
+						if( upval.V.TtIsTable() )
+						{
+							var slot = upval.V.HValue().GetStr( rb.V.SValue() );
+							if( !slot.V.TtIsNil() ) {
+								slot.V.SetObj( ref rc.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishSet( ref upval.V, ref rb.V, ref rc.V, upval.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_SETTABLE:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()]; // key (table is in 'ra')
+						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()]; // value
+						if( ra.V.TtIsTable() )
+						{
+							var slot = FastGet( ra.V.HValue(), ref rb.V );
+							if( !slot.V.TtIsNil() ) {
+								slot.V.SetObj( ref rc.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishSet( ref ra.V, ref rb.V, ref rc.V, ra.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_SETI:
+					{
+						int c = i.GETARG_B();
+						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()];
+						if( ra.V.TtIsTable() )
+						{
+							var slot = ra.V.HValue().GetInt( c );
+							if( !slot.V.TtIsNil() ) {
+								slot.V.SetObj( ref rc.V );
+								break;
+							}
+						}
+						var key = new TValue();
+						key.SetIValue( c );
+						Top = Stack[ci.TopIndex];
+						V_FinishSet( ref ra.V, ref key, ref rc.V, ra.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_SETFIELD:
+					{
+						StkId rb = k[i.GETARG_B()]; // key must be a short string
+						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()];
+						if( ra.V.TtIsTable() )
+						{
+							var slot = ra.V.HValue().GetStr( rb.V.SValue() );
+							if( !slot.V.TtIsNil() ) {
+								slot.V.SetObj( ref rc.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishSet( ref ra.V, ref rb.V, ref rc.V, ra.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_NEWTABLE:
+					{
+						int b = i.GETARG_B(); // log2(hash size) + 1
+						int c = i.GETARG_C(); // array size
+						if( b > 0 )
+							b = 1 << (b - 1); // size is 2^(b - 1)
+						Utl.Assert( (!i.TESTARG_k()) == (code[ci.SavedPc.Index].GETARG_Ax() == 0) );
+						if( i.TESTARG_k() ) // non-zero extra argument?
+							c += code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_C + 1); // add it to size
+						ci.SavedPc.Index++; // skip extra argument
+						Top = Stack[ra.Index + 1]; // correct top in case of emergency GC
+						var t = new LuaTable( this );
+						ra.V.SetHValue( t );
+						if( b != 0 || c != 0 )
+							t.Resize( c, b );
+						break;
+					}
+					case OpCode.OP_SELF:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()];
+						Stack[ra.Index + 1].V.SetObj( ref rb.V );
+						if( rb.V.TtIsTable() )
+						{
+							var slot = rb.V.HValue().GetStr( rc.V.SValue() ); // key must be a string
+							if( !slot.V.TtIsNil() ) {
+								ra.V.SetObj( ref slot.V );
+								break;
+							}
+						}
+						Top = Stack[ci.TopIndex];
+						V_FinishGet( ref rb.V, ref rc.V, ra.Index, rb.V.TtIsTable() );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_ADDI:
+					{
+						StkId v1 = Stack[stackBase + i.GETARG_B()];
+						int imm = i.GETARG_sC();
+						if( v1.V.TtIsInteger() ) {
+							ci.SavedPc.Index++; ra.V.SetIValue( unchecked(v1.V.IValue() + imm) );
+						}
+						else if( v1.V.TtIsFloat() ) {
+							ci.SavedPc.Index++; ra.V.SetFltValue( v1.V.FltValue + (double)imm );
+						}
+						break;
+					}
+					case OpCode.OP_ADDK: case OpCode.OP_SUBK: case OpCode.OP_MULK:
+					case OpCode.OP_MODK: case OpCode.OP_IDIVK:
+					{
+						if( ArithOp( ci, i.GET_OPCODE() - OpCode.OP_ADDK + OpCode.OP_ADD, ra,
+								ref Stack[stackBase + i.GETARG_B()].V, ref k[i.GETARG_C()].V ) )
+							ci.SavedPc.Index++;
+						break;
+					}
+					case OpCode.OP_POWK: case OpCode.OP_DIVK:
+					{
+						double n1, n2;
+						if( ToNumberNS( ref Stack[stackBase + i.GETARG_B()].V, out n1 ) &&
+							ToNumberNS( ref k[i.GETARG_C()].V, out n2 ) )
+						{
+							ci.SavedPc.Index++;
+							ra.V.SetFltValue( i.GET_OPCODE() == OpCode.OP_POWK ? NumPow( n1, n2 ) : n1 / n2 );
+						}
+						break;
+					}
+					case OpCode.OP_BANDK: case OpCode.OP_BORK: case OpCode.OP_BXORK:
+					{
+						long i1;
+						long i2 = k[i.GETARG_C()].V.IValue();
+						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out i1, F2Imod.F2Ieq ) )
+						{
+							ci.SavedPc.Index++;
+							switch( i.GET_OPCODE() )
+							{
+								case OpCode.OP_BANDK: ra.V.SetIValue( i1 & i2 ); break;
+								case OpCode.OP_BORK: ra.V.SetIValue( i1 | i2 ); break;
+								default: ra.V.SetIValue( i1 ^ i2 ); break;
+							}
+						}
+						break;
+					}
+					case OpCode.OP_SHRI:
+					{
+						int ic = i.GETARG_sC();
+						long ib;
+						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out ib, F2Imod.F2Ieq ) ) {
+							ci.SavedPc.Index++; ra.V.SetIValue( V_ShiftL( ib, -ic ) );
+						}
+						break;
+					}
+					case OpCode.OP_SHLI:
+					{
+						int ic = i.GETARG_sC();
+						long ib;
+						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out ib, F2Imod.F2Ieq ) ) {
+							ci.SavedPc.Index++; ra.V.SetIValue( V_ShiftL( ic, ib ) );
+						}
+						break;
+					}
+					case OpCode.OP_ADD: case OpCode.OP_SUB: case OpCode.OP_MUL:
+					case OpCode.OP_MOD: case OpCode.OP_IDIV:
+					{
+						if( ArithOp( ci, i.GET_OPCODE(), ra,
+								ref Stack[stackBase + i.GETARG_B()].V, ref Stack[stackBase + i.GETARG_C()].V ) )
+							ci.SavedPc.Index++;
+						break;
+					}
+					case OpCode.OP_POW: case OpCode.OP_DIV:
+					{
+						double n1, n2;
+						if( ToNumberNS( ref Stack[stackBase + i.GETARG_B()].V, out n1 ) &&
+							ToNumberNS( ref Stack[stackBase + i.GETARG_C()].V, out n2 ) )
+						{
+							ci.SavedPc.Index++;
+							ra.V.SetFltValue( i.GET_OPCODE() == OpCode.OP_POW ? NumPow( n1, n2 ) : n1 / n2 );
+						}
+						break;
+					}
+					case OpCode.OP_BAND: case OpCode.OP_BOR: case OpCode.OP_BXOR:
+					case OpCode.OP_SHL: case OpCode.OP_SHR:
+					{
+						long i1, i2;
+						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out i1, F2Imod.F2Ieq ) &&
+							V_ToIntegerNS( ref Stack[stackBase + i.GETARG_C()].V, out i2, F2Imod.F2Ieq ) )
+						{
+							ci.SavedPc.Index++;
+							switch( i.GET_OPCODE() )
+							{
+								case OpCode.OP_BAND: ra.V.SetIValue( i1 & i2 ); break;
+								case OpCode.OP_BOR: ra.V.SetIValue( i1 | i2 ); break;
+								case OpCode.OP_BXOR: ra.V.SetIValue( i1 ^ i2 ); break;
+								case OpCode.OP_SHL: ra.V.SetIValue( V_ShiftL( i1, i2 ) ); break;
+								default: ra.V.SetIValue( V_ShiftR( i1, i2 ) ); break;
+							}
+						}
+						break;
+					}
+					case OpCode.OP_MMBIN:
+					{
+						Instruction pi = code[ci.SavedPc.Index - 2]; // original arith. expression
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						TMS tm = (TMS)i.GETARG_C();
+						int result = stackBase + pi.GETARG_A();
+						Utl.Assert( OpCode.OP_ADD <= pi.GET_OPCODE() && pi.GET_OPCODE() <= OpCode.OP_SHR );
+						Top = Stack[ci.TopIndex];
+						T_TryBinTM( ref ra.V, ref rb.V, result, tm );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_MMBINI:
+					{
+						Instruction pi = code[ci.SavedPc.Index - 2]; // original arith. expression
+						int imm = i.GETARG_sB();
+						TMS tm = (TMS)i.GETARG_C();
+						bool flip = i.GETARG_k() != 0;
+						int result = stackBase + pi.GETARG_A();
+						Top = Stack[ci.TopIndex];
+						T_TryBiniTM( ref ra.V, imm, flip, result, tm );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_MMBINK:
+					{
+						Instruction pi = code[ci.SavedPc.Index - 2]; // original arith. expression
+						StkId imm = k[i.GETARG_B()];
+						TMS tm = (TMS)i.GETARG_C();
+						bool flip = i.GETARG_k() != 0;
+						int result = stackBase + pi.GETARG_A();
+						Top = Stack[ci.TopIndex];
+						T_TryBinAssocTM( ref ra.V, ref imm.V, flip, result, tm );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_UNM:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						double nb;
+						if( rb.V.TtIsInteger() )
+							ra.V.SetIValue( unchecked(0 - rb.V.IValue()) );
+						else if( ToNumberNS( ref rb.V, out nb ) )
+							ra.V.SetFltValue( -nb );
+						else {
+							Top = Stack[ci.TopIndex];
+							T_TryBinTM( ref rb.V, ref rb.V, ra.Index, TMS.TM_UNM );
+							trap = ci.Trap;
+						}
+						break;
+					}
+					case OpCode.OP_BNOT:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						long ib;
+						if( V_ToIntegerNS( ref rb.V, out ib, F2Imod.F2Ieq ) )
+							ra.V.SetIValue( ~ib );
+						else {
+							Top = Stack[ci.TopIndex];
+							T_TryBinTM( ref rb.V, ref rb.V, ra.Index, TMS.TM_BNOT );
+							trap = ci.Trap;
+						}
+						break;
+					}
+					case OpCode.OP_NOT:
+					{
+						ra.V.SetBValue( IsFalse( ref Stack[stackBase + i.GETARG_B()].V ) );
+						break;
+					}
+					case OpCode.OP_LEN:
+					{
+						Top = Stack[ci.TopIndex];
+						V_ObjLen( ra.Index, ref Stack[stackBase + i.GETARG_B()].V );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_CONCAT:
+					{
+						int n = i.GETARG_B(); // number of elements to concatenate
+						Top = Stack[ra.Index + n]; // mark the end of concat operands
+						V_Concat( n );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_CLOSE:
+					{
+						Top = Stack[ci.TopIndex];
+						F_Close( ra.Index, ThreadStatus.LUA_OK, true );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_TBC:
+					{
+						/* create new to-be-closed upvalue */
+						Top = Stack[ci.TopIndex];
+						F_NewTbcUpval( ra );
+						break;
+					}
+					case OpCode.OP_JMP:
+					{
+						ci.SavedPc.Index += i.GETARG_sJ();
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_EQ:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						Top = Stack[ci.TopIndex];
+						bool cond = V_EqualObj( ref ra.V, ref rb.V, false );
+						trap = ci.Trap;
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_LT:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						bool cond;
+						if( ra.V.TtIsInteger() && rb.V.TtIsInteger() )
+							cond = ra.V.IValue() < rb.V.IValue();
+						else if( ra.V.TtIsNumber() && rb.V.TtIsNumber() )
+							cond = LTNum( ref ra.V, ref rb.V );
+						else {
+							Top = Stack[ci.TopIndex];
+							cond = LessThanOthers( ref ra.V, ref rb.V );
+							trap = ci.Trap;
+						}
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_LE:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						bool cond;
+						if( ra.V.TtIsInteger() && rb.V.TtIsInteger() )
+							cond = ra.V.IValue() <= rb.V.IValue();
+						else if( ra.V.TtIsNumber() && rb.V.TtIsNumber() )
+							cond = LENum( ref ra.V, ref rb.V );
+						else {
+							Top = Stack[ci.TopIndex];
+							cond = LessEqualOthers( ref ra.V, ref rb.V );
+							trap = ci.Trap;
+						}
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_EQK:
+					{
+						/* basic types do not use '__eq'; we can use raw equality */
+						bool cond = V_RawEqualObj( ref ra.V, ref k[i.GETARG_B()].V );
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_EQI:
+					{
+						bool cond;
+						int im = i.GETARG_sB();
+						if( ra.V.TtIsInteger() )
+							cond = ra.V.IValue() == im;
+						else if( ra.V.TtIsFloat() )
+							cond = ra.V.FltValue == (double)im;
+						else
+							cond = false; // other types cannot be equal to a number
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_LTI: case OpCode.OP_LEI:
+					case OpCode.OP_GTI: case OpCode.OP_GEI:
+					{
+						bool cond;
+						int im = i.GETARG_sB();
+						OpCode op = i.GET_OPCODE();
+						if( ra.V.TtIsInteger() )
+							cond = OrderI( op, ra.V.IValue(), im );
+						else if( ra.V.TtIsFloat() )
+							cond = OrderF( op, ra.V.FltValue, (double)im );
+						else {
+							bool isf = i.GETARG_C() != 0;
+							bool inv = op == OpCode.OP_GTI || op == OpCode.OP_GEI;
+							TMS tm = (op == OpCode.OP_LTI || op == OpCode.OP_GTI) ? TMS.TM_LT : TMS.TM_LE;
+							Top = Stack[ci.TopIndex];
+							cond = T_CallOrderiTM( ref ra.V, im, inv, isf, tm );
+							trap = ci.Trap;
+						}
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_TEST:
+					{
+						bool cond = !IsFalse( ref ra.V );
+						DoCondJump( ci, code, i, cond, ref trap );
+						break;
+					}
+					case OpCode.OP_TESTSET:
+					{
+						StkId rb = Stack[stackBase + i.GETARG_B()];
+						if( IsFalse( ref rb.V ) == (i.GETARG_k() != 0) )
+							ci.SavedPc.Index++;
+						else {
+							ra.V.SetObj( ref rb.V );
+							DoNextJump( ci, code, ref trap );
+						}
+						break;
+					}
+					case OpCode.OP_CALL:
+					{
+						CallInfo newci;
+						int b = i.GETARG_B();
+						int nresults = i.GETARG_C() - 1;
+						if( b != 0 ) // fixed number of arguments?
+							Top = Stack[ra.Index + b]; // top signals number of arguments
+						/* else previous instruction set top */
+						if( (newci = D_PreCall( ra, nresults )) == null )
+							trap = ci.Trap; // C call; nothing else to be done
+						else { // Lua call: run function in this same C frame
+							ci = newci;
+							goto startfunc;
+						}
+						break;
+					}
+					case OpCode.OP_TAILCALL:
+					{
+						int b = i.GETARG_B(); // number of arguments + 1 (function)
+						int n; // number of results when calling a C function
+						int nparams1 = i.GETARG_C();
+						/* delta is virtual 'func' - real 'func' (vararg functions) */
+						int delta = (nparams1 != 0) ? ci.NExtraArgs + nparams1 : 0;
+						if( b != 0 )
+							Top = Stack[ra.Index + b];
+						else // previous instruction set top
+							b = Top.Index - ra.Index;
+						if( i.TESTARG_k() )
+						{
+							F_CloseUpval( stackBase ); // close upvalues from current call
+							Utl.Assert( TbcList.Count == 0 || TbcList[TbcList.Count - 1] < stackBase ); // no pending tbc variables
+							Utl.Assert( stackBase == ci.FuncIndex + 1 );
+						}
+						if( (n = D_PreTailCall( ci, ra, b, delta )) < 0 ) // Lua function?
+							goto startfunc; // execute the callee
+						else // C function?
+						{
+							ci.FuncIndex -= delta; // restore 'func' (if vararg)
+							D_PosCall( ci, n ); // finish caller
+							trap = ci.Trap; // 'luaD_poscall' can change hooks
+							goto ret; // caller returns after the tail call
+						}
+					}
+					case OpCode.OP_RETURN:
+					{
+						int n = i.GETARG_B() - 1; // number of results
+						int nparams1 = i.GETARG_C();
+						if( n < 0 ) // not fixed?
+							n = Top.Index - ra.Index; // get what is available
+						if( i.TESTARG_k() ) // may there be open upvalues?
+						{
+							ci.NRes = n; // save number of returns
+							if( Top.Index < ci.TopIndex )
+								Top = Stack[ci.TopIndex];
+							F_Close( stackBase, CLOSEKTOP, true );
+							trap = ci.Trap;
+						}
+						if( nparams1 != 0 ) // vararg function?
+							ci.FuncIndex -= ci.NExtraArgs + nparams1;
+						Top = Stack[ra.Index + n]; // set call for 'luaD_poscall'
+						D_PosCall( ci, n );
+						trap = ci.Trap; // 'luaD_poscall' can change hooks
+						goto ret;
+					}
+					case OpCode.OP_RETURN0:
+					{
+						if( HookMask != 0 )
+						{
+							Top = ra;
+							D_PosCall( ci, 0 ); // no hurry...
+							trap = true;
+						}
+						else // do the 'poscall' here
+						{
+							CI = ci.Previous; // back to caller
+							Top = Stack[stackBase - 1];
+							for( int nres = ci.NumResults; nres > 0; nres-- )
+								StkId.inc( ref Top ).V.SetNilValue(); // all results are nil
+						}
+						goto ret;
+					}
+					case OpCode.OP_RETURN1:
+					{
+						if( HookMask != 0 )
+						{
+							Top = Stack[ra.Index + 1];
+							D_PosCall( ci, 1 ); // no hurry...
+							trap = true;
+						}
+						else // do the 'poscall' here
+						{
+							int nres = ci.NumResults;
+							CI = ci.Previous; // back to caller
+							if( nres == 0 )
+								Top = Stack[stackBase - 1]; // asked for no results
+							else
+							{
+								Stack[stackBase - 1].V.SetObj( ref ra.V ); // at least this result
+								Top = Stack[stackBase];
+								for( ; nres > 1; nres-- )
+									StkId.inc( ref Top ).V.SetNilValue(); // complete missing results
+							}
+						}
+						goto ret;
+					}
+					case OpCode.OP_FORLOOP:
+					{
+						if( Stack[ra.Index + 2].V.TtIsInteger() ) // integer loop?
+						{
+							ulong count = unchecked((ulong)Stack[ra.Index + 1].V.IValue());
+							if( count > 0 ) // still more iterations?
+							{
+								long step = Stack[ra.Index + 2].V.IValue();
+								long idx = ra.V.IValue(); // internal index
+								Stack[ra.Index + 1].V.SetIValue( unchecked((long)(count - 1)) ); // update counter
+								idx = unchecked(idx + step); // add step to index
+								ra.V.SetIValue( idx ); // update internal index
+								Stack[ra.Index + 3].V.SetIValue( idx ); // and control variable
+								ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
+							}
+						}
+						else if( FloatForLoop( ra.Index ) ) // float loop
+							ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
+						trap = ci.Trap; // allows a signal to break the loop
+						break;
+					}
+					case OpCode.OP_FORPREP:
+					{
+						Top = Stack[ci.TopIndex]; // in case of errors
+						if( ForPrep( ra.Index ) )
+							ci.SavedPc.Index += i.GETARG_Bx() + 1; // skip the loop
+						break;
+					}
+					case OpCode.OP_TFORPREP:
+					{
+						/* create to-be-closed upvalue (if needed) */
+						Top = Stack[ci.TopIndex];
+						F_NewTbcUpval( Stack[ra.Index + 3] );
+						ci.SavedPc.Index += i.GETARG_Bx();
+						i = code[ci.SavedPc.Index++]; // go to next instruction
+						Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORCALL && ra.Index == stackBase + i.GETARG_A() );
+						TForCall( ci, code, i, ra );
+						break;
+					}
+					case OpCode.OP_TFORCALL:
+					{
+						TForCall( ci, code, i, ra );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_TFORLOOP:
+					{
+						if( !Stack[ra.Index + 4].V.TtIsNil() ) // continue loop?
+						{
+							Stack[ra.Index + 2].V.SetObj( ref Stack[ra.Index + 4].V ); // save control variable
+							ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
+						}
+						break;
+					}
+					case OpCode.OP_SETLIST:
+					{
+						int n = i.GETARG_B();
+						long last = i.GETARG_C();
+						var h = ra.V.HValue();
+						if( n == 0 )
+							n = Top.Index - ra.Index - 1; // get up to the top
+						else
+							Top = Stack[ci.TopIndex]; // correct top in case of emergency GC
+						last += n;
+						if( i.TESTARG_k() )
+						{
+							last += (long)code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_C + 1);
+							ci.SavedPc.Index++;
+						}
+						if( last > h.ArraySize ) // needs more space?
+							h.ResizeArray( (int)last ); // preallocate it at once
+						for( ; n > 0; n-- )
+						{
+							h.SetInt( last, ref Stack[ra.Index + n].V );
+							last--;
+						}
+						break;
+					}
+					case OpCode.OP_CLOSURE:
+					{
+						LuaProto p = cl.Proto.P[i.GETARG_Bx()];
+						Top = Stack[ci.TopIndex];
+						PushClosure( p, cl.Upvals, stackBase, ra );
+						break;
+					}
+					case OpCode.OP_VARARG:
+					{
+						int n = i.GETARG_C() - 1; // required results
+						Top = Stack[ci.TopIndex];
+						T_GetVarargs( ci, ra.Index, n );
+						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_VARARGPREP:
+					{
+						T_AdjustVarargs( i.GETARG_A(), ci, cl.Proto );
+						trap = ci.Trap;
+						if( trap ) // previous "Protect" updated trap
+						{
+							D_HookCall( ci );
+							OldPc = 1; // next opcode will be seen as a "new" line
+						}
+						stackBase = ci.FuncIndex + 1; // function has new base after adjustment
+						break;
+					}
+					case OpCode.OP_EXTRAARG:
+					{
+						Utl.Assert( false );
+						break;
+					}
+				}
+				continue;
+
+			ret: // return from a Lua function
+				if( (ci.CallStatus & CallStatus.CIST_FRESH) != 0 )
+					return; // end this frame
+				else
+				{
+					ci = ci.Previous;
+					goto returning; // continue running caller in this frame
+				}
+			}
+		}
+
+		// The arithmetic operations over integers and floats: false when an
+		// operand is not a number, for the next OP_MMBIN to do
+		private bool ArithOp( CallInfo ci, OpCode op, StkId ra, ref TValue v1, ref TValue v2 )
+		{
+			if( v1.TtIsInteger() && v2.TtIsInteger() )
+			{
+				long i1 = v1.IValue(); long i2 = v2.IValue();
+				switch( op )
+				{
+					case OpCode.OP_ADD: ra.V.SetIValue( unchecked(i1 + i2) ); break;
+					case OpCode.OP_SUB: ra.V.SetIValue( unchecked(i1 - i2) ); break;
+					case OpCode.OP_MUL: ra.V.SetIValue( unchecked(i1 * i2) ); break;
+					case OpCode.OP_MOD:
+						Top = Stack[ci.TopIndex]; // in case of division by 0
+						ra.V.SetIValue( V_Mod( this, i1, i2 ) );
+						break;
+					default:
+						Top = Stack[ci.TopIndex]; // in case of division by 0
+						ra.V.SetIValue( V_Div( this, i1, i2 ) );
+						break;
+				}
+				return true;
+			}
+			double n1, n2;
+			if( ToNumberNS( ref v1, out n1 ) && ToNumberNS( ref v2, out n2 ) )
+			{
+				switch( op )
+				{
+					case OpCode.OP_ADD: ra.V.SetFltValue( n1 + n2 ); break;
+					case OpCode.OP_SUB: ra.V.SetFltValue( n1 - n2 ); break;
+					case OpCode.OP_MUL: ra.V.SetFltValue( n1 * n2 ); break;
+					case OpCode.OP_MOD: ra.V.SetFltValue( NumMod( n1, n2 ) ); break;
+					default: ra.V.SetFltValue( Math.Floor( n1 / n2 ) ); break;
+				}
+				return true;
+			}
+			return false;
+		}
+
+		private static bool OrderI( OpCode op, long a, long b )
+		{
+			switch( op )
+			{
+				case OpCode.OP_LTI: return a < b;
+				case OpCode.OP_LEI: return a <= b;
+				case OpCode.OP_GTI: return a > b;
+				default: return a >= b;
+			}
+		}
+
+		private static bool OrderF( OpCode op, double a, double b )
+		{
+			switch( op )
+			{
+				case OpCode.OP_LTI: return a < b;
+				case OpCode.OP_LEI: return a <= b;
+				case OpCode.OP_GTI: return a > b;
+				default: return a >= b;
+			}
+		}
+
+		/*
+		** do a conditional jump: skip next instruction if 'cond' is not what
+		** was expected (parameter 'k'), else do next instruction, which must
+		** be a jump.
+		*/
+		private static void DoCondJump( CallInfo ci, List<Instruction> code, Instruction i,
+			bool cond, ref bool trap )
+		{
+			if( (cond ? 1 : 0) != i.GETARG_k() )
+				ci.SavedPc.Index++;
+			else
+				DoNextJump( ci, code, ref trap );
+		}
+
+		/* for test instructions, execute the jump instruction that follows it */
+		private static void DoNextJump( CallInfo ci, List<Instruction> code, ref bool trap )
+		{
+			Instruction ni = code[ci.SavedPc.Index];
+			ci.SavedPc.Index += ni.GETARG_sJ() + 1;
+			trap = ci.Trap;
+		}
+
+		// OP_TFORCALL, and the OP_TFORLOOP that follows it
+		private void TForCall( CallInfo ci, List<Instruction> code, Instruction i, StkId ra )
+		{
+			/* 'ra' has the iterator function, 'ra + 1' has the state,
+			   'ra + 2' has the control variable, and 'ra + 3' has the
+			   to-be-closed variable. The call will use the stack after
+			   these values (starting at 'ra + 4')
+			*/
+			/* push function, state, and control variable */
+			int r = ra.Index;
+			Stack[r + 4].V.SetObj( ref Stack[r].V );
+			Stack[r + 5].V.SetObj( ref Stack[r + 1].V );
+			Stack[r + 6].V.SetObj( ref Stack[r + 2].V );
+			Top = Stack[r + 4 + 3];
+			D_Call( Stack[r + 4], i.GETARG_C() ); // do the call
+			i = code[ci.SavedPc.Index++]; // go to next instruction
+			Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORLOOP && r == ci.FuncIndex + 1 + i.GETARG_A() );
+			/* OP_TFORLOOP */
+			if( !Stack[r + 4].V.TtIsNil() ) // continue loop?
+			{
+				Stack[r + 2].V.SetObj( ref Stack[r + 4].V ); // save control variable
+				ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
+			}
 		}
 
 	}
 
 }
-

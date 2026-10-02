@@ -6,7 +6,7 @@ using System.IO;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// A Lua 5.3 interpreter: a state with the standard libraries open, which
+/// A Lua 5.4 interpreter: a state with the standard libraries open, which
 /// runs chunks, files and an interactive prompt, as the reference
 /// <c>lua</c> does.
 /// </summary>
@@ -306,16 +306,19 @@ public sealed class LuaInterpreter : IDisposable
         State.Remove(function);
         if (status != ThreadStatus.LUA_OK)
         {
-            // The handler ran for a Lua error, and left the traceback; a .NET
-            // exception, which became an error, has only its message
+            // The handler ran for a Lua error, and left its message and the
+            // traceback; a .NET exception, which became an error, has only
+            // its message (and the handler may have run for an error a
+            // 'load' returned since)
             string error = State.ToString(-1) ?? "(error object is not a string)";
             State.SetTop(top);
-            if (_errorMessage is null)
+            if (_errorMessage is null || !error.StartsWith(_errorMessage + "\n", StringComparison.Ordinal))
             {
                 throw new LuaException(LuaText.Decode(error));
             }
 
-            throw new LuaException(LuaText.Decode(_errorMessage), LuaText.Decode(error));
+            throw new LuaException(LuaText.Decode(_errorMessage),
+                LuaText.Decode(error.Substring(_errorMessage.Length + 1)));
         }
 
         if (!keepResults)
@@ -330,7 +333,11 @@ public sealed class LuaInterpreter : IDisposable
         _host.CloseFiles();
     }
 
-    /// <summary>Remembers the error's message, and returns the traceback of where it was raised in its place.</summary>
+    /// <summary>
+    /// Remembers the error's message, and returns it with the traceback of
+    /// where it was raised, as the message handler of the reference lua does
+    /// (a 'load' whose reader function fails returns what it gives).
+    /// </summary>
     private int MessageHandler(ILuaState lua)
     {
         string? message = lua.ToString(1);
@@ -343,7 +350,7 @@ public sealed class LuaInterpreter : IDisposable
         }
 
         _errorMessage = message;
-        lua.L_Traceback(lua, null, 1);
+        lua.L_Traceback(lua, message, 1);
         return 1;
     }
 

@@ -3,254 +3,38 @@
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
 
-using NotImplementedException = System.NotImplementedException;
+using System.Collections.Generic;
 
 namespace Cosmos.Executable.Lua
 {
-	using InstructionPtr = Pointer<Instruction>;
-	using Math = System.Math;
-	using Exception = System.Exception;
-
-	internal struct Instruction
-	{
-		public uint Value;
-
-		public Instruction( uint val )
-		{
-			Value = val;
-		}
-
-		public static explicit operator Instruction( uint val )
-		{
-			return new Instruction(val);
-		}
-
-		public static explicit operator uint( Instruction i )
-		{
-			return i.Value;
-		}
-
-		public override string ToString()
-		{
-			var op   = GET_OPCODE();
-			var a    = GETARG_A();
-			var b    = GETARG_B();
-			var c    = GETARG_C();
-			var ax   = GETARG_Ax();
-			var bx   = GETARG_Bx();
-			var sbx  = GETARG_sBx();
-			var mode = OpCodeInfo.GetMode( op );
-			switch( mode.OpMode )
-			{
-				case OpMode.iABC:
-				{
-					string ret = string.Format( "{0,-9} {1}"
-						, op
-						, a );
-					if( mode.BMode != OpArgMask.OpArgN )
-						ret += " " + (ISK(b) ? MYK(INDEXK(b)) : b);
-					if( mode.CMode != OpArgMask.OpArgN )
-						ret += " " + (ISK(c) ? MYK(INDEXK(c)) : c);
-					return ret;
-				}
-				case OpMode.iABx:
-				{
-					string ret = string.Format( "{0,-9} {1}"
-						, op
-						, a );
-					if( mode.BMode == OpArgMask.OpArgK )
-						ret += " " + MYK(bx);
-					else if( mode.BMode == OpArgMask.OpArgU )
-						ret += " " + bx;
-					return ret;
-				}
-				case OpMode.iAsBx:
-				{
-					return string.Format( "{0,-9} {1} {2}"
-						, op
-						, a
-						, sbx );
-				}
-				case OpMode.iAx:
-				{
-					return string.Format( "{0,-9} {1}"
-						, op
-						, MYK(ax) );
-				}
-				default:
-					throw new System.NotImplementedException();
-			}
-		}
-
-		public const int SIZE_C = 9;
-		public const int SIZE_B = 9;
-		public const int SIZE_Bx = (SIZE_C + SIZE_B);
-		public const int SIZE_A = 8;
-		public const int SIZE_Ax = (SIZE_C + SIZE_B + SIZE_A);
-
-		public const int SIZE_OP = 6;
-
-		public const int POS_OP = 0;
-		public const int POS_A = (POS_OP + SIZE_OP);
-		public const int POS_C = (POS_A + SIZE_A);
-		public const int POS_B = (POS_C + SIZE_C);
-		public const int POS_Bx = POS_C;
-		public const int POS_Ax = POS_A;
-
-#pragma warning disable 0429
-		public const int MAXARG_Bx  = SIZE_Bx<LuaConf.LUAI_BITSINT
-									? ((1<<SIZE_Bx)-1)
-									: LuaLimits.MAX_INT
-									;
-		public const int MAXARG_sBx = SIZE_Bx<LuaConf.LUAI_BITSINT
-									? (MAXARG_Bx>>1)
-									: LuaLimits.MAX_INT
-									;
-#pragma warning restore 0429
-
-		public const int MAXARG_Ax = ((1<<SIZE_Ax) - 1);
-
-		public const int MAXARG_A = ((1<<SIZE_A) - 1);
-		public const int MAXARG_B = ((1<<SIZE_B) - 1);
-		public const int MAXARG_C = ((1<<SIZE_C) - 1);
-
-		public const int BITRK = (1 << (SIZE_B - 1));
-
-		public const int MAXINDEXRK = (BITRK - 1);
-
-		public static int RKASK( int x )
-		{
-			return (x | BITRK );
-		}
-
-		public static bool ISK( int x )
-		{
-			return ((x) & BITRK ) != 0;
-		}
-
-		public static int INDEXK( int r )
-		{
-			return ((int)r & ~BITRK );
-		}
-
-		public static int MYK( int x )
-		{
-			return (-1-x);
-		}
-
-		public static uint MASK1( int size, int pos )
-		{
-			return ((~((~((uint)0)) << size)) << pos);
-		}
-
-		public static uint MASK0( int size, int pos )
-		{
-			return (~MASK1(size, pos));
-		}
-
-		public OpCode GET_OPCODE()
-		{
-			return (OpCode)( (Value >> POS_OP) & MASK1(SIZE_OP, 0) );
-		}
-
-		public Instruction SET_OPCODE( OpCode op )
-		{
-			Value = (Value & MASK0(SIZE_OP, POS_OP)) |
-				((((uint)op) << POS_OP) & MASK1(SIZE_OP, POS_OP));
-			return this;
-		}
-
-		public int GETARG( int pos, int size )
-		{
-			return (int)( (Value >> pos) & MASK1(size, 0) );
-		}
-
-		public Instruction SETARG( int value, int pos, int size )
-		{
-			Value = ((Value & MASK0(size, pos)) |
-				(((uint)value << pos) & MASK1(size, pos)));
-			return this;
-		}
-
-		public int GETARG_A() { return GETARG( POS_A, SIZE_A ); }
-		public Instruction SETARG_A(int value) {
-			return SETARG( value, POS_A, SIZE_A );
-		}
-
-		public int GETARG_B() { return GETARG( POS_B, SIZE_B ); }
-		public Instruction SETARG_B(int value) {
-			return SETARG( value, POS_B, SIZE_B );
-		}
-
-		public int GETARG_C() { return GETARG( POS_C, SIZE_C ); }
-		public Instruction SETARG_C(int value) {
-			return SETARG( value, POS_C, SIZE_C );
-		}
-
-		public int GETARG_Bx() { return GETARG( POS_Bx, SIZE_Bx ); }
-		public Instruction SETARG_Bx(int value) {
-			return SETARG( value, POS_Bx, SIZE_Bx );
-		}
-
-		public int GETARG_Ax() { return GETARG( POS_Ax, SIZE_Ax ); }
-		public Instruction SETARG_Ax(int value) {
-			return SETARG( value, POS_Ax, SIZE_Ax );
-		}
-
-		public int GETARG_sBx() { return GETARG_Bx() - MAXARG_sBx; }
-		public Instruction SETARG_sBx(int value) {
-			return SETARG_Bx(value+MAXARG_sBx);
-		}
-
-		public static Instruction CreateABC( OpCode op, int a, int b, int c )
-		{
-			return (Instruction)( (((uint)op) << POS_OP)
-				| ((uint)a << POS_A)
-				| ((uint)b << POS_B)
-				| ((uint)c << POS_C));
-		}
-
-		public static Instruction CreateABx( OpCode op, int a, uint bc )
-		{
-			return (Instruction)( (((uint)op) << POS_OP)
-				| ((uint)a  << POS_A)
-				| ((uint)bc << POS_Bx));
-		}
-
-		public static Instruction CreateAx( OpCode op, int a )
-		{
-			return (Instruction)( (((uint)op) << POS_OP)
-				| ((uint)a  << POS_Ax));
-		}
-	}
-
+	// lcode.c of Lua 5.4: code generator
 	internal static class Coder
 	{
 		public const int NO_JUMP = -1;
-		private const int NO_REG  = ((1<<Instruction.SIZE_A) - 1);
 
-		private static void FreeReg( FuncState fs, int reg )
+		/* Maximum number of registers in a Lua function (must fit in 8 bits) */
+		private const int MAXREGS = 255;
+
+		/* limit for difference between lines in relative line info. */
+		private const int LIMLINEDIFF = 0x80;
+
+		/* maximum length of a short string (LUAI_MAXSHORTLEN) */
+		private const int MAXSHORTLEN = 40;
+
+		/* (note that expressions VJMP also have jumps.) */
+		private static bool HasJumps( ExpDesc e )
 		{
-			if( !Instruction.ISK(reg) && reg >= fs.NumActVar )
-			{
-				fs.FreeReg--;
-				Utl.Assert( reg == fs.FreeReg );
-			}
+			return e.ExitTrue != e.ExitFalse;
 		}
 
-		private static void FreeExp( FuncState fs, ExpDesc e )
-		{
-			if( e.Kind == ExpKind.VNONRELOC )
-			{
-				FreeReg( fs, e.Info );
-			}
-		}
-
-		// tonumeral: whether 'e' is a numeral, and its value
+		/*
+		** If expression is a numeric constant, fills 'v' with its value
+		** and returns true. Otherwise, returns false.
+		*/
 		private static bool ToNumeral( ExpDesc e, out TValue v )
 		{
 			v = new TValue();
-			if( e.ExitTrue != NO_JUMP || e.ExitFalse != NO_JUMP )
+			if( HasJumps( e ) )
 				return false; // not a numeral
 			switch( e.Kind )
 			{
@@ -270,166 +54,237 @@ namespace Cosmos.Executable.Lua
 			return ToNumeral( e, out v );
 		}
 
-		// validop: whether folding 'op' would not raise an error
-		private static bool ValidOp( LuaOp op, ref TValue v1, ref TValue v2 )
+		/*
+		** Get the constant value from a constant expression
+		*/
+		private static VarDesc Const2Val( FuncState fs, ExpDesc e )
 		{
-			switch( op )
+			Utl.Assert( e.Kind == ExpKind.VCONST );
+			return fs.Dyd.ActVar[e.Info];
+		}
+
+		/*
+		** If expression is a constant, fills 'v' with its value
+		** and returns true. Otherwise, returns false.
+		*/
+		public static bool Exp2Const( FuncState fs, ExpDesc e, ref TValue v )
+		{
+			if( HasJumps( e ) )
+				return false; // not a constant
+			switch( e.Kind )
 			{
-				case LuaOp.LUA_OPBAND: case LuaOp.LUA_OPBOR: case LuaOp.LUA_OPBXOR:
-				case LuaOp.LUA_OPSHL: case LuaOp.LUA_OPSHR: case LuaOp.LUA_OPBNOT: { // conversion errors
-					long i;
-					return LuaState.V_ToInteger( ref v1, out i, 0 ) && LuaState.V_ToInteger( ref v2, out i, 0 );
+				case ExpKind.VFALSE:
+					v.SetBValue( false );
+					return true;
+				case ExpKind.VTRUE:
+					v.SetBValue( true );
+					return true;
+				case ExpKind.VNIL:
+					v.SetNilValue();
+					return true;
+				case ExpKind.VKSTR:
+					v.SetSValue( e.StrValue );
+					return true;
+				case ExpKind.VCONST:
+					v.SetObj( ref Const2Val( fs, e ).K );
+					return true;
+				default: {
+					TValue n;
+					if( !ToNumeral( e, out n ) )
+						return false;
+					v.SetObj( ref n );
+					return true;
 				}
-				case LuaOp.LUA_OPDIV: case LuaOp.LUA_OPIDIV: case LuaOp.LUA_OPMOD: // division by 0
-					return v2.NValue() != 0;
-				default: return true; // everything else is valid
 			}
 		}
 
-		// constfolding: an operation on numerals done now, unless it could
-		// raise an error or results in NaN or 0.0 (because of -0.0)
-		private static bool ConstFolding( LuaOp op, ExpDesc e1, ExpDesc e2 )
+		/*
+		** Return the index of the previous instruction of the current code.
+		** If there may be a jump target between the current instruction and
+		** the previous one, return -1 (an invalid instruction, to avoid wrong
+		** optimizations).
+		*/
+		private static int PreviousInstruction( FuncState fs )
 		{
-			TValue v1, v2;
-			if( !ToNumeral( e1, out v1 ) || !ToNumeral( e2, out v2 ) || !ValidOp( op, ref v1, ref v2 ) )
-				return false; // non-numeric operands or not safe to fold
-
-			var res = new TValue();
-			LuaState.O_RawArith( null, op, ref v1, ref v2, ref res ); // does operation
-			if( res.TtIsInteger() )
-			{
-				e1.Kind = ExpKind.VKINT;
-				e1.IntValue = res.IValue();
-			}
+			if( fs.Pc > fs.LastTarget )
+				return fs.Pc - 1; // previous instruction
 			else
+				return -1;
+		}
+
+		/*
+		** Create a OP_LOADNIL instruction, but try to optimize: if the previous
+		** instruction is also OP_LOADNIL and ranges are compatible, adjust
+		** range of previous instruction instead of emitting a new one. (For
+		** instance, 'local a; local b' will generate a single opcode.)
+		*/
+		public static void Nil( FuncState fs, int from, int n )
+		{
+			int l = from + n - 1; // last register to set nil
+			int prev = PreviousInstruction( fs );
+			if( prev >= 0 && fs.Proto.Code[prev].GET_OPCODE() == OpCode.OP_LOADNIL ) // previous is LOADNIL?
 			{
-				double n = res.FltValue;
-				if( double.IsNaN( n ) || n == 0 )
-					return false;
-				e1.Kind = ExpKind.VKFLT;
-				e1.NumberValue = n;
+				var previous = fs.Proto.Code[prev];
+				int pfrom = previous.GETARG_A(); // get previous range
+				int pl = pfrom + previous.GETARG_B();
+				if( (pfrom <= from && from <= pl + 1) ||
+					(from <= pfrom && pfrom <= l + 1) ) // can connect both?
+				{
+					if( pfrom < from ) from = pfrom; // from = min(from, pfrom)
+					if( pl > l ) l = pl; // l = max(l, pl)
+					previous.SETARG_A( from );
+					previous.SETARG_B( l - from );
+					fs.Proto.Code[prev] = previous;
+					return;
+				} // else go through
 			}
-			return true;
+			CodeABC( fs, OpCode.OP_LOADNIL, from, n - 1, 0 ); // else no optimization
 		}
 
-		public static void FixLine( FuncState fs, int line )
+		/*
+		** Gets the destination address of a jump instruction. Used to traverse
+		** a list of jumps.
+		*/
+		private static int GetJump( FuncState fs, int pc )
 		{
-			fs.Proto.LineInfo[ fs.Pc-1 ] = line;
-		}
-
-		// codeunexpval: a unary operation on a register
-		private static void CodeUnExpVal( FuncState fs, OpCode op, ExpDesc e, int line )
-		{
-			int r = Exp2AnyReg( fs, e ); // opcodes operate only on registers
-			FreeExp( fs, e );
-			e.Info = CodeABC( fs, op, 0, r, 0 ); // generate opcode
-			e.Kind = ExpKind.VRELOCABLE; // all those operations are relocatable
-			FixLine( fs, line );
-		}
-
-		// codebinexpval: a binary operation on registers or constants
-		private static void CodeBinExpVal( FuncState fs, OpCode op,
-			ExpDesc e1, ExpDesc e2, int line )
-		{
-			int o2 = Exp2RK( fs, e2 ); // both operands are "RK"
-			int o1 = Exp2RK( fs, e1 );
-			if( o1 > o2 )
-			{
-				FreeExp( fs, e1 );
-				FreeExp( fs, e2 );
-			}
+			int offset = fs.Proto.Code[pc].GETARG_sJ();
+			if( offset == NO_JUMP ) // point to itself represents end of list
+				return NO_JUMP; // end of list
 			else
-			{
-				FreeExp( fs, e2 );
-				FreeExp( fs, e1 );
-			}
-			e1.Info = CodeABC( fs, op, 0, o1, o2 ); // generate opcode
-			e1.Kind = ExpKind.VRELOCABLE; // all those operations are relocatable
-			FixLine( fs, line );
+				return (pc + 1) + offset; // turn offset into absolute position
 		}
 
-		public static bool TestTMode( OpCode op )
-		{
-			return OpCodeInfo.GetMode( op ).TMode;
-		}
-
-		public static bool TestAMode( OpCode op )
-		{
-			return OpCodeInfo.GetMode( op ).AMode;
-		}
-
+		/*
+		** Fix jump instruction at position 'pc' to jump to 'dest'.
+		** (Jump addresses are relative in Lua)
+		*/
 		private static void FixJump( FuncState fs, int pc, int dest )
 		{
-			Instruction jmp = fs.Proto.Code[pc];
+			var jmp = fs.Proto.Code[pc];
 			int offset = dest - (pc + 1);
 			Utl.Assert( dest != NO_JUMP );
-			if( Math.Abs(offset) > Instruction.MAXARG_sBx )
-				fs.Lexer.SyntaxError("control structure too long");
-			jmp.SETARG_sBx( offset );
+			if( !(-Instruction.OFFSET_sJ <= offset &&
+				  offset <= Instruction.MAXARG_sJ - Instruction.OFFSET_sJ) )
+				fs.Lexer.SyntaxError( "control structure too long" );
+			Utl.Assert( jmp.GET_OPCODE() == OpCode.OP_JMP );
+			jmp.SETARG_sJ( offset );
 			fs.Proto.Code[pc] = jmp;
 		}
 
-		// returns current `pc' and mark it as a jump target
-		// (to avoid wrong optimizations with consecutive
-		// instructions not in the same basic block)
+		/*
+		** Concatenate jump-list 'l2' into jump-list 'l1'
+		*/
+		public static void Concat( FuncState fs, ref int l1, int l2 )
+		{
+			if( l2 == NO_JUMP ) return; // nothing to concatenate?
+			else if( l1 == NO_JUMP ) // no original list?
+				l1 = l2; // 'l1' points to 'l2'
+			else
+			{
+				int list = l1;
+				int next;
+				while( (next = GetJump( fs, list )) != NO_JUMP ) // find last element
+					list = next;
+				FixJump( fs, list, l2 ); // last element links to 'l2'
+			}
+		}
+
+		/*
+		** Create a jump instruction and return its position, so its destination
+		** can be fixed later (with 'FixJump').
+		*/
+		public static int Jump( FuncState fs )
+		{
+			return CodesJ( fs, OpCode.OP_JMP, NO_JUMP, 0 );
+		}
+
+		/*
+		** Code a 'return' instruction
+		*/
+		public static void Ret( FuncState fs, int first, int nret )
+		{
+			OpCode op;
+			switch( nret )
+			{
+				case 0: op = OpCode.OP_RETURN0; break;
+				case 1: op = OpCode.OP_RETURN1; break;
+				default: op = OpCode.OP_RETURN; break;
+			}
+			CodeABC( fs, op, first, nret + 1, 0 );
+		}
+
+		/*
+		** Code a "conditional jump", that is, a test or comparison opcode
+		** followed by a jump. Return jump position.
+		*/
+		private static int CondJump( FuncState fs, OpCode op, int a, int b, int c, int k )
+		{
+			CodeABCk( fs, op, a, b, c, k );
+			return Jump( fs );
+		}
+
+		/*
+		** returns current 'pc' and marks it as a jump target (to avoid wrong
+		** optimizations with consecutive instructions not in the same basic block).
+		*/
 		public static int GetLabel( FuncState fs )
 		{
 			fs.LastTarget = fs.Pc;
 			return fs.Pc;
 		}
 
-		private static int GetJump( FuncState fs, int pc )
+		/*
+		** Returns the position of the instruction "controlling" a given
+		** jump (that is, its condition), or the jump itself if it is
+		** unconditional.
+		*/
+		private static int GetJumpControl( FuncState fs, int pc )
 		{
-			int offset = fs.Proto.Code[pc].GETARG_sBx();
-			if( offset == NO_JUMP ) // point to itself represents end of list
-				return NO_JUMP; // end of list
+			if( pc >= 1 && OpCodeInfo.TestTMode( fs.Proto.Code[pc - 1].GET_OPCODE() ) )
+				return pc - 1;
 			else
-				return (pc+1) + offset; // turn offset into absolute position
+				return pc;
 		}
 
-		private static InstructionPtr GetJumpControl( FuncState fs, int pc )
-		{
-			InstructionPtr pi = new InstructionPtr( fs.Proto.Code, pc );
-			if( pc >= 1 && TestTMode( (pi-1).Value.GET_OPCODE() ))
-				return (pi-1);
-			else
-				return pi;
-		}
-
-		// check whether list has any jump that do not produce a value
-		// (or produce an inverted value)
-		private static bool NeedValue( FuncState fs, int list )
-		{
-			for( ; list != NO_JUMP; list = GetJump( fs, list ) )
-			{
-				Instruction i = GetJumpControl( fs, list ).Value;
-				if( i.GET_OPCODE() != OpCode.OP_TESTSET )
-					return true;
-			}
-			return false;
-		}
-
+		/*
+		** Patch destination register for a TESTSET instruction.
+		** If instruction in position 'node' is not a TESTSET, return false
+		** ("fails"). Otherwise, if 'reg' is not 'NO_REG', set it as the
+		** destination register. Otherwise, change instruction to a simple
+		** 'TEST' (produces no register value)
+		*/
 		private static bool PatchTestReg( FuncState fs, int node, int reg )
 		{
-			InstructionPtr pi = GetJumpControl( fs, node );
-			if( pi.Value.GET_OPCODE() != OpCode.OP_TESTSET )
+			int ipc = GetJumpControl( fs, node );
+			var i = fs.Proto.Code[ipc];
+			if( i.GET_OPCODE() != OpCode.OP_TESTSET )
 				return false; // cannot patch other instructions
-
-			if( reg != NO_REG && reg != pi.Value.GETARG_B() )
-				pi.Value = pi.Value.SETARG_A( reg );
+			if( reg != Instruction.NO_REG && reg != i.GETARG_B() )
+				i.SETARG_A( reg );
 			else
-				pi.Value = Instruction.CreateABC( OpCode.OP_TEST,
-					pi.Value.GETARG_B(), 0, pi.Value.GETARG_C() );
-
+			{
+				/* no register to put value or register already has the value;
+				   change instruction to simple test */
+				i = Instruction.CreateABCk( OpCode.OP_TEST, i.GETARG_B(), 0, 0, i.GETARG_k() );
+			}
+			fs.Proto.Code[ipc] = i;
 			return true;
 		}
 
+		/*
+		** Traverse a list of tests ensuring no one produces a value
+		*/
 		private static void RemoveValues( FuncState fs, int list )
 		{
-			for(; list != NO_JUMP; list = GetJump( fs, list ) )
-				PatchTestReg( fs, list, NO_REG );
+			for( ; list != NO_JUMP; list = GetJump( fs, list ) )
+				PatchTestReg( fs, list, Instruction.NO_REG );
 		}
 
+		/*
+		** Traverse a list of tests, patching their destination address and
+		** registers: tests producing values jump to 'vtarget' (and put their
+		** values in 'reg'), other tests jump to 'dtarget'.
+		*/
 		private static void PatchListAux( FuncState fs, int list, int vtarget,
 			int reg, int dtarget )
 		{
@@ -444,794 +299,174 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private static void DischargeJpc( FuncState fs )
-		{
-			PatchListAux( fs, fs.Jpc, fs.Pc, NO_REG, fs.Pc );
-			fs.Jpc = NO_JUMP;
-		}
-
-		private static void InvertJump( FuncState fs, ExpDesc e )
-		{
-			InstructionPtr pc = GetJumpControl( fs, e.Info );
-			Utl.Assert( TestTMode( pc.Value.GET_OPCODE() )
-				&& pc.Value.GET_OPCODE() != OpCode.OP_TESTSET
-				&& pc.Value.GET_OPCODE() != OpCode.OP_TEST );
-			pc.Value = pc.Value.SETARG_A( pc.Value.GETARG_A() == 0 ? 1 : 0 );
-		}
-
-		private static int JumpOnCond( FuncState fs, ExpDesc e, bool cond )
-		{
-			if( e.Kind == ExpKind.VRELOCABLE )
-			{
-				Instruction ie = fs.GetCode( e ).Value;
-				if( ie.GET_OPCODE() == OpCode.OP_NOT )
-				{
-					fs.Pc--; // remove previous OP_NOT
-					return CondJump( fs, OpCode.OP_TEST, ie.GETARG_B(), 0,
-						(cond ? 0 : 1) );
-				}
-				// else go through
-			}
-			Discharge2AnyReg( fs, e );
-			FreeExp( fs, e );
-			return CondJump( fs, OpCode.OP_TESTSET, NO_REG, e.Info,
-				(cond ? 1 : 0) );
-		}
-
-		public static void GoIfTrue( FuncState fs, ExpDesc e )
-		{
-			int pc; // pc of last jump
-			DischargeVars( fs, e );
-			switch( e.Kind )
-			{
-				case ExpKind.VJMP:
-					InvertJump( fs, e );
-					pc = e.Info;
-					break;
-
-				case ExpKind.VK:
-				case ExpKind.VKFLT:
-				case ExpKind.VKINT:
-				case ExpKind.VTRUE:
-					pc = NO_JUMP; // always true; do nothing
-					break;
-
-				default:
-					pc = JumpOnCond( fs, e, false );
-					break;
-			}
-
-			// insert last jump in `f' list
-			e.ExitFalse = Concat( fs, e.ExitFalse, pc );
-			PatchToHere( fs, e.ExitTrue );
-			e.ExitTrue = NO_JUMP;
-		}
-
-		public static void GoIfFalse( FuncState fs, ExpDesc e )
-		{
-			int pc; // pc of last jump
-			DischargeVars( fs, e );
-			switch( e.Kind )
-			{
-				case ExpKind.VJMP:
-					pc = e.Info;
-					break;
-
-				case ExpKind.VNIL:
-				case ExpKind.VFALSE:
-					pc = NO_JUMP;
-					break;
-
-				default:
-					pc = JumpOnCond( fs, e, true );
-					break;
-			}
-
-			// insert last jump in `t' list
-			e.ExitTrue = Concat( fs, e.ExitTrue, pc );
-			PatchToHere( fs, e.ExitFalse );
-			e.ExitFalse = NO_JUMP;
-		}
-
-		private static void CodeNot( FuncState fs, ExpDesc e )
-		{
-			DischargeVars( fs, e );
-			switch( e.Kind )
-			{
-				case ExpKind.VNIL:
-				case ExpKind.VFALSE:
-					e.Kind = ExpKind.VTRUE;
-					break;
-
-				case ExpKind.VK:
-				case ExpKind.VKFLT:
-				case ExpKind.VKINT:
-				case ExpKind.VTRUE:
-					e.Kind = ExpKind.VFALSE;
-					break;
-
-				case ExpKind.VJMP:
-					InvertJump( fs, e );
-					break;
-
-				case ExpKind.VRELOCABLE:
-				case ExpKind.VNONRELOC:
-					Discharge2AnyReg( fs, e );
-					FreeExp( fs, e );
-					e.Info = CodeABC( fs, OpCode.OP_NOT, 0, e.Info, 0 );
-					e.Kind = ExpKind.VRELOCABLE;
-					break;
-
-				default:
-					throw new Exception("CodeNot unknown e.Kind:" + e.Kind);
-			}
-
-			// interchange true and false lists
-			{ int temp = e.ExitFalse; e.ExitFalse = e.ExitTrue; e.ExitTrue = temp; }
-
-			RemoveValues( fs, e.ExitFalse );
-			RemoveValues( fs, e.ExitTrue  );
-		}
-
-		private static void CodeComp( FuncState fs, OpCode op, int cond,
-			ExpDesc e1, ExpDesc e2 )
-		{
-			int o1 = Exp2RK( fs, e1 );
-			int o2 = Exp2RK( fs, e2 );
-			FreeExp( fs, e2 );
-			FreeExp( fs, e1 );
-
-			// exchange args to replace by `<' or `<='
-			if( cond == 0 && op != OpCode.OP_EQ ) {
-				int temp;
-				temp = o1; o1 = o2; o2 = temp; // o1 <==> o2
-				cond = 1;
-			}
-			e1.Info = CondJump( fs, op, cond, o1, o2 );
-			e1.Kind = ExpKind.VJMP;
-		}
-
-		public static void Prefix( FuncState fs, UnOpr op, ExpDesc e, int line )
-		{
-			// 'ef' is a fake 2nd operand
-			ExpDesc ef = new ExpDesc();
-			ef.ExitTrue = NO_JUMP;
-			ef.ExitFalse = NO_JUMP;
-			ef.Kind = ExpKind.VKINT;
-			ef.IntValue = 0;
-
-			switch( op )
-			{
-				case UnOpr.MINUS:
-				case UnOpr.BNOT: {
-					if( ConstFolding( op == UnOpr.MINUS ? LuaOp.LUA_OPUNM : LuaOp.LUA_OPBNOT, e, ef ) )
-						break;
-					CodeUnExpVal( fs, op == UnOpr.MINUS ? OpCode.OP_UNM : OpCode.OP_BNOT, e, line );
-				} break;
-
-				case UnOpr.LEN: {
-					CodeUnExpVal( fs, OpCode.OP_LEN, e, line );
-				} break;
-
-				case UnOpr.NOT: {
-					CodeNot( fs, e );
-				} break;
-
-				default:
-					throw new Exception("[Coder]Prefix Unknown UnOpr:" + op);
-			}
-		}
-
-		public static void Infix( FuncState fs, BinOpr op, ExpDesc e )
-		{
-			switch( op )
-			{
-				case BinOpr.AND: {
-					GoIfTrue( fs, e ); // go ahead only if 'v' is true
-				} break;
-
-				case BinOpr.OR: {
-					GoIfFalse( fs, e ); // go ahead only if 'v' is false
-				} break;
-
-				case BinOpr.CONCAT: {
-					Exp2NextReg( fs, e ); // operand must be on the `stack'
-				} break;
-
-				case BinOpr.ADD: case BinOpr.SUB:
-				case BinOpr.MUL: case BinOpr.DIV: case BinOpr.IDIV:
-				case BinOpr.MOD: case BinOpr.POW:
-				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR:
-				case BinOpr.SHL: case BinOpr.SHR: {
-					if( !IsNumeral(e) )
-						Exp2RK( fs, e );
-					// else keep numeral, which may be folded with 2nd operand
-				} break;
-
-				default: {
-					Exp2RK( fs, e );
-				} break;
-			}
-		}
-
-		public static void Posfix( FuncState fs, BinOpr op,
-			ExpDesc e1, ExpDesc e2, int line )
-		{
-			switch( op )
-			{
-				case BinOpr.AND: {
-					Utl.Assert( e1.ExitTrue == NO_JUMP ); // list closed by 'Infix'
-					DischargeVars( fs, e2 );
-					e2.ExitFalse = Concat( fs, e2.ExitFalse, e1.ExitFalse );
-					e1.CopyFrom( e2 );
-					break;
-				}
-				case BinOpr.OR: {
-					Utl.Assert( e1.ExitFalse == NO_JUMP ); // list closed by 'Infix'
-					DischargeVars( fs, e2 );
-					e2.ExitTrue = Concat( fs, e2.ExitTrue, e1.ExitTrue );
-					e1.CopyFrom( e2 );
-					break;
-				}
-				case BinOpr.CONCAT: {
-					Exp2Val( fs, e2 );
-					var pe2 = fs.GetCode( e2 );
-					if( e2.Kind == ExpKind.VRELOCABLE &&
-						pe2.Value.GET_OPCODE() == OpCode.OP_CONCAT )
-					{
-						Utl.Assert( e1.Info == pe2.Value.GETARG_B()-1 );
-						FreeExp( fs, e1 );
-						pe2.Value = pe2.Value.SETARG_B( e1.Info );
-						e1.Kind = ExpKind.VRELOCABLE;
-						e1.Info = e2.Info;
-					}
-					else
-					{
-						// operand must be on the `stack'
-						Exp2NextReg( fs, e2 );
-						CodeBinExpVal( fs, OpCode.OP_CONCAT, e1, e2, line );
-					}
-					break;
-				}
-				case BinOpr.ADD: case BinOpr.SUB: case BinOpr.MUL: case BinOpr.DIV:
-				case BinOpr.IDIV: case BinOpr.MOD: case BinOpr.POW:
-				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR:
-				case BinOpr.SHL: case BinOpr.SHR: {
-					if( !ConstFolding( (LuaOp)(op - BinOpr.ADD), e1, e2 ) )
-						CodeBinExpVal( fs, (OpCode)((int)OpCode.OP_ADD + (int)(op - BinOpr.ADD)), e1, e2, line );
-					break;
-				}
-				case BinOpr.EQ: {
-					CodeComp( fs, OpCode.OP_EQ, 1, e1, e2 );
-					break;
-				}
-				case BinOpr.LT: {
-					CodeComp( fs, OpCode.OP_LT, 1, e1, e2 );
-					break;
-				}
-				case BinOpr.LE: {
-					CodeComp( fs, OpCode.OP_LE, 1, e1, e2 );
-					break;
-				}
-				case BinOpr.NE: {
-					CodeComp( fs, OpCode.OP_EQ, 0, e1, e2 );
-					break;
-				}
-				case BinOpr.GT: {
-					CodeComp( fs, OpCode.OP_LT, 0, e1, e2 );
-					break;
-				}
-				case BinOpr.GE: {
-					CodeComp( fs, OpCode.OP_LE, 0, e1, e2 );
-					break;
-				}
-				default: Utl.Assert(false); break;
-			}
-		}
-
-		public static int Jump( FuncState fs )
-		{
-			int jpc = fs.Jpc; // save list of jumps to here
-			fs.Jpc = NO_JUMP;
-			int j = CodeAsBx( fs, OpCode.OP_JMP, 0, NO_JUMP );
-			j = Concat( fs, j, jpc );
-			return j;
-		}
-
-		public static void JumpTo( FuncState fs, int target )
-		{
-			PatchList( fs, Jump(fs), target );
-		}
-
-		public static void Ret( FuncState fs, int first, int nret )
-		{
-			CodeABC( fs, OpCode.OP_RETURN, first, nret+1, 0 );
-		}
-
-		private static int CondJump( FuncState fs, OpCode op, int a, int b, int c )
-		{
-			CodeABC( fs, op, a, b, c );
-			return Jump( fs );
-		}
-
+		/*
+		** Path all jumps in 'list' to jump to 'target'.
+		** (The assert means that we cannot fix a jump to a forward address
+		** because we only know addresses once code is generated.)
+		*/
 		public static void PatchList( FuncState fs, int list, int target )
 		{
-			if( target == fs.Pc )
-				PatchToHere( fs, list );
-			else
-			{
-				Utl.Assert( target < fs.Pc );
-				PatchListAux( fs, list, target, NO_REG, target );
-			}
-		}
-
-		public static void PatchClose( FuncState fs, int list, int level )
-		{
-			level++; // argument is +1 to reserve 0 as non-op
-			while( list != NO_JUMP )
-			{
-				int next = GetJump( fs, list );
-				var pi = new InstructionPtr( fs.Proto.Code, list );;
-				Utl.Assert( pi.Value.GET_OPCODE() == OpCode.OP_JMP &&
-							( pi.Value.GETARG_A() == 0 ||
-							  pi.Value.GETARG_A() >= level ) );
-				pi.Value = pi.Value.SETARG_A( level );
-				list = next;
-			}
+			Utl.Assert( target <= fs.Pc );
+			PatchListAux( fs, list, target, Instruction.NO_REG, target );
 		}
 
 		public static void PatchToHere( FuncState fs, int list )
 		{
-			GetLabel( fs );
-			fs.Jpc = Concat( fs, fs.Jpc, list );
+			int hr = GetLabel( fs ); // mark "here" as a jump target
+			PatchList( fs, list, hr );
 		}
 
-		public static int Concat( FuncState fs, int l1, int l2 )
+		public static void JumpTo( FuncState fs, int target )
 		{
-			if( l2 == NO_JUMP )
-				return l1;
-			else if( l1 == NO_JUMP )
-				return l2;
+			PatchList( fs, Jump( fs ), target );
+		}
+
+		// stores 'v' at 'idx' of 'list', growing it by one when 'idx' is its end
+		private static void SetAt<T>( List<T> list, int idx, T v )
+		{
+			if( idx < list.Count )
+				list[idx] = v;
 			else
 			{
-				int list = l1;
-				int next = GetJump( fs, list );
-
-				// find last element
-				while( next != NO_JUMP )
-				{
-					list = next;
-					next = GetJump( fs, list );
-				}
-				FixJump( fs, list, l2 );
-				return l1;
+				Utl.Assert( idx == list.Count );
+				list.Add( v );
 			}
 		}
 
-		public static int StringK( FuncState fs, string s )
+		/*
+		** Save line info for a new instruction. If difference from last line
+		** does not fit in a byte, of after that many instructions, save a new
+		** absolute line info; (in that case, the special value 'ABSLINEINFO'
+		** in 'lineinfo' signals the existence of this absolute information.)
+		** Otherwise, store the difference from last line in 'lineinfo'.
+		*/
+		private static void SaveLineInfo( FuncState fs, LuaProto f, int line )
 		{
-			var o = new TValue();
-			o.SetSValue(s);
-			return AddK( fs, ref o, ref o );
-		}
-
-		// luaK_intK: an integer constant; an integer and a float are two
-		// constants, as their type tags differ
-		public static int IntK( FuncState fs, long n )
-		{
-			var o = new TValue();
-			o.SetIValue(n);
-			return AddK( fs, ref o, ref o );
-		}
-
-		// luaK_numberK: a float constant, never NaN nor -0.0 (folding avoids
-		// them), so that the value itself is its key
-		public static int NumberK( FuncState fs, double r )
-		{
-			var o = new TValue();
-			o.SetFltValue(r);
-			return AddK( fs, ref o, ref o );
-		}
-
-		private static int BoolK( FuncState fs, bool b )
-		{
-			var o = new TValue();
-			o.SetBValue(b);
-			return AddK( fs, ref o, ref o );
-		}
-
-		private static int NilK( FuncState fs )
-		{
-			// // cannot use nil as key;
-			// // instead use table itself to represent nil
-			// var k = fs.H;
-			// var o = new LuaNil();
-			// return AddK( fs, k, o );
-
-			var o = new TValue();
-			o.SetNilValue();
-			return AddK( fs, ref o, ref o );
-		}
-
-		public static int AddK( FuncState fs, ref TValue key, ref TValue v )
-		{
-			int idx;
-			if( fs.H.TryGetValue( key, out idx ) )
-				return idx;
-
-			idx = fs.Proto.K.Count;
-			fs.H.Add( key, idx );
-
-			var newItem = new StkId();
-			newItem.V.SetObj(ref v);
-			fs.Proto.K.Add(newItem);
-			return idx;
-		}
-
-		public static void Indexed( FuncState fs, ExpDesc t, ExpDesc k )
-		{
-			t.Ind.T = t.Info;
-			t.Ind.Idx = Exp2RK( fs, k );
-			t.Ind.Vt = (t.Kind == ExpKind.VUPVAL) ? ExpKind.VUPVAL
-												  : ExpKind.VLOCAL; // FIXME
-			t.Kind = ExpKind.VINDEXED;
-		}
-
-		private static bool HasJumps( ExpDesc e )
-		{
-			return e.ExitTrue != e.ExitFalse;
-		}
-
-		private static int CodeLabel( FuncState fs, int a, int b, int jump )
-		{
-			GetLabel( fs ); // those instructions may be jump targets
-			return CodeABC( fs, OpCode.OP_LOADBOOL, a, b, jump );
-		}
-
-		private static void Discharge2Reg( FuncState fs, ExpDesc e, int reg )
-		{
-			DischargeVars( fs, e );
-			switch( e.Kind )
+			int linedif = line - fs.PreviousLine;
+			int pc = fs.Pc - 1; // last instruction coded
+			if( System.Math.Abs( linedif ) >= LIMLINEDIFF || fs.IWthAbs++ >= LuaState.MAXIWTHABS )
 			{
-				case ExpKind.VNIL: {
-					CodeNil( fs, reg, 1 );
-					break;
-				}
-				case ExpKind.VFALSE:
-				case ExpKind.VTRUE: {
-					CodeABC( fs, OpCode.OP_LOADBOOL, reg,
-						(e.Kind == ExpKind.VTRUE ? 1 : 0), 0 );
-					break;
-				}
-				case ExpKind.VK: {
-					CodeK( fs, reg, e.Info );
-					break;
-				}
-				case ExpKind.VKFLT: {
-					CodeK( fs, reg, NumberK( fs, e.NumberValue ) );
-					break;
-				}
-				case ExpKind.VKINT: {
-					CodeK( fs, reg, IntK( fs, e.IntValue ) );
-					break;
-				}
-				case ExpKind.VRELOCABLE: {
-					InstructionPtr pi = fs.GetCode(e);
-					pi.Value = pi.Value.SETARG_A(reg);
-					break;
-				}
-				case ExpKind.VNONRELOC: {
-					if( reg != e.Info )
-						CodeABC( fs, OpCode.OP_MOVE, reg, e.Info, 0 );
-					break;
-				}
-				default: {
-					Utl.Assert( e.Kind == ExpKind.VVOID || e.Kind == ExpKind.VJMP );
-					return; // nothing to do...
-				}
+				var abs = new AbsLineInfo();
+				abs.Pc = pc;
+				abs.Line = line;
+				SetAt( f.AbsLineInfo, fs.NAbsLineInfo++, abs );
+				linedif = LuaState.ABSLINEINFO; // signal that there is absolute information
+				fs.IWthAbs = 1; // restart counter
 			}
-			e.Info = reg;
-			e.Kind = ExpKind.VNONRELOC;
+			SetAt( f.LineInfo, pc, (sbyte)linedif );
+			fs.PreviousLine = line; // last line saved
 		}
 
-		public static void CheckStack( FuncState fs, int n )
+		/*
+		** Remove line information from the last instruction.
+		** If line information for that instruction is absolute, set 'iwthabs'
+		** above its max to force the new (replacing) instruction to have
+		** absolute line info, too.
+		*/
+		private static void RemoveLastLineInfo( FuncState fs )
 		{
-			int newStack = fs.FreeReg + n;
-			if( newStack > fs.Proto.MaxStackSize )
+			var f = fs.Proto;
+			int pc = fs.Pc - 1; // last instruction coded
+			if( f.LineInfo[pc] != LuaState.ABSLINEINFO ) // relative line info?
 			{
-				if( newStack >= LuaLimits.MAXSTACK )
-				{
-					fs.Lexer.SyntaxError("function or expression needs too many registers");
-				}
-				fs.Proto.MaxStackSize = (byte)newStack;
+				fs.PreviousLine -= f.LineInfo[pc]; // correct last line saved
+				fs.IWthAbs--; // undo previous increment
 			}
-		}
-
-		public static void ReserveRegs( FuncState fs, int n )
-		{
-			CheckStack( fs, n );
-			fs.FreeReg += n;
-		}
-
-		private static void Discharge2AnyReg( FuncState fs, ExpDesc e )
-		{
-			if( e.Kind != ExpKind.VNONRELOC )
+			else // absolute line information
 			{
-				ReserveRegs( fs, 1 );
-				Discharge2Reg( fs, e, fs.FreeReg-1 );
+				Utl.Assert( f.AbsLineInfo[fs.NAbsLineInfo - 1].Pc == pc );
+				fs.NAbsLineInfo--; // remove it
+				fs.IWthAbs = LuaState.MAXIWTHABS + 1; // force next line info to be absolute
 			}
 		}
 
-		private static void Exp2Reg( FuncState fs, ExpDesc e, int reg )
+		/*
+		** Remove the last instruction created, correcting line information
+		** accordingly.
+		*/
+		private static void RemoveLastInstruction( FuncState fs )
 		{
-			Discharge2Reg( fs, e, reg );
-			if( e.Kind == ExpKind.VJMP )
-			{
-				e.ExitTrue = Concat( fs, e.ExitTrue, e.Info );
-			}
-
-			if( HasJumps(e) )
-			{
-				int p_f = NO_JUMP;
-				int p_t = NO_JUMP;
-				if( NeedValue( fs, e.ExitTrue ) || NeedValue( fs, e.ExitFalse ) )
-				{
-					int fj = (e.Kind == ExpKind.VJMP) ? NO_JUMP : Jump( fs );
-					p_f = CodeLabel( fs, reg, 0, 1 );
-					p_t = CodeLabel( fs, reg, 1, 0 );
-					PatchToHere( fs, fj );
-				}
-
-				// position after whole expression
-				int final = GetLabel( fs );
-				PatchListAux( fs, e.ExitFalse, final, reg, p_f );
-				PatchListAux( fs, e.ExitTrue,  final, reg, p_t );
-			}
-
-			e.ExitFalse = NO_JUMP;
-			e.ExitTrue  = NO_JUMP;
-			e.Info = reg;
-			e.Kind = ExpKind.VNONRELOC;
+			RemoveLastLineInfo( fs );
+			fs.Pc--;
 		}
 
-		public static void Exp2NextReg( FuncState fs, ExpDesc e )
+		/*
+		** Emit instruction 'i', checking for array sizes and saving also its
+		** line information. Return 'i' position.
+		*/
+		public static int Code( FuncState fs, Instruction i )
 		{
-			DischargeVars( fs, e );
-			FreeExp( fs, e );
-			ReserveRegs( fs, 1 );
-			Exp2Reg( fs, e, fs.FreeReg-1 );
+			var f = fs.Proto;
+			/* put new instruction in code array */
+			SetAt( f.Code, fs.Pc++, i );
+			SaveLineInfo( fs, f, fs.Lexer.LastLine );
+			return fs.Pc - 1; // index of new instruction
 		}
 
-		public static void Exp2Val( FuncState fs, ExpDesc e )
+		/*
+		** Format and emit an 'iABC' instruction. (Assertions check consistency
+		** of parameters versus opcode.)
+		*/
+		public static int CodeABCk( FuncState fs, OpCode o, int a, int b, int c, int k )
 		{
-			if( HasJumps(e) )
-				Exp2AnyReg( fs, e );
-			else
-				DischargeVars( fs, e );
+			Utl.Assert( OpCodeInfo.GetOpMode( o ) == OpMode.iABC );
+			Utl.Assert( a <= Instruction.MAXARG_A && b <= Instruction.MAXARG_B &&
+						c <= Instruction.MAXARG_C && (k & ~1) == 0 );
+			return Code( fs, Instruction.CreateABCk( o, a, b, c, k ) );
 		}
 
-		public static int Exp2RK( FuncState fs, ExpDesc e )
+		public static int CodeABC( FuncState fs, OpCode o, int a, int b, int c )
 		{
-			Exp2Val( fs, e );
-			switch( e.Kind ) // move constants to 'k'
-			{
-				case ExpKind.VTRUE: e.Info = BoolK( fs, true ); break;
-				case ExpKind.VFALSE: e.Info = BoolK( fs, false ); break;
-				case ExpKind.VNIL: e.Info = NilK( fs ); break;
-				case ExpKind.VKINT: e.Info = IntK( fs, e.IntValue ); break;
-				case ExpKind.VKFLT: e.Info = NumberK( fs, e.NumberValue ); break;
-				case ExpKind.VK: break;
-				default:
-					// not a constant in the right range: put it in a register
-					return Exp2AnyReg( fs, e );
-			}
-			e.Kind = ExpKind.VK;
-			if( e.Info <= Instruction.MAXINDEXRK ) // constant fits in 'argC'?
-				return Instruction.RKASK( e.Info );
-			return Exp2AnyReg( fs, e );
+			return CodeABCk( fs, o, a, b, c, 0 );
 		}
 
-		public static int Exp2AnyReg( FuncState fs, ExpDesc e )
+		/*
+		** Format and emit an 'iABx' instruction.
+		*/
+		public static int CodeABx( FuncState fs, OpCode o, int a, uint bc )
 		{
-			DischargeVars( fs, e );
-			if( e.Kind == ExpKind.VNONRELOC )
-			{
-				// exp is already in a register
-				if( ! HasJumps( e ) )
-					return e.Info;
-
-				// reg. is not a local?
-				if( e.Info >= fs.NumActVar )
-				{
-					Exp2Reg( fs, e, e.Info );
-					return e.Info;
-				}
-			}
-			Exp2NextReg( fs, e ); // default
-			return e.Info;
+			Utl.Assert( OpCodeInfo.GetOpMode( o ) == OpMode.iABx );
+			Utl.Assert( a <= Instruction.MAXARG_A && bc <= Instruction.MAXARG_Bx );
+			return Code( fs, Instruction.CreateABx( o, a, bc ) );
 		}
 
-		public static void Exp2AnyRegUp( FuncState fs, ExpDesc e )
+		/*
+		** Format and emit an 'iAsBx' instruction.
+		*/
+		private static int CodeAsBx( FuncState fs, OpCode o, int a, int bc )
 		{
-			if( e.Kind != ExpKind.VUPVAL || HasJumps( e ) )
-			{
-				Exp2AnyReg( fs, e );
-			}
+			uint b = (uint)(bc + Instruction.OFFSET_sBx);
+			Utl.Assert( OpCodeInfo.GetOpMode( o ) == OpMode.iAsBx );
+			Utl.Assert( a <= Instruction.MAXARG_A && b <= Instruction.MAXARG_Bx );
+			return Code( fs, Instruction.CreateABx( o, a, b ) );
 		}
 
-		public static void DischargeVars( FuncState fs, ExpDesc e )
+		/*
+		** Format and emit an 'isJ' instruction.
+		*/
+		private static int CodesJ( FuncState fs, OpCode o, int sj, int k )
 		{
-			switch( e.Kind )
-			{
-				case ExpKind.VLOCAL:
-					e.Kind = ExpKind.VNONRELOC;
-					break;
-
-				case ExpKind.VUPVAL:
-					e.Info = CodeABC( fs, OpCode.OP_GETUPVAL, 0, e.Info, 0 );
-					e.Kind = ExpKind.VRELOCABLE;
-					break;
-
-				case ExpKind.VINDEXED:
-					OpCode op = OpCode.OP_GETTABUP;
-					FreeReg( fs, e.Ind.Idx );
-					if( e.Ind.Vt == ExpKind.VLOCAL )
-					{
-						FreeReg( fs, e.Ind.T );
-						op = OpCode.OP_GETTABLE;
-					}
-					e.Info = CodeABC( fs, op, 0, e.Ind.T, e.Ind.Idx );
-					e.Kind = ExpKind.VRELOCABLE;
-					break;
-
-				case ExpKind.VVARARG:
-				case ExpKind.VCALL:
-					SetOneRet( fs, e );
-					break;
-
-				default: break;
-			}
+			uint j = (uint)(sj + Instruction.OFFSET_sJ);
+			Utl.Assert( OpCodeInfo.GetOpMode( o ) == OpMode.isJ );
+			Utl.Assert( j <= Instruction.MAXARG_sJ && (k & ~1) == 0 );
+			return Code( fs, Instruction.CreatesJ( o, j, k ) );
 		}
 
-		public static void SetReturns( FuncState fs, ExpDesc e, int nResults )
-		{
-			if( e.Kind == ExpKind.VCALL ) { // expression is an open function call?
-				var pi = fs.GetCode(e);
-				pi.Value = pi.Value.SETARG_C( nResults+1 );
-			}
-			else if( e.Kind == ExpKind.VVARARG ) {
-				var pi = fs.GetCode(e);
-				pi.Value = pi.Value.SETARG_B( nResults+1 ).SETARG_A( fs.FreeReg );
-				ReserveRegs( fs, 1 );
-			}
-		}
-
-		public static void SetMultiRet( FuncState fs, ExpDesc e )
-		{
-			SetReturns( fs, e, LuaDef.LUA_MULTRET );
-		}
-
-		public static void SetOneRet( FuncState fs, ExpDesc e )
-		{
-			// expression is an open function call?
-			if( e.Kind == ExpKind.VCALL )
-			{
-				e.Kind = ExpKind.VNONRELOC;
-				e.Info = ( fs.GetCode( e ) ).Value.GETARG_A();
-			}
-			else if( e.Kind == ExpKind.VVARARG )
-			{
-				var pi = fs.GetCode( e );
-				pi.Value = pi.Value.SETARG_B( 2 );
-				e.Kind = ExpKind.VRELOCABLE; // can relocate its simple result
-			}
-		}
-
-		public static void StoreVar( FuncState fs, ExpDesc v, ExpDesc e )
-		{
-			switch( v.Kind )
-			{
-				case ExpKind.VLOCAL: {
-					FreeExp( fs, e );
-					Exp2Reg( fs, e, v.Info );
-					break;
-				}
-
-				case ExpKind.VUPVAL: {
-					int c = Exp2AnyReg( fs, e );
-					CodeABC( fs, OpCode.OP_SETUPVAL, c, v.Info, 0 );
-					break;
-				}
-
-				case ExpKind.VINDEXED: {
-					OpCode op = (v.Ind.Vt == ExpKind.VLOCAL)
-						? OpCode.OP_SETTABLE
-						: OpCode.OP_SETTABUP;
-					int c = Exp2RK( fs, e );
-					CodeABC( fs, op, v.Ind.T, v.Ind.Idx, c );
-					break;
-				}
-
-				default:
-				{
-					throw new NotImplementedException("invalid var kind to store");
-				}
-			}
-			FreeExp( fs, e );
-		}
-
-		public static void Self( FuncState fs, ExpDesc e, ExpDesc key )
-		{
-			Exp2AnyReg( fs, e );
-			int ereg = e.Info; // register where `e' is placed
-			FreeExp( fs, e );
-			e.Info = fs.FreeReg; // base register for op_self
-			e.Kind = ExpKind.VNONRELOC;
-			ReserveRegs( fs, 2 );
-			CodeABC( fs, OpCode.OP_SELF, e.Info, ereg, Coder.Exp2RK(fs, key) );
-			FreeExp( fs, key );
-		}
-
-		public static void SetList( FuncState fs, int t, int nelems, int tostore )
-		{
-			int c = (nelems - 1) / LuaDef.LFIELDS_PER_FLUSH + 1;
-			int b = (tostore == LuaDef.LUA_MULTRET) ? 0 : tostore;
-			Utl.Assert( tostore != 0 );
-
-			if( c <= Instruction.MAXARG_C )
-			{
-				CodeABC( fs, OpCode.OP_SETLIST, t, b, c );
-			}
-			else if( c <= Instruction.MAXARG_Ax )
-			{
-				CodeABC( fs, OpCode.OP_SETLIST, t, b, 0 );
-				CodeExtraArg( fs, c );
-			}
-			else
-			{
-				fs.Lexer.SyntaxError("constructor too long");
-			}
-
-			// free registers with list values
-			fs.FreeReg = t + 1;
-		}
-
-		public static void CodeNil( FuncState fs, int from, int n )
-		{
-			int l = from + n - 1; // last register to set nil
-			if( fs.Pc > fs.LastTarget ) // no jumps to current position?
-			{
-				var previous = new InstructionPtr( fs.Proto.Code, fs.Pc-1 );
-				if( previous.Value.GET_OPCODE() == OpCode.OP_LOADNIL )
-				{
-					int pfrom = previous.Value.GETARG_A();
-					int pl = pfrom + previous.Value.GETARG_B();
-
-					// can connect both?
-					if( (pfrom <= from && from <= pl + 1) ||
-						(from <= pfrom && pfrom <= l + 1))
-					{
-						if( pfrom < from ) from = pfrom; // from=min(from,pfrom)
-						if( pl > l ) l = pl; // l=max(l,pl)
-						previous.Value = previous.Value.SETARG_A( from );
-						previous.Value = previous.Value.SETARG_B( l - from );
-						return;
-					}
-				}
-				// else go through
-			}
-
-			// else no optimization
-			CodeABC( fs, OpCode.OP_LOADNIL, from, n-1, 0 );
-		}
-
+		/*
+		** Emit an "extra argument" instruction (format 'iAx')
+		*/
 		private static int CodeExtraArg( FuncState fs, int a )
 		{
 			Utl.Assert( a <= Instruction.MAXARG_Ax );
 			return Code( fs, Instruction.CreateAx( OpCode.OP_EXTRAARG, a ) );
 		}
 
-		public static int CodeK( FuncState fs, int reg, int k )
+		/*
+		** Emit a "load constant" instruction, using either 'OP_LOADK'
+		** (if constant index 'k' fits in 18 bits) or an 'OP_LOADKX'
+		** instruction with "extra argument".
+		*/
+		private static int CodeK( FuncState fs, int reg, int k )
 		{
 			if( k <= Instruction.MAXARG_Bx )
 				return CodeABx( fs, OpCode.OP_LOADK, reg, (uint)k );
@@ -1243,45 +478,1470 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		public static int CodeAsBx( FuncState fs, OpCode op, int a, int sBx )
+		/*
+		** Check register-stack level, keeping track of its maximum size
+		** in field 'maxstacksize'
+		*/
+		public static void CheckStack( FuncState fs, int n )
 		{
-			return CodeABx( fs, op, a, ((uint)sBx)+Instruction.MAXARG_sBx);
-		}
-
-		public static int CodeABx( FuncState fs, OpCode op, int a, uint bc )
-		{
-			var mode = OpCodeInfo.GetMode(op);
-			Utl.Assert( mode.OpMode == OpMode.iABx
-					 || mode.OpMode == OpMode.iAsBx );
-			Utl.Assert( mode.CMode == OpArgMask.OpArgN );
-			Utl.Assert( a < Instruction.MAXARG_A & bc <= Instruction.MAXARG_Bx );
-			return Code( fs, Instruction.CreateABx( op, a, bc ) );
-		}
-
-		public static int CodeABC( FuncState fs, OpCode op, int a, int b, int c )
-		{
-			return Code( fs, Instruction.CreateABC( op, a, b, c ) );
-		}
-
-		public static int Code( FuncState fs, Instruction i )
-		{
-			DischargeJpc( fs ); // `pc' will change
-
-			while( fs.Proto.Code.Count <= fs.Pc )
+			int newstack = fs.FreeReg + n;
+			if( newstack > fs.Proto.MaxStackSize )
 			{
-				fs.Proto.Code.Add( new Instruction(LuaLimits.MAX_INT) );
+				if( newstack >= MAXREGS )
+					fs.Lexer.SyntaxError( "function or expression needs too many registers" );
+				fs.Proto.MaxStackSize = (byte)newstack;
 			}
-			fs.Proto.Code[ fs.Pc ] = i;
+		}
 
-			while( fs.Proto.LineInfo.Count <= fs.Pc )
+		/*
+		** Reserve 'n' registers in register stack
+		*/
+		public static void ReserveRegs( FuncState fs, int n )
+		{
+			CheckStack( fs, n );
+			fs.FreeReg += n;
+		}
+
+		/*
+		** Free register 'reg', if it is neither a constant index nor
+		** a local variable.
+		*/
+		private static void FreeReg( FuncState fs, int reg )
+		{
+			if( reg >= fs.NVarStack() )
 			{
-				fs.Proto.LineInfo.Add( LuaLimits.MAX_INT );
+				fs.FreeReg--;
+				Utl.Assert( reg == fs.FreeReg );
 			}
-			fs.Proto.LineInfo[ fs.Pc ] = fs.Lexer.LastLine;
+		}
 
-			return fs.Pc++;
+		/*
+		** Free two registers in proper order
+		*/
+		private static void FreeRegs( FuncState fs, int r1, int r2 )
+		{
+			if( r1 > r2 )
+			{
+				FreeReg( fs, r1 );
+				FreeReg( fs, r2 );
+			}
+			else
+			{
+				FreeReg( fs, r2 );
+				FreeReg( fs, r1 );
+			}
+		}
+
+		/*
+		** Free register used by expression 'e' (if any)
+		*/
+		private static void FreeExp( FuncState fs, ExpDesc e )
+		{
+			if( e.Kind == ExpKind.VNONRELOC )
+				FreeReg( fs, e.Info );
+		}
+
+		/*
+		** Free registers used by expressions 'e1' and 'e2' (if any) in proper
+		** order.
+		*/
+		private static void FreeExps( FuncState fs, ExpDesc e1, ExpDesc e2 )
+		{
+			int r1 = (e1.Kind == ExpKind.VNONRELOC) ? e1.Info : -1;
+			int r2 = (e2.Kind == ExpKind.VNONRELOC) ? e2.Info : -1;
+			FreeRegs( fs, r1, r2 );
+		}
+
+		/*
+		** Add constant 'v' to prototype's list of constants (field 'k').
+		** Use the function's table to cache position of constants in constant
+		** list and try to reuse constants. Each function has its own table (the
+		** reference shares one among all functions of a chunk), and its keys
+		** tell integers, floats and strings apart by their type tags.
+		*/
+		private static int AddK( FuncState fs, ref TValue key, ref TValue v )
+		{
+			int idx;
+			if( fs.H.TryGetValue( key, out idx ) )
+				return idx; // reuse index
+
+			/* constant not found; create a new entry */
+			idx = fs.Proto.K.Count;
+			if( idx > Instruction.MAXARG_Ax )
+				fs.Lexer.SyntaxError( "too many constants" );
+			fs.H.Add( key, idx );
+
+			var newItem = new StkId();
+			newItem.V.SetObj( ref v );
+			fs.Proto.K.Add( newItem );
+			return idx;
+		}
+
+		/*
+		** Add a string to list of constants and return its index.
+		*/
+		public static int StringK( FuncState fs, string s )
+		{
+			var o = new TValue();
+			o.SetSValue( s );
+			return AddK( fs, ref o, ref o ); // use string itself as key
+		}
+
+		/*
+		** Add an integer to list of constants and return its index.
+		*/
+		private static int IntK( FuncState fs, long n )
+		{
+			var o = new TValue();
+			o.SetIValue( n );
+			return AddK( fs, ref o, ref o ); // use integer itself as key
+		}
+
+		/*
+		** Add a float to list of constants and return its index. (The table
+		** keys tell floats from integers apart by their type tags, so integral
+		** floats need no alternative key here.)
+		*/
+		private static int NumberK( FuncState fs, double r )
+		{
+			var o = new TValue();
+			o.SetFltValue( r );
+			return AddK( fs, ref o, ref o ); // use number itself as key
+		}
+
+		/*
+		** Add a false to list of constants and return its index.
+		*/
+		private static int BoolF( FuncState fs )
+		{
+			var o = new TValue();
+			o.SetBValue( false );
+			return AddK( fs, ref o, ref o ); // use boolean itself as key
+		}
+
+		/*
+		** Add a true to list of constants and return its index.
+		*/
+		private static int BoolT( FuncState fs )
+		{
+			var o = new TValue();
+			o.SetBValue( true );
+			return AddK( fs, ref o, ref o ); // use boolean itself as key
+		}
+
+		/*
+		** Add nil to list of constants and return its index.
+		*/
+		private static int NilK( FuncState fs )
+		{
+			var o = new TValue();
+			o.SetNilValue();
+			return AddK( fs, ref o, ref o );
+		}
+
+		/*
+		** Check whether 'i' can be stored in an 'sC' operand. Equivalent to
+		** (0 <= int2sC(i) && int2sC(i) <= MAXARG_C) but without risk of
+		** overflows in the hidden addition inside 'int2sC'.
+		*/
+		private static bool FitsC( long i )
+		{
+			return unchecked((ulong)i + Instruction.OFFSET_sC) <= (ulong)Instruction.MAXARG_C;
+		}
+
+		/*
+		** Check whether 'i' can be stored in an 'sBx' operand.
+		*/
+		private static bool FitsBx( long i )
+		{
+			return -Instruction.OFFSET_sBx <= i && i <= Instruction.MAXARG_Bx - Instruction.OFFSET_sBx;
+		}
+
+		public static void Int( FuncState fs, int reg, long i )
+		{
+			if( FitsBx( i ) )
+				CodeAsBx( fs, OpCode.OP_LOADI, reg, (int)i );
+			else
+				CodeK( fs, reg, IntK( fs, i ) );
+		}
+
+		private static void Float( FuncState fs, int reg, double f )
+		{
+			long fi;
+			if( LuaState.FltToInteger( f, out fi, F2Imod.F2Ieq ) && FitsBx( fi ) )
+				CodeAsBx( fs, OpCode.OP_LOADF, reg, (int)fi );
+			else
+				CodeK( fs, reg, NumberK( fs, f ) );
+		}
+
+		/*
+		** Convert a constant in 'v' into an expression description 'e'
+		*/
+		private static void Const2Exp( ref TValue v, ExpDesc e )
+		{
+			switch( v.Tt )
+			{
+				case TValue.LUA_TNUMINT:
+					e.Kind = ExpKind.VKINT; e.IntValue = v.IValue();
+					break;
+				case TValue.LUA_TNUMFLT:
+					e.Kind = ExpKind.VKFLT; e.NumberValue = v.FltValue;
+					break;
+				case (int)LuaType.LUA_TBOOLEAN:
+					e.Kind = v.BValue() ? ExpKind.VTRUE : ExpKind.VFALSE;
+					break;
+				case (int)LuaType.LUA_TNIL:
+					e.Kind = ExpKind.VNIL;
+					break;
+				case (int)LuaType.LUA_TSTRING:
+					e.Kind = ExpKind.VKSTR; e.StrValue = v.SValue();
+					break;
+				default: Utl.Assert( false ); break;
+			}
+		}
+
+		/*
+		** Fix an expression to return the number of results 'nresults'.
+		** 'e' must be a multi-ret expression (function call or vararg).
+		*/
+		public static void SetReturns( FuncState fs, ExpDesc e, int nresults )
+		{
+			var pc = fs.Proto.Code[e.Info];
+			if( e.Kind == ExpKind.VCALL ) // expression is an open function call?
+				pc.SETARG_C( nresults + 1 );
+			else
+			{
+				Utl.Assert( e.Kind == ExpKind.VVARARG );
+				pc.SETARG_C( nresults + 1 );
+				pc.SETARG_A( fs.FreeReg );
+			}
+			fs.Proto.Code[e.Info] = pc;
+			if( e.Kind == ExpKind.VVARARG )
+				ReserveRegs( fs, 1 );
+		}
+
+		public static void SetMultRet( FuncState fs, ExpDesc e )
+		{
+			SetReturns( fs, e, LuaDef.LUA_MULTRET );
+		}
+
+		/*
+		** Convert a VKSTR to a VK
+		*/
+		private static void Str2K( FuncState fs, ExpDesc e )
+		{
+			Utl.Assert( e.Kind == ExpKind.VKSTR );
+			e.Info = StringK( fs, e.StrValue );
+			e.Kind = ExpKind.VK;
+		}
+
+		/*
+		** Fix an expression to return one result.
+		** If expression is not a multi-ret expression (function call or
+		** vararg), it already returns one result, so nothing needs to be done.
+		** Function calls become VNONRELOC expressions (as its result comes
+		** fixed in the base register of the call), while vararg expressions
+		** become VRELOC (as OP_VARARG puts its results where it wants).
+		** (Calls are created returning one result, so that does not need
+		** to be fixed.)
+		*/
+		public static void SetOneRet( FuncState fs, ExpDesc e )
+		{
+			if( e.Kind == ExpKind.VCALL ) // expression is an open function call?
+			{
+				/* already returns 1 value */
+				Utl.Assert( fs.Proto.Code[e.Info].GETARG_C() == 2 );
+				e.Kind = ExpKind.VNONRELOC; // result has fixed position
+				e.Info = fs.Proto.Code[e.Info].GETARG_A();
+			}
+			else if( e.Kind == ExpKind.VVARARG )
+			{
+				var pc = fs.Proto.Code[e.Info];
+				pc.SETARG_C( 2 );
+				fs.Proto.Code[e.Info] = pc;
+				e.Kind = ExpKind.VRELOC; // can relocate its simple result
+			}
+		}
+
+		/*
+		** Ensure that expression 'e' is not a variable (nor a <const>).
+		** (Expression still may have jump lists.)
+		*/
+		public static void DischargeVars( FuncState fs, ExpDesc e )
+		{
+			switch( e.Kind )
+			{
+				case ExpKind.VCONST: {
+					Const2Exp( ref Const2Val( fs, e ).K, e );
+					break;
+				}
+				case ExpKind.VLOCAL: { // already in a register
+					e.Info = e.Var.RIdx;
+					e.Kind = ExpKind.VNONRELOC; // becomes a non-relocatable value
+					break;
+				}
+				case ExpKind.VUPVAL: { // move value to some (pending) register
+					e.Info = CodeABC( fs, OpCode.OP_GETUPVAL, 0, e.Info, 0 );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VINDEXUP: {
+					e.Info = CodeABC( fs, OpCode.OP_GETTABUP, 0, e.Ind.T, e.Ind.Idx );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VINDEXI: {
+					FreeReg( fs, e.Ind.T );
+					e.Info = CodeABC( fs, OpCode.OP_GETI, 0, e.Ind.T, e.Ind.Idx );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VINDEXSTR: {
+					FreeReg( fs, e.Ind.T );
+					e.Info = CodeABC( fs, OpCode.OP_GETFIELD, 0, e.Ind.T, e.Ind.Idx );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VINDEXED: {
+					FreeRegs( fs, e.Ind.T, e.Ind.Idx );
+					e.Info = CodeABC( fs, OpCode.OP_GETTABLE, 0, e.Ind.T, e.Ind.Idx );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VVARARG: case ExpKind.VCALL: {
+					SetOneRet( fs, e );
+					break;
+				}
+				default: break; // there is one value available (somewhere)
+			}
+		}
+
+		/*
+		** Ensure expression value is in register 'reg', making 'e' a
+		** non-relocatable expression.
+		** (Expression still may have jump lists.)
+		*/
+		private static void Discharge2Reg( FuncState fs, ExpDesc e, int reg )
+		{
+			DischargeVars( fs, e );
+			switch( e.Kind )
+			{
+				case ExpKind.VNIL: {
+					Nil( fs, reg, 1 );
+					break;
+				}
+				case ExpKind.VFALSE: {
+					CodeABC( fs, OpCode.OP_LOADFALSE, reg, 0, 0 );
+					break;
+				}
+				case ExpKind.VTRUE: {
+					CodeABC( fs, OpCode.OP_LOADTRUE, reg, 0, 0 );
+					break;
+				}
+				case ExpKind.VKSTR: {
+					Str2K( fs, e );
+					CodeK( fs, reg, e.Info );
+					break;
+				}
+				case ExpKind.VK: {
+					CodeK( fs, reg, e.Info );
+					break;
+				}
+				case ExpKind.VKFLT: {
+					Float( fs, reg, e.NumberValue );
+					break;
+				}
+				case ExpKind.VKINT: {
+					Int( fs, reg, e.IntValue );
+					break;
+				}
+				case ExpKind.VRELOC: {
+					var pc = fs.Proto.Code[e.Info];
+					pc.SETARG_A( reg ); // instruction will put result in 'reg'
+					fs.Proto.Code[e.Info] = pc;
+					break;
+				}
+				case ExpKind.VNONRELOC: {
+					if( reg != e.Info )
+						CodeABC( fs, OpCode.OP_MOVE, reg, e.Info, 0 );
+					break;
+				}
+				default: {
+					Utl.Assert( e.Kind == ExpKind.VJMP );
+					return; // nothing to do...
+				}
+			}
+			e.Info = reg;
+			e.Kind = ExpKind.VNONRELOC;
+		}
+
+		/*
+		** Ensure expression value is in a register, making 'e' a
+		** non-relocatable expression.
+		** (Expression still may have jump lists.)
+		*/
+		private static void Discharge2AnyReg( FuncState fs, ExpDesc e )
+		{
+			if( e.Kind != ExpKind.VNONRELOC ) // no fixed register yet?
+			{
+				ReserveRegs( fs, 1 ); // get a register
+				Discharge2Reg( fs, e, fs.FreeReg - 1 ); // put value there
+			}
+		}
+
+		private static int CodeLoadBool( FuncState fs, int a, OpCode op )
+		{
+			GetLabel( fs ); // those instructions may be jump targets
+			return CodeABC( fs, op, a, 0, 0 );
+		}
+
+		/*
+		** check whether list has any jump that do not produce a value
+		** or produce an inverted value
+		*/
+		private static bool NeedValue( FuncState fs, int list )
+		{
+			for( ; list != NO_JUMP; list = GetJump( fs, list ) )
+			{
+				var i = fs.Proto.Code[GetJumpControl( fs, list )];
+				if( i.GET_OPCODE() != OpCode.OP_TESTSET ) return true;
+			}
+			return false; // not found
+		}
+
+		/*
+		** Ensures final expression result (which includes results from its
+		** jump lists) is in register 'reg'.
+		** If expression has jumps, need to patch these jumps either to
+		** its final position or to "load" instructions (for those tests
+		** that do not produce values).
+		*/
+		private static void Exp2Reg( FuncState fs, ExpDesc e, int reg )
+		{
+			Discharge2Reg( fs, e, reg );
+			if( e.Kind == ExpKind.VJMP ) // expression itself is a test?
+				Concat( fs, ref e.ExitTrue, e.Info ); // put this jump in 't' list
+			if( HasJumps( e ) )
+			{
+				int final; // position after whole expression
+				int p_f = NO_JUMP; // position of an eventual LOAD false
+				int p_t = NO_JUMP; // position of an eventual LOAD true
+				if( NeedValue( fs, e.ExitTrue ) || NeedValue( fs, e.ExitFalse ) )
+				{
+					int fj = (e.Kind == ExpKind.VJMP) ? NO_JUMP : Jump( fs );
+					p_f = CodeLoadBool( fs, reg, OpCode.OP_LFALSESKIP ); // skip next inst.
+					p_t = CodeLoadBool( fs, reg, OpCode.OP_LOADTRUE );
+					/* jump around these booleans if 'e' is not a test */
+					PatchToHere( fs, fj );
+				}
+				final = GetLabel( fs );
+				PatchListAux( fs, e.ExitFalse, final, reg, p_f );
+				PatchListAux( fs, e.ExitTrue, final, reg, p_t );
+			}
+			e.ExitFalse = e.ExitTrue = NO_JUMP;
+			e.Info = reg;
+			e.Kind = ExpKind.VNONRELOC;
+		}
+
+		/*
+		** Ensures final expression result is in next available register.
+		*/
+		public static void Exp2NextReg( FuncState fs, ExpDesc e )
+		{
+			DischargeVars( fs, e );
+			FreeExp( fs, e );
+			ReserveRegs( fs, 1 );
+			Exp2Reg( fs, e, fs.FreeReg - 1 );
+		}
+
+		/*
+		** Ensures final expression result is in some (any) register
+		** and return that register.
+		*/
+		public static int Exp2AnyReg( FuncState fs, ExpDesc e )
+		{
+			DischargeVars( fs, e );
+			if( e.Kind == ExpKind.VNONRELOC ) // expression already has a register?
+			{
+				if( !HasJumps( e ) ) // no jumps?
+					return e.Info; // result is already in a register
+				if( e.Info >= fs.NVarStack() ) // reg. is not a local?
+				{
+					Exp2Reg( fs, e, e.Info ); // put final result in it
+					return e.Info;
+				}
+				/* else expression has jumps and cannot change its register
+				   to hold the jump values, because it is a local variable.
+				   Go through to the default case. */
+			}
+			Exp2NextReg( fs, e ); // default: use next available register
+			return e.Info;
+		}
+
+		/*
+		** Ensures final expression result is either in a register
+		** or in an upvalue.
+		*/
+		public static void Exp2AnyRegUp( FuncState fs, ExpDesc e )
+		{
+			if( e.Kind != ExpKind.VUPVAL || HasJumps( e ) )
+				Exp2AnyReg( fs, e );
+		}
+
+		/*
+		** Ensures final expression result is either in a register
+		** or it is a constant.
+		*/
+		public static void Exp2Val( FuncState fs, ExpDesc e )
+		{
+			if( e.Kind == ExpKind.VJMP || HasJumps( e ) )
+				Exp2AnyReg( fs, e );
+			else
+				DischargeVars( fs, e );
+		}
+
+		/*
+		** Try to make 'e' a K expression with an index in the range of R/K
+		** indices. Return true iff succeeded.
+		*/
+		private static bool Exp2K( FuncState fs, ExpDesc e )
+		{
+			if( !HasJumps( e ) )
+			{
+				int info;
+				switch( e.Kind ) // move constants to 'k'
+				{
+					case ExpKind.VTRUE: info = BoolT( fs ); break;
+					case ExpKind.VFALSE: info = BoolF( fs ); break;
+					case ExpKind.VNIL: info = NilK( fs ); break;
+					case ExpKind.VKINT: info = IntK( fs, e.IntValue ); break;
+					case ExpKind.VKFLT: info = NumberK( fs, e.NumberValue ); break;
+					case ExpKind.VKSTR: info = StringK( fs, e.StrValue ); break;
+					case ExpKind.VK: info = e.Info; break;
+					default: return false; // not a constant
+				}
+				if( info <= Instruction.MAXINDEXRK ) // does constant fit in 'argC'?
+				{
+					e.Kind = ExpKind.VK; // make expression a 'K' expression
+					e.Info = info;
+					return true;
+				}
+			}
+			/* else, expression doesn't fit; leave it unchanged */
+			return false;
+		}
+
+		/*
+		** Ensures final expression result is in a valid R/K index
+		** (that is, it is either in a register or in 'k' with an index
+		** in the range of R/K indices).
+		** Returns true iff expression is K.
+		*/
+		private static bool Exp2RK( FuncState fs, ExpDesc e )
+		{
+			if( Exp2K( fs, e ) )
+				return true;
+			else // not a constant in the right range: put it in a register
+			{
+				Exp2AnyReg( fs, e );
+				return false;
+			}
+		}
+
+		private static void CodeABRK( FuncState fs, OpCode o, int a, int b, ExpDesc ec )
+		{
+			bool k = Exp2RK( fs, ec );
+			CodeABCk( fs, o, a, b, ec.Info, k ? 1 : 0 );
+		}
+
+		/*
+		** Generate code to store result of expression 'ex' into variable 'var'.
+		*/
+		public static void StoreVar( FuncState fs, ExpDesc var, ExpDesc ex )
+		{
+			switch( var.Kind )
+			{
+				case ExpKind.VLOCAL: {
+					FreeExp( fs, ex );
+					Exp2Reg( fs, ex, var.Var.RIdx ); // compute 'ex' into proper place
+					return;
+				}
+				case ExpKind.VUPVAL: {
+					int e = Exp2AnyReg( fs, ex );
+					CodeABC( fs, OpCode.OP_SETUPVAL, e, var.Info, 0 );
+					break;
+				}
+				case ExpKind.VINDEXUP: {
+					CodeABRK( fs, OpCode.OP_SETTABUP, var.Ind.T, var.Ind.Idx, ex );
+					break;
+				}
+				case ExpKind.VINDEXI: {
+					CodeABRK( fs, OpCode.OP_SETI, var.Ind.T, var.Ind.Idx, ex );
+					break;
+				}
+				case ExpKind.VINDEXSTR: {
+					CodeABRK( fs, OpCode.OP_SETFIELD, var.Ind.T, var.Ind.Idx, ex );
+					break;
+				}
+				case ExpKind.VINDEXED: {
+					CodeABRK( fs, OpCode.OP_SETTABLE, var.Ind.T, var.Ind.Idx, ex );
+					break;
+				}
+				default: Utl.Assert( false ); break; // invalid var kind to store
+			}
+			FreeExp( fs, ex );
+		}
+
+		/*
+		** Emit SELF instruction (convert expression 'e' into 'e:key(e,').
+		*/
+		public static void Self( FuncState fs, ExpDesc e, ExpDesc key )
+		{
+			int ereg;
+			Exp2AnyReg( fs, e );
+			ereg = e.Info; // register where 'e' was placed
+			FreeExp( fs, e );
+			e.Info = fs.FreeReg; // base register for op_self
+			e.Kind = ExpKind.VNONRELOC; // self expression has a fixed register
+			ReserveRegs( fs, 2 ); // function and 'self' produced by op_self
+			CodeABRK( fs, OpCode.OP_SELF, e.Info, ereg, key );
+			FreeExp( fs, key );
+		}
+
+		/*
+		** Negate condition 'e' (where 'e' is a comparison).
+		*/
+		private static void NegateCondition( FuncState fs, ExpDesc e )
+		{
+			int ipc = GetJumpControl( fs, e.Info );
+			var pc = fs.Proto.Code[ipc];
+			Utl.Assert( OpCodeInfo.TestTMode( pc.GET_OPCODE() ) &&
+						pc.GET_OPCODE() != OpCode.OP_TESTSET &&
+						pc.GET_OPCODE() != OpCode.OP_TEST );
+			pc.SETARG_k( pc.GETARG_k() ^ 1 );
+			fs.Proto.Code[ipc] = pc;
+		}
+
+		/*
+		** Emit instruction to jump if 'e' is 'cond' (that is, if 'cond'
+		** is true, code will jump if 'e' is true.) Return jump position.
+		** Optimize when 'e' is 'not' something, inverting the condition
+		** and removing the 'not'.
+		*/
+		private static int JumpOnCond( FuncState fs, ExpDesc e, int cond )
+		{
+			if( e.Kind == ExpKind.VRELOC )
+			{
+				var ie = fs.Proto.Code[e.Info];
+				if( ie.GET_OPCODE() == OpCode.OP_NOT )
+				{
+					RemoveLastInstruction( fs ); // remove previous OP_NOT
+					return CondJump( fs, OpCode.OP_TEST, ie.GETARG_B(), 0, 0, cond ^ 1 );
+				}
+				/* else go through */
+			}
+			Discharge2AnyReg( fs, e );
+			FreeExp( fs, e );
+			return CondJump( fs, OpCode.OP_TESTSET, Instruction.NO_REG, e.Info, 0, cond );
+		}
+
+		/*
+		** Emit code to go through if 'e' is true, jump otherwise.
+		*/
+		public static void GoIfTrue( FuncState fs, ExpDesc e )
+		{
+			int pc; // pc of new jump
+			DischargeVars( fs, e );
+			switch( e.Kind )
+			{
+				case ExpKind.VJMP: { // condition?
+					NegateCondition( fs, e ); // jump when it is false
+					pc = e.Info; // save jump position
+					break;
+				}
+				case ExpKind.VK: case ExpKind.VKFLT: case ExpKind.VKINT:
+				case ExpKind.VKSTR: case ExpKind.VTRUE: {
+					pc = NO_JUMP; // always true; do nothing
+					break;
+				}
+				default: {
+					pc = JumpOnCond( fs, e, 0 ); // jump when false
+					break;
+				}
+			}
+			Concat( fs, ref e.ExitFalse, pc ); // insert new jump in false list
+			PatchToHere( fs, e.ExitTrue ); // true list jumps to here (to go through)
+			e.ExitTrue = NO_JUMP;
+		}
+
+		/*
+		** Emit code to go through if 'e' is false, jump otherwise.
+		*/
+		public static void GoIfFalse( FuncState fs, ExpDesc e )
+		{
+			int pc; // pc of new jump
+			DischargeVars( fs, e );
+			switch( e.Kind )
+			{
+				case ExpKind.VJMP: {
+					pc = e.Info; // already jump if true
+					break;
+				}
+				case ExpKind.VNIL: case ExpKind.VFALSE: {
+					pc = NO_JUMP; // always false; do nothing
+					break;
+				}
+				default: {
+					pc = JumpOnCond( fs, e, 1 ); // jump if true
+					break;
+				}
+			}
+			Concat( fs, ref e.ExitTrue, pc ); // insert new jump in 't' list
+			PatchToHere( fs, e.ExitFalse ); // false list jumps to here (to go through)
+			e.ExitFalse = NO_JUMP;
+		}
+
+		/*
+		** Code 'not e', doing constant folding.
+		*/
+		private static void CodeNot( FuncState fs, ExpDesc e )
+		{
+			switch( e.Kind )
+			{
+				case ExpKind.VNIL: case ExpKind.VFALSE: {
+					e.Kind = ExpKind.VTRUE; // true == not nil == not false
+					break;
+				}
+				case ExpKind.VK: case ExpKind.VKFLT: case ExpKind.VKINT:
+				case ExpKind.VKSTR: case ExpKind.VTRUE: {
+					e.Kind = ExpKind.VFALSE; // false == not "x" == not 0.5 == not 1 == not true
+					break;
+				}
+				case ExpKind.VJMP: {
+					NegateCondition( fs, e );
+					break;
+				}
+				case ExpKind.VRELOC:
+				case ExpKind.VNONRELOC: {
+					Discharge2AnyReg( fs, e );
+					FreeExp( fs, e );
+					e.Info = CodeABC( fs, OpCode.OP_NOT, 0, e.Info, 0 );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				default: Utl.Assert( false ); break; // cannot happen
+			}
+			/* interchange true and false lists */
+			{ int temp = e.ExitFalse; e.ExitFalse = e.ExitTrue; e.ExitTrue = temp; }
+			RemoveValues( fs, e.ExitFalse ); // values are useless when negated
+			RemoveValues( fs, e.ExitTrue );
+		}
+
+		/*
+		** Check whether expression 'e' is a short literal string
+		*/
+		private static bool IsKstr( FuncState fs, ExpDesc e )
+		{
+			return e.Kind == ExpKind.VK && !HasJumps( e ) && e.Info <= Instruction.MAXARG_B &&
+				fs.Proto.K[e.Info].V.TtIsString() &&
+				fs.Proto.K[e.Info].V.SValue().Length <= MAXSHORTLEN;
+		}
+
+		/*
+		** Check whether expression 'e' is a literal integer.
+		*/
+		private static bool IsKint( ExpDesc e )
+		{
+			return e.Kind == ExpKind.VKINT && !HasJumps( e );
+		}
+
+		/*
+		** Check whether expression 'e' is a literal integer in
+		** proper range to fit in register C
+		*/
+		private static bool IsCint( ExpDesc e )
+		{
+			return IsKint( e ) && unchecked((ulong)e.IntValue) <= (ulong)Instruction.MAXARG_C;
+		}
+
+		/*
+		** Check whether expression 'e' is a literal integer in
+		** proper range to fit in register sC
+		*/
+		private static bool IsSCint( ExpDesc e )
+		{
+			return IsKint( e ) && FitsC( e.IntValue );
+		}
+
+		/*
+		** Check whether expression 'e' is a literal integer or float in
+		** proper range to fit in a register (sB or sC).
+		*/
+		private static bool IsSCnumber( ExpDesc e, out int pi, ref int isfloat )
+		{
+			long i;
+			pi = 0;
+			if( e.Kind == ExpKind.VKINT )
+				i = e.IntValue;
+			else if( e.Kind == ExpKind.VKFLT && LuaState.FltToInteger( e.NumberValue, out i, F2Imod.F2Ieq ) )
+				isfloat = 1;
+			else
+				return false; // not a number
+			if( !HasJumps( e ) && FitsC( i ) )
+			{
+				pi = Instruction.Int2sC( (int)i );
+				return true;
+			}
+			else
+				return false;
+		}
+
+		/*
+		** Create expression 't[k]'. 't' must have its final result already in a
+		** register or upvalue. Upvalues can only be indexed by literal strings.
+		** Keys can be literal strings in the constant table or arbitrary
+		** values in registers.
+		*/
+		public static void Indexed( FuncState fs, ExpDesc t, ExpDesc k )
+		{
+			if( k.Kind == ExpKind.VKSTR )
+				Str2K( fs, k );
+			Utl.Assert( !HasJumps( t ) &&
+				(t.Kind == ExpKind.VLOCAL || t.Kind == ExpKind.VNONRELOC || t.Kind == ExpKind.VUPVAL) );
+			if( t.Kind == ExpKind.VUPVAL && !IsKstr( fs, k ) ) // upvalue indexed by non 'Kstr'?
+				Exp2AnyReg( fs, t ); // put it in a register
+			if( t.Kind == ExpKind.VUPVAL )
+			{
+				Utl.Assert( IsKstr( fs, k ) );
+				t.Ind.T = t.Info; // upvalue index
+				t.Ind.Idx = k.Info; // literal short string
+				t.Kind = ExpKind.VINDEXUP;
+			}
+			else
+			{
+				/* register index of the table */
+				t.Ind.T = (t.Kind == ExpKind.VLOCAL) ? t.Var.RIdx : t.Info;
+				if( IsKstr( fs, k ) )
+				{
+					t.Ind.Idx = k.Info; // literal short string
+					t.Kind = ExpKind.VINDEXSTR;
+				}
+				else if( IsCint( k ) )
+				{
+					t.Ind.Idx = (int)k.IntValue; // int. constant in proper range
+					t.Kind = ExpKind.VINDEXI;
+				}
+				else
+				{
+					t.Ind.Idx = Exp2AnyReg( fs, k ); // register
+					t.Kind = ExpKind.VINDEXED;
+				}
+			}
+		}
+
+		/*
+		** Return false if folding can raise an error.
+		** Bitwise operations need operands convertible to integers; division
+		** operations cannot have 0 as divisor.
+		*/
+		private static bool ValidOp( LuaOp op, ref TValue v1, ref TValue v2 )
+		{
+			switch( op )
+			{
+				case LuaOp.LUA_OPBAND: case LuaOp.LUA_OPBOR: case LuaOp.LUA_OPBXOR:
+				case LuaOp.LUA_OPSHL: case LuaOp.LUA_OPSHR: case LuaOp.LUA_OPBNOT: { // conversion errors
+					long i;
+					return LuaState.V_ToIntegerNS( ref v1, out i, F2Imod.F2Ieq ) &&
+						   LuaState.V_ToIntegerNS( ref v2, out i, F2Imod.F2Ieq );
+				}
+				case LuaOp.LUA_OPDIV: case LuaOp.LUA_OPIDIV: case LuaOp.LUA_OPMOD: // division by 0
+					return v2.NValue() != 0;
+				default: return true; // everything else is valid
+			}
+		}
+
+		/*
+		** Try to "constant-fold" an operation; return true iff successful.
+		** (In this case, 'e1' has the final result.)
+		*/
+		private static bool ConstFolding( FuncState fs, LuaOp op, ExpDesc e1, ExpDesc e2 )
+		{
+			TValue v1, v2;
+			var res = new TValue();
+			if( !ToNumeral( e1, out v1 ) || !ToNumeral( e2, out v2 ) || !ValidOp( op, ref v1, ref v2 ) )
+				return false; // non-numeric operands or not safe to fold
+			LuaState.O_RawArith( fs.State, op, ref v1, ref v2, ref res ); // does operation
+			if( res.TtIsInteger() )
+			{
+				e1.Kind = ExpKind.VKINT;
+				e1.IntValue = res.IValue();
+			}
+			else // folds neither NaN nor 0.0 (to avoid problems with -0.0)
+			{
+				double n = res.FltValue;
+				if( double.IsNaN( n ) || n == 0 )
+					return false;
+				e1.Kind = ExpKind.VKFLT;
+				e1.NumberValue = n;
+			}
+			return true;
+		}
+
+		/*
+		** Convert a BinOpr to an OpCode  (ORDER OPR - ORDER OP)
+		*/
+		private static OpCode BinOpr2Op( BinOpr opr, BinOpr baser, OpCode bas )
+		{
+			Utl.Assert( baser <= opr &&
+				((baser == BinOpr.ADD && opr <= BinOpr.SHR) ||
+				 (baser == BinOpr.LT && opr <= BinOpr.LE)) );
+			return (OpCode)(((int)opr - (int)baser) + (int)bas);
+		}
+
+		/*
+		** Convert a UnOpr to an OpCode  (ORDER OPR - ORDER OP)
+		*/
+		private static OpCode UnOpr2Op( UnOpr opr )
+		{
+			return (OpCode)(((int)opr - (int)UnOpr.MINUS) + (int)OpCode.OP_UNM);
+		}
+
+		/*
+		** Convert a BinOpr to a tag method  (ORDER OPR - ORDER TM)
+		*/
+		private static TMS BinOpr2TM( BinOpr opr )
+		{
+			Utl.Assert( BinOpr.ADD <= opr && opr <= BinOpr.SHR );
+			return (TMS)(((int)opr - (int)BinOpr.ADD) + (int)TMS.TM_ADD);
+		}
+
+		/*
+		** Emit code for unary expressions that "produce values"
+		** (everything but 'not').
+		** Expression to produce final result will be encoded in 'e'.
+		*/
+		private static void CodeUnExpVal( FuncState fs, OpCode op, ExpDesc e, int line )
+		{
+			int r = Exp2AnyReg( fs, e ); // opcodes operate only on registers
+			FreeExp( fs, e );
+			e.Info = CodeABC( fs, op, 0, r, 0 ); // generate opcode
+			e.Kind = ExpKind.VRELOC; // all those operations are relocatable
+			FixLine( fs, line );
+		}
+
+		/*
+		** Emit code for binary expressions that "produce values"
+		** (everything but logical operators 'and'/'or' and comparison
+		** operators).
+		** Expression to produce final result will be encoded in 'e1'.
+		*/
+		private static void FinishBinExpVal( FuncState fs, ExpDesc e1, ExpDesc e2,
+			OpCode op, int v2, int flip, int line, OpCode mmop, TMS ev )
+		{
+			int v1 = Exp2AnyReg( fs, e1 );
+			int pc = CodeABCk( fs, op, 0, v1, v2, 0 );
+			FreeExps( fs, e1, e2 );
+			e1.Info = pc;
+			e1.Kind = ExpKind.VRELOC; // all those operations are relocatable
+			FixLine( fs, line );
+			CodeABCk( fs, mmop, v1, v2, (int)ev, flip ); // to call metamethod
+			FixLine( fs, line );
+		}
+
+		/*
+		** Emit code for binary expressions that "produce values" over
+		** two registers.
+		*/
+		private static void CodeBinExpVal( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int line )
+		{
+			OpCode op = BinOpr2Op( opr, BinOpr.ADD, OpCode.OP_ADD );
+			int v2 = Exp2AnyReg( fs, e2 ); // make sure 'e2' is in a register
+			/* 'e1' must be already in a register or it is a constant */
+			Utl.Assert( (ExpKind.VNIL <= e1.Kind && e1.Kind <= ExpKind.VKSTR) ||
+						e1.Kind == ExpKind.VNONRELOC || e1.Kind == ExpKind.VRELOC );
+			Utl.Assert( OpCode.OP_ADD <= op && op <= OpCode.OP_SHR );
+			FinishBinExpVal( fs, e1, e2, op, v2, 0, line, OpCode.OP_MMBIN, BinOpr2TM( opr ) );
+		}
+
+		/*
+		** Code binary operators with immediate operands.
+		*/
+		private static void CodeBinI( FuncState fs, OpCode op,
+			ExpDesc e1, ExpDesc e2, int flip, int line, TMS ev )
+		{
+			int v2 = Instruction.Int2sC( (int)e2.IntValue ); // immediate operand
+			Utl.Assert( e2.Kind == ExpKind.VKINT );
+			FinishBinExpVal( fs, e1, e2, op, v2, flip, line, OpCode.OP_MMBINI, ev );
+		}
+
+		/*
+		** Code binary operators with K operand.
+		*/
+		private static void CodeBinK( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int flip, int line )
+		{
+			TMS ev = BinOpr2TM( opr );
+			int v2 = e2.Info; // K index
+			OpCode op = BinOpr2Op( opr, BinOpr.ADD, OpCode.OP_ADDK );
+			FinishBinExpVal( fs, e1, e2, op, v2, flip, line, OpCode.OP_MMBINK, ev );
+		}
+
+		/* Try to code a binary operator negating its second operand.
+		** For the metamethod, 2nd operand must keep its original value.
+		*/
+		private static bool FinishBinExpNeg( FuncState fs, ExpDesc e1, ExpDesc e2,
+			OpCode op, int line, TMS ev )
+		{
+			if( !IsKint( e2 ) )
+				return false; // not an integer constant
+			else
+			{
+				long i2 = e2.IntValue;
+				if( !(FitsC( i2 ) && FitsC( -i2 )) )
+					return false; // not in the proper range
+				else // operating a small integer constant
+				{
+					int v2 = (int)i2;
+					FinishBinExpVal( fs, e1, e2, op, Instruction.Int2sC( -v2 ), 0, line, OpCode.OP_MMBINI, ev );
+					/* correct metamethod argument */
+					var mm = fs.Proto.Code[fs.Pc - 1];
+					mm.SETARG_B( Instruction.Int2sC( v2 ) );
+					fs.Proto.Code[fs.Pc - 1] = mm;
+					return true; // successfully coded
+				}
+			}
+		}
+
+		private static void SwapExps( ExpDesc e1, ExpDesc e2 )
+		{
+			var temp = new ExpDesc();
+			temp.CopyFrom( e1 ); e1.CopyFrom( e2 ); e2.CopyFrom( temp ); // swap 'e1' and 'e2'
+		}
+
+		/*
+		** Code binary operators with no constant operand.
+		*/
+		private static void CodeBinNoK( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int flip, int line )
+		{
+			if( flip != 0 )
+				SwapExps( e1, e2 ); // back to original order
+			CodeBinExpVal( fs, opr, e1, e2, line ); // use standard operators
+		}
+
+		/*
+		** Code arithmetic operators ('+', '-', ...). If second operand is a
+		** constant in the proper range, use variant opcodes with K operands.
+		*/
+		private static void CodeArith( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int flip, int line )
+		{
+			if( IsNumeral( e2 ) && Exp2K( fs, e2 ) ) // K operand?
+				CodeBinK( fs, opr, e1, e2, flip, line );
+			else // 'e2' is neither an immediate nor a K operand
+				CodeBinNoK( fs, opr, e1, e2, flip, line );
+		}
+
+		/*
+		** Code commutative operators ('+', '*'). If first operand is a
+		** numeric constant, change order of operands to try to use an
+		** immediate or K operator.
+		*/
+		private static void CodeCommutative( FuncState fs, BinOpr op,
+			ExpDesc e1, ExpDesc e2, int line )
+		{
+			int flip = 0;
+			if( IsNumeral( e1 ) ) // is first operand a numeric constant?
+			{
+				SwapExps( e1, e2 ); // change order
+				flip = 1;
+			}
+			if( op == BinOpr.ADD && IsSCint( e2 ) ) // immediate operand?
+				CodeBinI( fs, OpCode.OP_ADDI, e1, e2, flip, line, TMS.TM_ADD );
+			else
+				CodeArith( fs, op, e1, e2, flip, line );
+		}
+
+		/*
+		** Code bitwise operations; they are all commutative, so the function
+		** tries to put an integer constant as the 2nd operand (a K operand).
+		*/
+		private static void CodeBitwise( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int line )
+		{
+			int flip = 0;
+			if( e1.Kind == ExpKind.VKINT )
+			{
+				SwapExps( e1, e2 ); // 'e2' will be the constant operand
+				flip = 1;
+			}
+			if( e2.Kind == ExpKind.VKINT && Exp2K( fs, e2 ) ) // K operand?
+				CodeBinK( fs, opr, e1, e2, flip, line );
+			else // no constants
+				CodeBinNoK( fs, opr, e1, e2, flip, line );
+		}
+
+		/*
+		** Emit code for order comparisons. When using an immediate operand,
+		** 'isfloat' tells whether the original value was a float.
+		*/
+		private static void CodeOrder( FuncState fs, BinOpr opr, ExpDesc e1, ExpDesc e2 )
+		{
+			int r1, r2;
+			int im;
+			int isfloat = 0;
+			OpCode op;
+			if( IsSCnumber( e2, out im, ref isfloat ) )
+			{
+				/* use immediate operand */
+				r1 = Exp2AnyReg( fs, e1 );
+				r2 = im;
+				op = BinOpr2Op( opr, BinOpr.LT, OpCode.OP_LTI );
+			}
+			else if( IsSCnumber( e1, out im, ref isfloat ) )
+			{
+				/* transform (A < B) to (B > A) and (A <= B) to (B >= A) */
+				r1 = Exp2AnyReg( fs, e2 );
+				r2 = im;
+				op = BinOpr2Op( opr, BinOpr.LT, OpCode.OP_GTI );
+			}
+			else // regular case, compare two registers
+			{
+				r1 = Exp2AnyReg( fs, e1 );
+				r2 = Exp2AnyReg( fs, e2 );
+				op = BinOpr2Op( opr, BinOpr.LT, OpCode.OP_LT );
+			}
+			FreeExps( fs, e1, e2 );
+			e1.Info = CondJump( fs, op, r1, r2, isfloat, 1 );
+			e1.Kind = ExpKind.VJMP;
+		}
+
+		/*
+		** Emit code for equality comparisons ('==', '~=').
+		** 'e1' was already put as RK by 'Infix'.
+		*/
+		private static void CodeEq( FuncState fs, BinOpr opr, ExpDesc e1, ExpDesc e2 )
+		{
+			int r1, r2;
+			int im;
+			int isfloat = 0; // not needed here, but kept for symmetry
+			OpCode op;
+			if( e1.Kind != ExpKind.VNONRELOC )
+			{
+				Utl.Assert( e1.Kind == ExpKind.VK || e1.Kind == ExpKind.VKINT || e1.Kind == ExpKind.VKFLT );
+				SwapExps( e1, e2 );
+			}
+			r1 = Exp2AnyReg( fs, e1 ); // 1st expression must be in register
+			if( IsSCnumber( e2, out im, ref isfloat ) )
+			{
+				op = OpCode.OP_EQI;
+				r2 = im; // immediate operand
+			}
+			else if( Exp2RK( fs, e2 ) ) // 2nd expression is constant?
+			{
+				op = OpCode.OP_EQK;
+				r2 = e2.Info; // constant index
+			}
+			else
+			{
+				op = OpCode.OP_EQ; // will compare two registers
+				r2 = Exp2AnyReg( fs, e2 );
+			}
+			FreeExps( fs, e1, e2 );
+			e1.Info = CondJump( fs, op, r1, r2, isfloat, (opr == BinOpr.EQ) ? 1 : 0 );
+			e1.Kind = ExpKind.VJMP;
+		}
+
+		/*
+		** Apply prefix operation 'op' to expression 'e'.
+		*/
+		public static void Prefix( FuncState fs, UnOpr opr, ExpDesc e, int line )
+		{
+			var ef = new ExpDesc(); // fake 2nd operand
+			ef.Kind = ExpKind.VKINT;
+			ef.IntValue = 0;
+			ef.ExitTrue = ef.ExitFalse = NO_JUMP;
+			DischargeVars( fs, e );
+			switch( opr )
+			{
+				case UnOpr.MINUS: case UnOpr.BNOT: // use 'ef' as fake 2nd operand
+					if( ConstFolding( fs, (LuaOp)((int)opr + (int)LuaOp.LUA_OPUNM), e, ef ) )
+						break;
+					/* else */
+					CodeUnExpVal( fs, UnOpr2Op( opr ), e, line );
+					break;
+				case UnOpr.LEN:
+					CodeUnExpVal( fs, UnOpr2Op( opr ), e, line );
+					break;
+				case UnOpr.NOT: CodeNot( fs, e ); break;
+				default: Utl.Assert( false ); break;
+			}
+		}
+
+		/*
+		** Process 1st operand 'v' of binary operation 'op' before reading
+		** 2nd operand.
+		*/
+		public static void Infix( FuncState fs, BinOpr op, ExpDesc v )
+		{
+			DischargeVars( fs, v );
+			switch( op )
+			{
+				case BinOpr.AND: {
+					GoIfTrue( fs, v ); // go ahead only if 'v' is true
+					break;
+				}
+				case BinOpr.OR: {
+					GoIfFalse( fs, v ); // go ahead only if 'v' is false
+					break;
+				}
+				case BinOpr.CONCAT: {
+					Exp2NextReg( fs, v ); // operand must be on the stack
+					break;
+				}
+				case BinOpr.ADD: case BinOpr.SUB:
+				case BinOpr.MUL: case BinOpr.DIV: case BinOpr.IDIV:
+				case BinOpr.MOD: case BinOpr.POW:
+				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR:
+				case BinOpr.SHL: case BinOpr.SHR: {
+					if( !IsNumeral( v ) )
+						Exp2AnyReg( fs, v );
+					/* else keep numeral, which may be folded or used as an immediate
+					   operand */
+					break;
+				}
+				case BinOpr.EQ: case BinOpr.NE: {
+					if( !IsNumeral( v ) )
+						Exp2RK( fs, v );
+					/* else keep numeral, which may be an immediate operand */
+					break;
+				}
+				case BinOpr.LT: case BinOpr.LE:
+				case BinOpr.GT: case BinOpr.GE: {
+					int dummy, dummy2 = 0;
+					if( !IsSCnumber( v, out dummy, ref dummy2 ) )
+						Exp2AnyReg( fs, v );
+					/* else keep numeral, which may be an immediate operand */
+					break;
+				}
+				default: Utl.Assert( false ); break;
+			}
+		}
+
+		/*
+		** Create code for '(e1 .. e2)'.
+		** For '(e1 .. e2.1 .. e2.2)' (which is '(e1 .. (e2.1 .. e2.2))',
+		** because concatenation is right associative), merge both CONCATs.
+		*/
+		private static void CodeConcat( FuncState fs, ExpDesc e1, ExpDesc e2, int line )
+		{
+			int prev = PreviousInstruction( fs );
+			if( prev >= 0 && fs.Proto.Code[prev].GET_OPCODE() == OpCode.OP_CONCAT ) // is 'e2' a concatenation?
+			{
+				var ie2 = fs.Proto.Code[prev];
+				int n = ie2.GETARG_B(); // # of elements concatenated in 'e2'
+				Utl.Assert( e1.Info + 1 == ie2.GETARG_A() );
+				FreeExp( fs, e2 );
+				ie2.SETARG_A( e1.Info ); // correct first element ('e1')
+				ie2.SETARG_B( n + 1 ); // will concatenate one more element
+				fs.Proto.Code[prev] = ie2;
+			}
+			else // 'e2' is not a concatenation
+			{
+				CodeABC( fs, OpCode.OP_CONCAT, e1.Info, 2, 0 ); // new concat opcode
+				FreeExp( fs, e2 );
+				FixLine( fs, line );
+			}
+		}
+
+		/*
+		** Finalize code for binary operation, after reading 2nd operand.
+		*/
+		public static void Posfix( FuncState fs, BinOpr opr,
+			ExpDesc e1, ExpDesc e2, int line )
+		{
+			DischargeVars( fs, e2 );
+			if( opr <= BinOpr.SHR && ConstFolding( fs, (LuaOp)((int)opr + (int)LuaOp.LUA_OPADD), e1, e2 ) )
+				return; // done by folding
+			switch( opr )
+			{
+				case BinOpr.AND: {
+					Utl.Assert( e1.ExitTrue == NO_JUMP ); // list closed by 'Infix'
+					Concat( fs, ref e2.ExitFalse, e1.ExitFalse );
+					e1.CopyFrom( e2 );
+					break;
+				}
+				case BinOpr.OR: {
+					Utl.Assert( e1.ExitFalse == NO_JUMP ); // list closed by 'Infix'
+					Concat( fs, ref e2.ExitTrue, e1.ExitTrue );
+					e1.CopyFrom( e2 );
+					break;
+				}
+				case BinOpr.CONCAT: { // e1 .. e2
+					Exp2NextReg( fs, e2 );
+					CodeConcat( fs, e1, e2, line );
+					break;
+				}
+				case BinOpr.ADD: case BinOpr.MUL: {
+					CodeCommutative( fs, opr, e1, e2, line );
+					break;
+				}
+				case BinOpr.SUB: {
+					if( FinishBinExpNeg( fs, e1, e2, OpCode.OP_ADDI, line, TMS.TM_SUB ) )
+						break; // coded as (r1 + -I)
+					/* ELSE */
+					CodeArith( fs, opr, e1, e2, 0, line );
+					break;
+				}
+				case BinOpr.DIV: case BinOpr.IDIV: case BinOpr.MOD: case BinOpr.POW: {
+					CodeArith( fs, opr, e1, e2, 0, line );
+					break;
+				}
+				case BinOpr.BAND: case BinOpr.BOR: case BinOpr.BXOR: {
+					CodeBitwise( fs, opr, e1, e2, line );
+					break;
+				}
+				case BinOpr.SHL: {
+					if( IsSCint( e1 ) )
+					{
+						SwapExps( e1, e2 );
+						CodeBinI( fs, OpCode.OP_SHLI, e1, e2, 1, line, TMS.TM_SHL ); // I << r2
+					}
+					else if( FinishBinExpNeg( fs, e1, e2, OpCode.OP_SHRI, line, TMS.TM_SHL ) )
+					{
+						/* coded as (r1 >> -I) */
+					}
+					else // regular case (two registers)
+						CodeBinExpVal( fs, opr, e1, e2, line );
+					break;
+				}
+				case BinOpr.SHR: {
+					if( IsSCint( e2 ) )
+						CodeBinI( fs, OpCode.OP_SHRI, e1, e2, 0, line, TMS.TM_SHR ); // r1 >> I
+					else // regular case (two registers)
+						CodeBinExpVal( fs, opr, e1, e2, line );
+					break;
+				}
+				case BinOpr.EQ: case BinOpr.NE: {
+					CodeEq( fs, opr, e1, e2 );
+					break;
+				}
+				case BinOpr.GT: case BinOpr.GE: {
+					/* '(a > b)' <=> '(b < a)';  '(a >= b)' <=> '(b <= a)' */
+					SwapExps( e1, e2 );
+					opr = (BinOpr)((opr - BinOpr.GT) + BinOpr.LT);
+					CodeOrder( fs, opr, e1, e2 );
+					break;
+				}
+				case BinOpr.LT: case BinOpr.LE: {
+					CodeOrder( fs, opr, e1, e2 );
+					break;
+				}
+				default: Utl.Assert( false ); break;
+			}
+		}
+
+		/*
+		** Change line information associated with current position, by removing
+		** previous info and adding it again with new line.
+		*/
+		public static void FixLine( FuncState fs, int line )
+		{
+			RemoveLastLineInfo( fs );
+			SaveLineInfo( fs, fs.Proto, line );
+		}
+
+		public static void SetTableSize( FuncState fs, int pc, int ra, int asize, int hsize )
+		{
+			int rb = (hsize != 0) ? LuaTable.CeilLog2( hsize ) + 1 : 0; // hash size
+			int extra = asize / (Instruction.MAXARG_C + 1); // higher bits of array size
+			int rc = asize % (Instruction.MAXARG_C + 1); // lower bits of array size
+			int k = (extra > 0) ? 1 : 0; // true iff needs extra argument
+			fs.Proto.Code[pc] = Instruction.CreateABCk( OpCode.OP_NEWTABLE, ra, rb, rc, k );
+			fs.Proto.Code[pc + 1] = Instruction.CreateAx( OpCode.OP_EXTRAARG, extra );
+		}
+
+		/*
+		** Emit a SETLIST instruction.
+		** 'base' is register that keeps table;
+		** 'nelems' is #table plus those to be stored now;
+		** 'tostore' is number of values (in registers 'base + 1',...) to add to
+		** table (or LUA_MULTRET to add up to stack top).
+		*/
+		public static void SetList( FuncState fs, int bas, int nelems, int tostore )
+		{
+			Utl.Assert( tostore != 0 && tostore <= LuaDef.LFIELDS_PER_FLUSH );
+			if( tostore == LuaDef.LUA_MULTRET )
+				tostore = 0;
+			if( nelems <= Instruction.MAXARG_C )
+				CodeABC( fs, OpCode.OP_SETLIST, bas, tostore, nelems );
+			else
+			{
+				int extra = nelems / (Instruction.MAXARG_C + 1);
+				nelems %= (Instruction.MAXARG_C + 1);
+				CodeABCk( fs, OpCode.OP_SETLIST, bas, tostore, nelems, 1 );
+				CodeExtraArg( fs, extra );
+			}
+			fs.FreeReg = bas + 1; // free registers with list values
+		}
+
+		/*
+		** return the final target of a jump (skipping jumps to jumps)
+		*/
+		private static int FinalTarget( List<Instruction> code, int i )
+		{
+			int count;
+			for( count = 0; count < 100; count++ ) // avoid infinite loops
+			{
+				var pc = code[i];
+				if( pc.GET_OPCODE() != OpCode.OP_JMP )
+					break;
+				else
+					i += pc.GETARG_sJ() + 1;
+			}
+			return i;
+		}
+
+		/*
+		** Do a final pass over the code of a function, doing small peephole
+		** optimizations and adjustments.
+		*/
+		public static void Finish( FuncState fs )
+		{
+			int i;
+			var p = fs.Proto;
+			for( i = 0; i < fs.Pc; i++ )
+			{
+				var pc = p.Code[i];
+				Utl.Assert( i == 0 || OpCodeInfo.IsOT( p.Code[i - 1] ) == OpCodeInfo.IsIT( pc ) );
+				switch( pc.GET_OPCODE() )
+				{
+					case OpCode.OP_RETURN0: case OpCode.OP_RETURN1:
+					case OpCode.OP_RETURN: case OpCode.OP_TAILCALL: {
+						if( pc.GET_OPCODE() == OpCode.OP_RETURN0 || pc.GET_OPCODE() == OpCode.OP_RETURN1 )
+						{
+							if( !(fs.NeedClose || p.IsVarArg) )
+								break; // no extra work
+							/* else use OP_RETURN to do the extra work */
+							pc.SET_OPCODE( OpCode.OP_RETURN );
+						}
+						if( fs.NeedClose )
+							pc.SETARG_k( 1 ); // signal that it needs to close
+						if( p.IsVarArg )
+							pc.SETARG_C( p.NumParams + 1 ); // signal that it is vararg
+						p.Code[i] = pc;
+						break;
+					}
+					case OpCode.OP_JMP: {
+						int target = FinalTarget( p.Code, i );
+						FixJump( fs, i, target );
+						break;
+					}
+					default: break;
+				}
+			}
 		}
 	}
 
 }
-

@@ -94,7 +94,7 @@ public class LuaInterpreterTests : LuaTest
 
         Assert.That(Eval("require('lib.greet').hello('cosmos')"), Is.EqualTo("hello cosmos"));
         Assert.That(Eval("require('lib.greet') == require('lib.greet')"), Is.EqualTo("true"));
-        Assert.That(Eval("require('lib')"), Is.EqualTo("lib package"));
+        Assert.That(Eval("require('lib')"), Is.EqualTo("lib package\tlib/init.lua"));
         Assert.That(Eval("dofile('value.lua')"), Is.EqualTo("42"));
         Assert.That(Eval("loadfile('value.lua')()"), Is.EqualTo("42"));
         Assert.That(ErrorOf("require('nothing')"), Does.Contain("module 'nothing' not found"));

@@ -30,7 +30,8 @@ public class LuaLibraryTests : LuaTest
     [TestCase("10 / 2", "5.0")]
     [TestCase("2^2", "4.0")]
     [TestCase("2^63", "9.2233720368548e+18")]
-    [TestCase("'10' + 1", "11.0")]
+    [TestCase("'10' + 1", "11")]
+    [TestCase("'10.0' + 1", "11.0")]
     [TestCase("math.maxinteger", "9223372036854775807")]
     [TestCase("3.0 .. ''", "3.0")]
     public void NumbersAreWrittenAsLuaWritesThem(string expression, string expected)
@@ -75,7 +76,7 @@ public class LuaLibraryTests : LuaTest
     {
         Assert.That(Eval("5 & 3, 5 | 3, 5 ~ 3, ~0, 1 << 62, 1 << 64, -1 >> 63, 2.0 | 1"), Is.EqualTo("1\t7\t6\t-1\t4611686018427387904\t0\t1\t3"));
         Assert.That(ErrorOf("return 1.5 | 0"), Does.Contain("number has no integer representation"));
-        Assert.That(Eval("bit32.band(0xFF, 0x0F), bit32.bnot(0), bit32.rshift(-1, 28)"), Is.EqualTo("15\t4294967295\t15"));
+        Assert.That(Eval("bit32"), Is.EqualTo("nil"));
     }
 
     [Test]
@@ -354,7 +355,7 @@ public class LuaLibraryTests : LuaTest
     public void DateRejectsUnknownConversions()
     {
         Assert.That(ErrorOf("os.date('%Q')"), Does.Contain("invalid conversion specifier '%Q'"));
-        Assert.That(ErrorOf("os.time({ year = 2026 })"), Does.Contain("field 'day' missing in date table"));
+        Assert.That(ErrorOf("os.time({ year = 2026 })"), Does.Contain("field 'month' missing in date table"));
     }
 
     [Test]

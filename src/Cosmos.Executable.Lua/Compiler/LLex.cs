@@ -228,6 +228,19 @@ namespace Cosmos.Executable.Lua
 			ReservedWordDict.Add("while", TK.WHILE);
 		}
 
+		// the strings of the chunk, one copy of each (the scanner table of
+		// luaX_newstring): equal literals are one object, as '%p' shows
+		private readonly Dictionary<string, string> Strings = new Dictionary<string, string>();
+
+		private string NewString( string s )
+		{
+			string saved;
+			if( Strings.TryGetValue( s, out saved ) ) // string already present?
+				return saved; // get saved copy
+			Strings.Add( s, s );
+			return s;
+		}
+
         public LLex( ILuaState lua, ILoadInfo loadinfo, string name )
         {
 			Lua			= (LuaState)lua;
@@ -432,8 +445,8 @@ namespace Cosmos.Executable.Lua
 				if( !_CurrentIsXDigit() )
 					break;
 				i++;
+				_EscCheck( r <= (0x7FFFFFFFL >> 4), "UTF-8 value too large" );
 				r = (r << 4) + Utl.HexaValue( Current );
-				_EscCheck( r <= 0x10FFFF, "UTF-8 value too large" );
 			}
 			_EscCheck( Current == '}', "missing '}'" );
 			_Next(); // skip '}'
@@ -576,17 +589,19 @@ namespace Cosmos.Executable.Lua
 			}
             for(;;)
             {
-				if( Current == expo[0] || Current == expo[1] )
+				if( Current == expo[0] || Current == expo[1] ) // exponent mark?
 				{
 					_SaveAndNext();
-					if( Current == '+' || Current == '-' )
+					if( Current == '+' || Current == '-' ) // optional exponent sign
 						_SaveAndNext();
 				}
-				if( _CurrentIsXDigit() || Current == '.' )
+				else if( _CurrentIsXDigit() || Current == '.' ) // '%x|%.'
 					_SaveAndNext();
 				else
 					break;
             }
+			if( _CurrentIsAlpha() || Current == '_' ) // is numeral touching a letter?
+				_SaveAndNext(); // force an error
 
 			TValue obj;
 			if( !LuaState.O_Str2Num( _GetSavedString(), out obj ) )
@@ -727,7 +742,7 @@ namespace Cosmos.Executable.Lua
                         int sep = _SkipSep();
                         if( sep >= 0 ) {
                             string seminfo = _ReadLongString( sep, false );
-                            return new StringToken( seminfo );
+                            return new StringToken( NewString( seminfo ) );
                         }
                         else if( sep == -1 ) return new LiteralToken('[');
                         else _LexError("invalid long string delimiter", (int)TK.STRING);
@@ -778,7 +793,7 @@ namespace Cosmos.Executable.Lua
 
                     case '"':
                     case '\'': {
-                        return new StringToken( _ReadString() );
+                        return new StringToken( NewString( _ReadString() ) );
                     }
 
                     case '.': {
@@ -835,7 +850,7 @@ namespace Cosmos.Executable.Lua
 							}
 							else
 							{
-								return new NameToken( identifier );
+								return new NameToken( NewString( identifier ) );
 							}
                         }
                         else

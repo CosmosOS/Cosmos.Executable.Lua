@@ -64,7 +64,7 @@ namespace Cosmos.Executable.Lua
 		public const int LUA_IDSIZE				= 60;
 
 		public const string LUA_VERSION_MAJOR	= "5";
-		public const string LUA_VERSION_MINOR	= "3";
+		public const string LUA_VERSION_MINOR	= "4";
 		public const string LUA_VERSION = "Lua " + LUA_VERSION_MAJOR + "." + LUA_VERSION_MINOR;
 
 		public const string LUA_ENV = "_ENV";
@@ -123,10 +123,9 @@ namespace Cosmos.Executable.Lua
 		LUA_ERRRUN		 = 2,
 		LUA_ERRSYNTAX	 = 3,
 		LUA_ERRMEM		 = 4,
-		LUA_ERRGCMM		 = 5,
-		LUA_ERRERR		 = 6,
+		LUA_ERRERR		 = 5,
 
-		LUA_ERRFILE		 = 7,
+		LUA_ERRFILE		 = 6,
 	}
 
 	/* ORDER TM, ORDER OP */

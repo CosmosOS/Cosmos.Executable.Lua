@@ -10,15 +10,13 @@ namespace Cosmos.Executable.Lua;
 
 /// <summary>
 /// What the libraries of one Lua state reach the machine through: the
-/// console, the directory relative paths start from, the clock and the
-/// random numbers. The coroutines of a state share it; every state has its
-/// own, so states on different threads, such as the shells of two console
-/// sessions, do not step on each other.
+/// console, the directory relative paths start from and the clock. The
+/// coroutines of a state share it; every state has its own, so states on
+/// different threads, such as the shells of two console sessions, do not
+/// step on each other.
 /// </summary>
 internal sealed class LuaHost
 {
-    private Random? _random;
-
     /// <summary>The directory relative paths resolve against; null leaves them to <see cref="System.IO"/>.</summary>
     public string? WorkingDirectory { get; set; }
 
@@ -101,16 +99,6 @@ internal sealed class LuaHost
 
     /// <summary>When the state was made, for <c>os.clock</c>.</summary>
     public long StartTimestamp { get; } = Stopwatch.GetTimestamp();
-
-    /// <summary>
-    /// The generator behind <c>math.random</c>, seeded from the clock on
-    /// first use; <c>math.randomseed</c> replaces it.
-    /// </summary>
-    public Random Random
-    {
-        get => _random ??= new Random(unchecked((int)Stopwatch.GetTimestamp()));
-        set => _random = value;
-    }
 
     /// <summary>
     /// The code <c>os.exit</c> asked for, while it unwinds the script; see

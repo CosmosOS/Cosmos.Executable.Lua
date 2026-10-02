@@ -162,6 +162,18 @@ namespace Cosmos.Executable.Lua
 			else return UnboundSearch(j);
 		} }
 
+		// luaH_realasize: the size of the array part
+		public int ArraySize
+		{
+			get { return ArrayPart.Length; }
+		}
+
+		// luaH_resizearray: a new size for the array part, the hash part kept
+		public void ResizeArray(int nasize)
+		{
+			Resize(nasize, HashPart == DummyHashPart ? 0 : HashPart.Length);
+		}
+
 		public void Resize(int nasize, int nhsize)
 		{
 			int oasize = ArrayPart.Length;
@@ -362,7 +374,7 @@ namespace Cosmos.Executable.Lua
 			8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
 			8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 		};
-		private int CeilLog2(int x)
+		internal static int CeilLog2(int x)
 		{
 			Utl.Assert(x > 0);
 			int l = 0;
@@ -472,7 +484,7 @@ namespace Cosmos.Executable.Lua
 
 		private StkId NewTableKey(ref TValue key)
 		{
-			if(key.TtIsNil()) { L.G_RunError("table index is nil"); }
+			if(key.TtIsNil()) { L.G_RunError("index is nil"); }
 
 			// an integral float key is the integer it equals
 			var k = key;
@@ -481,7 +493,7 @@ namespace Cosmos.Executable.Lua
 				if(LuaState.FloatToInteger(k.FltValue, out i, 0))
 					{ k.SetIValue(i); }
 				else if(System.Double.IsNaN(k.FltValue))
-					{ L.G_RunError("table index is NaN"); }
+					{ L.G_RunError("index is NaN"); }
 			}
 
 			var mp = GetHashNode(ref k);

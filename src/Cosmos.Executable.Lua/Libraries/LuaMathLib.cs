@@ -7,9 +7,10 @@ namespace Cosmos.Executable.Lua
 {
 	using Math = System.Math;
 	using Double = System.Double;
-	using Random = System.Random;
+	using DateTimeOffset = System.DateTimeOffset;
+	using Stopwatch = System.Diagnostics.Stopwatch;
 
-	// lmathlib.c of Lua 5.3, with the functions it keeps for Lua 5.2 code
+	// lmathlib.c of Lua 5.4, with the functions it keeps for Lua 5.3 code
 	// (LUA_COMPAT_MATHLIB)
 	internal class LuaMathLib
 	{
@@ -36,8 +37,6 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "min",   		Math_Min ),
 				new NameFuncPair( "modf",  		Math_Modf ),
 				new NameFuncPair( "rad",   		Math_Rad ),
-				new NameFuncPair( "random",     Math_Random ),
-				new NameFuncPair( "randomseed", Math_RandomSeed ),
 				new NameFuncPair( "sin",   		Math_Sin ),
 				new NameFuncPair( "sqrt",  		Math_Sqrt ),
 				new NameFuncPair( "tan",   		Math_Tan ),
@@ -67,6 +66,7 @@ namespace Cosmos.Executable.Lua
 			lua.PushInteger( LuaConf.LUA_MININTEGER );
 			lua.SetField( -2, "mininteger" );
 
+			SetRandFunc( lua );
 			return 1;
 		}
 
@@ -130,7 +130,7 @@ namespace Cosmos.Executable.Lua
 			else
 			{
 				lua.L_CheckAny( 1 );
-				lua.PushNil(); // value is not convertible to integer
+				lua.PushNil(); // value is not convertible to integer (luaL_pushfail)
 			}
 			return 1;
 		}
@@ -280,18 +280,116 @@ namespace Cosmos.Executable.Lua
 			return 1;
 		}
 
+		private static int Math_Type( ILuaState lua )
+		{
+			if( lua.Type( 1 ) == LuaType.LUA_TNUMBER )
+				lua.PushString( lua.IsInteger( 1 ) ? "integer" : "float" );
+			else
+			{
+				lua.L_CheckAny( 1 );
+				lua.PushNil(); // luaL_pushfail
+			}
+			return 1;
+		}
+
+		// Pseudo-Random Number Generator based on 'xoshiro256**'
+
+		// number of binary digits in the mantissa of a float
+		private const int FIGS = 53;
+
+		// rotate left 'x' by 'n' bits
+		private static ulong Rotl( ulong x, int n )
+		{
+			return (x << n) | (x >> (64 - n));
+		}
+
+		private static ulong NextRand( ulong[] state )
+		{
+			ulong state0 = state[0];
+			ulong state1 = state[1];
+			ulong state2 = state[2] ^ state0;
+			ulong state3 = state[3] ^ state1;
+			ulong res = unchecked( Rotl( state1 * 5, 7 ) * 9 );
+			state[0] = state0 ^ state3;
+			state[1] = state1 ^ state2;
+			state[2] = state2 ^ (state1 << 17);
+			state[3] = Rotl( state3, 45 );
+			return res;
+		}
+
+		// Convert bits from a random integer into a float in the
+		// interval [0,1), getting the higher FIG bits from the
+		// random unsigned integer and converting that to a float.
+
+		// must throw out the extra (64 - FIGS) bits
+		private const int shift64_FIG = 64 - FIGS;
+
+		// 2^(-FIGS) == 2^-1 / 2^(FIGS-1)
+		private const double scaleFIG = 0.5 / (1UL << (FIGS - 1));
+
+		private static double I2d( ulong x )
+		{
+			long sx = (long)(x >> shift64_FIG);
+			double res = (double)sx * scaleFIG;
+			if( sx < 0 )
+				res += 1.0; // correct the two's complement if negative
+			return res;
+		}
+
+		// A state uses four 'Rand64' values: the userdata that 'random'
+		// and 'randomseed' share as their upvalue
+		private sealed class RanState
+		{
+			public readonly ulong[] s = new ulong[4];
+		}
+
+		// Project the random integer 'ran' into the interval [0, n].
+		// Because 'ran' has 2^B possible values, the projection can only be
+		// uniform when the size of the interval is a power of 2 (exact
+		// division). Otherwise, to get a uniform projection into [0, n], we
+		// first compute 'lim', the smallest Mersenne number not smaller than
+		// 'n'. We then project 'ran' into the interval [0, lim].  If the result
+		// is inside [0, n], we are done. Otherwise, we try with another 'ran',
+		// until we have a result inside the interval.
+		private static ulong Project( ulong ran, ulong n, RanState state )
+		{
+			if( (n & unchecked( n + 1 )) == 0 ) // is 'n + 1' a power of 2?
+				return ran & n; // no bias
+			else
+			{
+				ulong lim = n;
+				// compute the smallest (2^b - 1) not smaller than 'n'
+				lim |= (lim >> 1);
+				lim |= (lim >> 2);
+				lim |= (lim >> 4);
+				lim |= (lim >> 8);
+				lim |= (lim >> 16);
+				lim |= (lim >> 32); // integer type has more than 32 bits
+				while( (ran &= lim) > n ) // project 'ran' into [0..lim]
+					ran = NextRand( state.s ); // not inside [0..n]? try again
+				return ran;
+			}
+		}
+
 		private static int Math_Random( ILuaState lua )
 		{
 			long low, up;
-			double r = LuaHost.Of( lua ).Random.NextDouble(); // in [0, 1)
+			ulong p;
+			RanState state = (RanState)lua.ToUserData( lua.UpvalueIndex( 1 ) );
+			ulong rv = NextRand( state.s ); // next pseudo-random value
 			switch( lua.GetTop() ) // check number of arguments
 			{
 				case 0: // no arguments
-					lua.PushNumber( r ); // Number between 0 and 1
+					lua.PushNumber( I2d( rv ) ); // float between 0 and 1
 					return 1;
 				case 1: // only upper limit
 					low = 1;
 					up = lua.L_CheckInteger( 1 );
+					if( up == 0 ) // single 0 as argument?
+					{
+						lua.PushInteger( unchecked( (long)rv ) ); // full random integer
+						return 1;
+					}
 					break;
 				case 2: // lower and upper limits
 					low = lua.L_CheckInteger( 1 );
@@ -302,33 +400,62 @@ namespace Cosmos.Executable.Lua
 			}
 			// random integer in the interval [low, up]
 			lua.L_ArgCheck( low <= up, 1, "interval is empty" );
-			lua.L_ArgCheck( low >= 0 || up <= LuaConf.LUA_MAXINTEGER + low, 1,
-				"interval too large" );
-			r *= (double)unchecked( up - low ) + 1.0;
-			lua.PushInteger( unchecked( (long)r + low ) );
+			// project random integer into the interval [0, up - low]
+			p = Project( rv, unchecked( (ulong)up - (ulong)low ), state );
+			lua.PushInteger( unchecked( (long)(p + (ulong)low) ) );
 			return 1;
+		}
+
+		private static void SetSeed( ILuaState lua, ulong[] state, ulong n1, ulong n2 )
+		{
+			state[0] = n1;
+			state[1] = 0xff; // avoid a zero state
+			state[2] = n2;
+			state[3] = 0;
+			for( int i = 0; i < 16; i++ )
+				NextRand( state ); // discard initial values to "spread" seed
+			lua.PushInteger( unchecked( (long)n1 ) );
+			lua.PushInteger( unchecked( (long)n2 ) );
+		}
+
+		// Set a "random" seed. To get some randomness, use the current time
+		// and, where the reference implementation takes the address of 'L'
+		// (in case the machine does address space layout randomization), the
+		// ticks of the high-resolution clock.
+		private static void RandSeed( ILuaState lua, RanState state )
+		{
+			ulong seed1 = unchecked( (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() );
+			ulong seed2 = unchecked( (ulong)Stopwatch.GetTimestamp() );
+			SetSeed( lua, state.s, seed1, seed2 );
 		}
 
 		private static int Math_RandomSeed( ILuaState lua )
 		{
-			double n = lua.L_CheckNumber( 1 );
-			long seed = Double.IsNaN( n ) ? 0 : (long)Math.Clamp( n, long.MinValue, long.MaxValue );
-			LuaHost host = LuaHost.Of( lua );
-			host.Random = new Random( unchecked( (int)seed ) );
-			host.Random.Next(); // discard first value to avoid undesirable correlations
-			return 0;
-		}
-
-		private static int Math_Type( ILuaState lua )
-		{
-			if( lua.Type( 1 ) == LuaType.LUA_TNUMBER )
-				lua.PushString( lua.IsInteger( 1 ) ? "integer" : "float" );
+			RanState state = (RanState)lua.ToUserData( lua.UpvalueIndex( 1 ) );
+			if( lua.IsNone( 1 ) )
+				RandSeed( lua, state );
 			else
 			{
-				lua.L_CheckAny( 1 );
-				lua.PushNil();
+				long n1 = lua.L_CheckInteger( 1 );
+				long n2 = lua.L_OptInteger( 2, 0 );
+				SetSeed( lua, state.s, unchecked( (ulong)n1 ), unchecked( (ulong)n2 ) );
 			}
-			return 1;
+			return 2; // return seeds
+		}
+
+		// Register the random functions and initialize their state.
+		private static void SetRandFunc( ILuaState lua )
+		{
+			NameFuncPair[] randfuncs = new NameFuncPair[]
+			{
+				new NameFuncPair( "random",     Math_Random ),
+				new NameFuncPair( "randomseed", Math_RandomSeed ),
+			};
+			RanState state = new RanState();
+			lua.NewUserDataUV( state, 0 );
+			RandSeed( lua, state ); // initialize with a "random" seed
+			lua.Pop( 2 ); // remove pushed seeds
+			lua.L_SetFuncs( randfuncs, 1 );
 		}
 
 		private static int Math_Cosh( ILuaState lua )

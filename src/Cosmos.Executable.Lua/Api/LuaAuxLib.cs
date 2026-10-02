@@ -32,7 +32,9 @@ namespace Cosmos.Executable.Lua
 		long 	L_CheckInteger( int narg );
 		string 	L_CheckString( int narg );
 		void 	L_ArgCheck( bool cond, int narg, string extraMsg );
+		void 	L_ArgExpected( bool cond, int narg, string tname );
 		int 	L_ArgError( int narg, string extraMsg );
+		int 	L_TypeError( int narg, string tname );
 		string 	L_TypeName( int index );
 
 		string 	L_ToString( int index );
@@ -163,8 +165,7 @@ namespace Cosmos.Executable.Lua
 
 		public void L_CheckStack( int size, string msg )
 		{
-			// keep some extra space to run error routines, if needed
-			if(!API.CheckStack(size + LuaDef.LUA_MINSTACK)) {
+			if(!API.CheckStack(size)) {
 				if(msg != null)
 					{ L_Error(string.Format("stack overflow ({0})", msg)); }
 				else
@@ -266,7 +267,7 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private int TypeError( int index, string typeName )
+		public int L_TypeError( int index, string typeName )
 		{
 			string typearg; // name for the type of the actual argument
 			if( L_GetMetaField( index, "__name" ) && API.Type( -1 ) == LuaType.LUA_TSTRING )
@@ -282,7 +283,7 @@ namespace Cosmos.Executable.Lua
 
 		private void TagError( int index, LuaType t )
 		{
-			TypeError( index, API.TypeName( t ) );
+			L_TypeError( index, API.TypeName( t ) );
 		}
 
 		public void L_CheckType( int index, LuaType t )
@@ -295,6 +296,12 @@ namespace Cosmos.Executable.Lua
 		{
 			if( !cond )
 				L_ArgError( narg, extraMsg );
+		}
+
+		public void L_ArgExpected( bool cond, int narg, string tname )
+		{
+			if( !cond )
+				L_TypeError( narg, tname );
 		}
 
 		public int L_ArgError( int narg, string extraMsg )
@@ -374,7 +381,7 @@ namespace Cosmos.Executable.Lua
 		{
 			object p = L_TestUData( narg, tname );
 			if( p == null )
-				TypeError( narg, tname );
+				L_TypeError( narg, tname );
 			return p;
 		}
 
@@ -435,29 +442,30 @@ namespace Cosmos.Executable.Lua
 			LuaDebug ar = new LuaDebug();
 			int top = API.GetTop();
 			int last = oLua.CountLevels();
-			int n1 = (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1;
+			int limit2show = (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1;
 			if( msg != null )
 				API.PushString( string.Format( "{0}\n", msg ) );
 			API.PushString( "stack traceback:" );
 			while( otherLua.GetStack( level++, ar ) )
 			{
-				if( n1-- == 0 ) // too many levels?
+				if( limit2show-- == 0 ) // too many levels?
 				{
-					API.PushString( "\n\t..." ); // add a '...'
-					level = last - LEVELS2 + 1; // and skip to last ones
+					int n = last - level - LEVELS2 + 1; // number of levels to skip
+					API.PushString( string.Format( "\n\t...\t(skipping {0} levels)", n ) ); // add warning about skip
+					level += n; // and skip to last levels
 				}
 				else
 				{
 					oLua.GetInfo( "Slnt", ar );
-					API.PushString( string.Format( "\n\t{0}:", ar.ShortSrc ) );
-					if( ar.CurrentLine > 0 )
-						API.PushString( string.Format( "{0}:", ar.CurrentLine ) );
-					API.PushString(" in ");
+					if( ar.CurrentLine <= 0 )
+						API.PushString( string.Format( "\n\t{0}: in ", ar.ShortSrc ) );
+					else
+						API.PushString( string.Format( "\n\t{0}:{1}: in ", ar.ShortSrc, ar.CurrentLine ) );
 					PushFuncName( ar, oLua );
 					if( ar.IsTailCall )
 						API.PushString( "\n\t(...tail calls...)" );
-					API.Concat( API.GetTop() - top );
 				}
+				API.Concat( API.GetTop() - top );
 			}
 			API.Concat( API.GetTop() - top );
 		}
@@ -566,6 +574,7 @@ namespace Cosmos.Executable.Lua
 		// luaL_tolstring
 		public string L_ToString( int index )
 		{
+			index = API.AbsIndex( index );
 			if( L_CallMeta( index, "__tostring" ) ) // metafield?
 			{
 				if( !API.IsString( -1 ) )
@@ -642,7 +651,6 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( LuaMathLib.LIB_NAME, 	LuaMathLib.OpenLib  ),
 				new NameFuncPair( LuaDebugLib.LIB_NAME, LuaDebugLib.OpenLib ),
 				new NameFuncPair( LuaUtf8Lib.LIB_NAME,	LuaUtf8Lib.OpenLib	),
-				new NameFuncPair( LuaBitLib.LIB_NAME, 	LuaBitLib.OpenLib   ),
 			};
 
 			for( var i=0; i<define.Length; ++i)
@@ -701,11 +709,16 @@ namespace Cosmos.Executable.Lua
 		{
 			// TODO: Check Version
 			L_CheckStack(nup, "too many upvalues");
-			for( var j=0; j<define.Length; ++j )
+			for( var j=0; j<define.Length; ++j ) // fill the table with given functions
 			{
-				for( int i=0; i<nup; ++i )
-					API.PushValue( -nup );
-				API.PushCSharpClosure( define[j].Func, nup );
+				if( define[j].Func == null ) // place holder?
+					API.PushBoolean( false );
+				else
+				{
+					for( int i=0; i<nup; ++i ) // copy upvalues to the top
+						API.PushValue( -nup );
+					API.PushCSharpClosure( define[j].Func, nup ); // closure with those upvalues
+				}
 				API.SetField( -(nup + 2), define[j].Name );
 			}
 			API.Pop( nup );
@@ -747,6 +760,7 @@ namespace Cosmos.Executable.Lua
 			L1.GetInfo( "f", ar ); // push function
 			((ILuaAPI)L1).XMove( this, 1 );
 			API.GetField( LuaDef.LUA_REGISTRYINDEX, "_LOADED" );
+			L_CheckStack( 6, "not enough stack" ); // slots for 'FindField'
 			if( FindField( top+1, 2 ) )
 			{
 				string name = API.ToString( -1 );
@@ -755,8 +769,8 @@ namespace Cosmos.Executable.Lua
 					API.PushString( name.Substring( 3 ) ); // push name without prefix
 					API.Remove( -2 ); // remove original name
 				}
-				API.Copy( -1, top+1 ); // move name to proper place
-				API.Pop( 2 ); // remove pushed values
+				API.Copy( -1, top+1 ); // copy name to proper place
+				API.SetTop( top+1 ); // remove table "loaded" and name copy
 				return true;
 			}
 			else
@@ -766,20 +780,33 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private const int FreeList = 0;
+		/* index of free-list header (after the predefined values) */
+		private const int FreeList = LuaDef.LUA_RIDX_LAST + 1;
 
+		/*
+		** The previously freed references form a linked list:
+		** t[freelist] is the index of a first free index, or zero if list is
+		** empty; t[t[freelist]] is the index of the second element; etc.
+		*/
 		public int L_Ref( int t )
 		{
 			if( API.IsNil(-1) )
 			{
 				API.Pop(1); // remove from stack
-				return LuaConstants.LUA_REFNIL; // `nil' has a unique fixed reference
+				return LuaConstants.LUA_REFNIL; // 'nil' has a unique fixed reference
 			}
 
 			t = API.AbsIndex(t);
-			API.RawGetI(t, FreeList); // get first free element
-			int reference = (int)API.ToInteger(-1); // ref = t[freelist]
-			API.Pop(1); // remove it from stack
+			int reference;
+			if( API.RawGetI(t, FreeList) == LuaType.LUA_TNIL ) // first access?
+			{
+				reference = 0; // list is empty
+				API.PushInteger( 0 ); // initialize as an empty list
+				API.RawSetI( t, FreeList ); // ref = t[freelist] = 0
+			}
+			else // already initialized
+				reference = (int)API.ToInteger(-1); // ref = t[freelist]
+			API.Pop(1); // remove element from stack
 			if( reference != 0 ) // any free element?
 			{
 				API.RawGetI(t, reference); // remove it from list
@@ -802,6 +829,78 @@ namespace Cosmos.Executable.Lua
 				API.RawSetI(t, FreeList); // t[freelist] = ref
 			}
 		}
+
+		/*
+		** {======================================================
+		** Warning functions
+		** =======================================================
+		*/
+
+		/*
+		** Writes a warning to the error output, as lua_writestringerror
+		*/
+		private static void WriteStringError( LuaState L, string s )
+		{
+			L.G.Host.WriteErr( s );
+		}
+
+		/*
+		** Check whether message is a control message. If so, execute the
+		** control or ignore it if unknown.
+		*/
+		private static bool CheckControl( LuaState L, string message, bool tocont )
+		{
+			if( tocont || message.Length == 0 || message[0] != '@' ) // not a control message?
+				return false;
+			else
+			{
+				message = message.Substring( 1 );
+				if( message == "off" )
+					L.SetWarnF( WarnFOff ); // turn warnings off
+				else if( message == "on" )
+					L.SetWarnF( WarnFOn ); // turn warnings on
+				return true; // it was a control message
+			}
+		}
+
+		private static void WarnFOff( LuaState L, string message, bool tocont )
+		{
+			CheckControl( L, message, tocont );
+		}
+
+		/*
+		** Writes the message and handle 'tocont', finishing the message
+		** if needed and setting the next warn function.
+		*/
+		private static void WarnFCont( LuaState L, string message, bool tocont )
+		{
+			WriteStringError( L, message ); // write message
+			if( tocont ) // not the last part?
+				L.SetWarnF( WarnFCont ); // to be continued
+			else // last part
+			{
+				WriteStringError( L, "\n" ); // finish message with end-of-line
+				L.SetWarnF( WarnFOn ); // next call is a new message
+			}
+		}
+
+		private static void WarnFOn( LuaState L, string message, bool tocont )
+		{
+			if( CheckControl( L, message, tocont ) ) // control message?
+				return; // nothing else to be done
+			WriteStringError( L, "Lua warning: " ); // start a new warning
+			WarnFCont( L, message, tocont ); // finish processing
+		}
+
+		// luaL_newstate: warnings are off by default
+		internal static LuaState NewAuxState()
+		{
+			var L = new LuaState();
+			L.SetWarnF( WarnFOff ); // default is warnings off
+			return L;
+		}
+
+		/* }====================================================== */
 
 #if UNITY_IPHONE
         public void FEED_AOT_FOR_IOS(LuaState lua)

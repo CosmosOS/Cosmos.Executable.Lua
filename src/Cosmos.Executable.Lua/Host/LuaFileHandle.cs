@@ -147,7 +147,7 @@ internal sealed class LuaFileHandle
                 _host.WriteErr(text);
                 return;
             case StandardFile.Input:
-                throw new IOException("Bad file descriptor");
+                throw new NotSupportedException(); // EBADF: standard input is not open for writing
         }
 
         byte[] bytes = LuaText.ToBytes(text);
@@ -249,8 +249,13 @@ internal sealed class LuaFileHandle
             return b;
         }
 
+        if (_stream is null)
+        {
+            throw new NotSupportedException(); // EBADF: standard output and error are not open for reading
+        }
+
         FlushBuffer(); // what was written is there to read
-        return _stream!.ReadByte();
+        return _stream.ReadByte();
     }
 
     /// <summary>Writes the buffered bytes through to the file.</summary>

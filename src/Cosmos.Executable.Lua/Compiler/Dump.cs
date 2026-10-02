@@ -16,7 +16,7 @@ namespace Cosmos.Executable.Lua
 
 	public delegate DumpStatus LuaWriter( byte[] bytes, int start, int length );
 
-	// ldump.c: a function as the precompiled chunk of the reference Lua 5.3
+	// ldump.c: a function as the precompiled chunk of the reference Lua 5.4
 	// writes on a 64-bit machine, little endian
 	internal class DumpState
 	{
@@ -40,17 +40,27 @@ namespace Cosmos.Executable.Lua
 		private DumpStatus	Status;
 
 		public const string LUAC_DATA = "\u0019\u0093\r\n\u001a\n";
-		public const int LUAC_VERSION = 5 * 16 + 3;
+		public const int LUAC_VERSION = 5 * 16 + 4;
 		public const int LUAC_FORMAT = 0; // this is the official format
 		public const long LUAC_INT = 0x5678;
 		public const double LUAC_NUM = 370.5;
 
-		// the sizes of int, size_t, Instruction, lua_Integer and lua_Number
-		public const int SIZEOF_INT = 4;
-		public const int SIZEOF_SIZET = 8;
+		// the sizes of Instruction, lua_Integer and lua_Number
 		public const int SIZEOF_INSTRUCTION = 4;
 		public const int SIZEOF_INTEGER = 8;
 		public const int SIZEOF_NUMBER = 8;
+
+		// the type tags (with variants) of the constants in a binary chunk
+		public const int LUA_VNIL = 0;
+		public const int LUA_VFALSE = 1;
+		public const int LUA_VTRUE = 1 | (1 << 4);
+		public const int LUA_VNUMINT = 3;
+		public const int LUA_VNUMFLT = 3 | (1 << 4);
+		public const int LUA_VSHRSTR = 4;
+		public const int LUA_VLNGSTR = 4 | (1 << 4);
+
+		/* maximum size of a short string (LUAI_MAXSHORTLEN) */
+		private const int MAXSHORTLEN = 40;
 
 		private DumpState()
 		{
@@ -70,8 +80,6 @@ namespace Cosmos.Executable.Lua
 			DumpByte( LUAC_VERSION );
 			DumpByte( LUAC_FORMAT );
 			DumpLiteral( LUAC_DATA );
-			DumpByte( SIZEOF_INT );
-			DumpByte( SIZEOF_SIZET );
 			DumpByte( SIZEOF_INSTRUCTION );
 			DumpByte( SIZEOF_INTEGER );
 			DumpByte( SIZEOF_NUMBER );
@@ -84,9 +92,25 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( new byte[] { (byte)value } );
 		}
 
+		/* dumpSize: 7 bits per byte, most significant first, the last byte
+		   marked with its high bit */
+		private void DumpSize( ulong x )
+		{
+			var buff = new byte[10];
+			int n = 0;
+			do {
+				buff[buff.Length - (++n)] = (byte)(x & 0x7f); // fill buffer in reverse order
+				x >>= 7;
+			} while( x != 0 );
+			buff[buff.Length - 1] |= 0x80; // mark last byte
+			var bytes = new byte[n];
+			Array.Copy( buff, buff.Length - n, bytes, 0, n );
+			DumpBlock( bytes );
+		}
+
 		private void DumpInt( int value )
 		{
-			DumpBlock( BitConverter.GetBytes( value ) );
+			DumpSize( (ulong)value );
 		}
 
 		private void DumpInteger( long value )
@@ -99,28 +123,20 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( BitConverter.GetBytes( value ) );
 		}
 
-		// a string, one byte per character: its size plus one, in a byte
-		// below 0xFF or else after 0xFF as a size_t, then its bytes
+		// a string, one byte per character: its size plus one, then its bytes
 		private void DumpString( string value )
 		{
 			if( value == null )
 			{
-				DumpByte( 0 );
+				DumpSize( 0 );
 				return;
 			}
 
-			long size = (long)value.Length + 1; // include trailing '\0'
-			if( size < 0xFF )
-				DumpByte( (int)size );
-			else
-			{
-				DumpByte( 0xFF );
-				DumpBlock( BitConverter.GetBytes( (ulong)size ) );
-			}
+			DumpSize( (ulong)value.Length + 1 );
 			var bytes = new byte[value.Length];
 			for( int i=0; i<value.Length; ++i )
 				bytes[i] = (byte)value[i];
-			DumpBlock( bytes ); // no need to save '\0'
+			DumpBlock( bytes );
 		}
 
 		private void DumpCode( LuaProto proto )
@@ -135,22 +151,24 @@ namespace Cosmos.Executable.Lua
 			DumpInt( proto.K.Count );
 			foreach( var k in proto.K )
 			{
-				var t = k.V.Tt;
-				DumpByte( t );
-				switch( t )
+				switch( k.V.Tt )
 				{
 					case (int)LuaType.LUA_TNIL:
+						DumpByte( LUA_VNIL );
 						break;
 					case (int)LuaType.LUA_TBOOLEAN:
-						DumpByte( k.V.BValue() ? 1 : 0 );
+						DumpByte( k.V.BValue() ? LUA_VTRUE : LUA_VFALSE );
 						break;
 					case TValue.LUA_TNUMFLT:
+						DumpByte( LUA_VNUMFLT );
 						DumpNumber( k.V.FltValue );
 						break;
 					case TValue.LUA_TNUMINT:
+						DumpByte( LUA_VNUMINT );
 						DumpInteger( k.V.IValue() );
 						break;
 					case (int)LuaType.LUA_TSTRING:
+						DumpByte( k.V.SValue().Length <= MAXSHORTLEN ? LUA_VSHRSTR : LUA_VLNGSTR );
 						DumpString( k.V.SValue() );
 						break;
 					default:
@@ -174,6 +192,7 @@ namespace Cosmos.Executable.Lua
 			{
 				DumpByte( upval.InStack ? 1 : 0 );
 				DumpByte( upval.Index );
+				DumpByte( upval.Kind );
 			}
 		}
 
@@ -181,8 +200,21 @@ namespace Cosmos.Executable.Lua
 		{
 			int n = Strip ? 0 : proto.LineInfo.Count;
 			DumpInt( n );
+			if( n > 0 )
+			{
+				var bytes = new byte[n];
+				for( int i=0; i<n; ++i )
+					bytes[i] = (byte)proto.LineInfo[i];
+				DumpBlock( bytes );
+			}
+
+			n = Strip ? 0 : proto.AbsLineInfo.Count;
+			DumpInt( n );
 			for( int i=0; i<n; ++i )
-				DumpInt( proto.LineInfo[i] );
+			{
+				DumpInt( proto.AbsLineInfo[i].Pc );
+				DumpInt( proto.AbsLineInfo[i].Line );
+			}
 
 			n = Strip ? 0 : proto.LocVars.Count;
 			DumpInt( n );

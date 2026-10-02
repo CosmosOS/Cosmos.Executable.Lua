@@ -282,6 +282,7 @@ namespace Cosmos.Executable.Lua
 		public LuaLClosureValue(LuaProto p) {
 			Proto = p;
 
+			// luaF_initupvals: fill the closure with new closed upvalues
 			Upvals = new LuaUpvalue[p.Upvalues.Count];
 			for(int i=0; i<p.Upvalues.Count; ++i)
 				{ Upvals[i] = new LuaUpvalue(); }
@@ -293,20 +294,46 @@ namespace Cosmos.Executable.Lua
 		public object Value;
 		public LuaTable MetaTable;
 		public int Length;
+		public TValue[] UserValues;	// the 'nuvalue' user values (5.4)
+
+		public LuaUserDataValue( int nuvalue = 1 )
+		{
+			UserValues = new TValue[nuvalue];
+			for( int i=0; i<nuvalue; ++i )
+				UserValues[i].SetNilValue();
+		}
 	}
 
 	internal class LocVar
 	{
 		public string VarName;
-		public int StartPc;
-		public int EndPc;
+		public int StartPc;	// first point where variable is active
+		public int EndPc;	// first point where variable is dead
 	}
 
+	// Description of an upvalue for function prototypes
 	internal class UpvalDesc
 	{
-		public string Name;
-		public int Index;
-		public bool InStack;
+		public string Name;		// upvalue name (for debug information)
+		public int Index;		// index of upvalue (in stack or in outer function's list)
+		public bool InStack;	// whether it is in stack (register)
+		public byte Kind;		// kind of corresponding variable
+	}
+
+	/*
+	** Associates the absolute line source for a given instruction ('pc').
+	** The array 'lineinfo' gives, for each instruction, the difference in
+	** lines from the previous instruction. When that difference does not
+	** fit into a byte, Lua saves the absolute line for that instruction.
+	** (Lua also saves the absolute line periodically, to speed up the
+	** computation of a line number: we can use binary search in the
+	** absolute-line array, but we must traverse the 'lineinfo' array
+	** linearly to compute a line.)
+	*/
+	internal struct AbsLineInfo
+	{
+		public int Pc;
+		public int Line;
 	}
 
 	internal class LuaProto
@@ -319,15 +346,14 @@ namespace Cosmos.Executable.Lua
 		public int					LineDefined;
 		public int					LastLineDefined;
 
-		public int					NumParams;
+		public int					NumParams;	// number of fixed (named) parameters
 		public bool					IsVarArg;
-		public byte					MaxStackSize;
+		public byte					MaxStackSize;	// number of registers needed by this function
 
 		public string				Source;
-		public List<int>			LineInfo;
-		public List<LocVar>			LocVars;
-
-		public LuaLClosureValue		Cache; // last closure created, for reuse
+		public List<sbyte>			LineInfo;	// information about source lines (debug information)
+		public List<AbsLineInfo>	AbsLineInfo;	// idem
+		public List<LocVar>			LocVars;	// information about local variables (debug information)
 
 		public LuaProto()
 		{
@@ -335,23 +361,16 @@ namespace Cosmos.Executable.Lua
 			K = new List<StkId>();
 			P = new List<LuaProto>();
 			Upvalues = new List<UpvalDesc>();
-			LineInfo = new List<int>();
+			LineInfo = new List<sbyte>();
+			AbsLineInfo = new List<AbsLineInfo>();
 			LocVars = new List<LocVar>();
-		}
-
-		// getfuncline: -1 for a function with no line information (stripped)
-		public int GetFuncLine( int pc )
-		{
-			if( LineInfo.Count == 0 )
-				return -1;
-			return (0 <= pc && pc < LineInfo.Count) ? LineInfo[pc] : 0;
 		}
 	}
 	
 	internal class LuaUpvalue
 	{
-		public StkId			V;
-		public StkId			Value;
+		public StkId			V;		// points to stack or to its own value
+		public StkId			Value;	// the value (when closed)
 
 		public LuaUpvalue()
 		{
@@ -481,8 +500,9 @@ namespace Cosmos.Executable.Lua
 			return true;
 		}
 
-		// luaO_arith: an arithmetic or bitwise operation on numbers or on
-		// strings that convert to numbers; false if an operand is neither
+		// luaO_rawarith: an arithmetic or bitwise operation on numbers (strings
+		// go through the metamethods of the string library); false if an
+		// operand is not a number
 		internal static bool O_RawArith( LuaState L, LuaOp op, ref TValue p1, ref TValue p2, ref TValue res )
 		{
 			switch( op )
@@ -491,7 +511,7 @@ namespace Cosmos.Executable.Lua
 				case LuaOp.LUA_OPSHL: case LuaOp.LUA_OPSHR:
 				case LuaOp.LUA_OPBNOT: { // operate only on integers
 					long i1, i2;
-					if( V_ToInteger( ref p1, out i1, 0 ) && V_ToInteger( ref p2, out i2, 0 ) )
+					if( V_ToIntegerNS( ref p1, out i1, F2Imod.F2Ieq ) && V_ToIntegerNS( ref p2, out i2, F2Imod.F2Ieq ) )
 					{
 						res.SetIValue( IntArith( L, op, i1, i2 ) );
 						return true;
@@ -500,7 +520,7 @@ namespace Cosmos.Executable.Lua
 				}
 				case LuaOp.LUA_OPDIV: case LuaOp.LUA_OPPOW: { // operate only on floats
 					double n1, n2;
-					if( V_ToNumber( ref p1, out n1 ) && V_ToNumber( ref p2, out n2 ) )
+					if( ToNumberNS( ref p1, out n1 ) && ToNumberNS( ref p2, out n2 ) )
 					{
 						res.SetFltValue( NumArith( op, n1, n2 ) );
 						return true;
@@ -514,7 +534,7 @@ namespace Cosmos.Executable.Lua
 						res.SetIValue( IntArith( L, op, p1.IValue(), p2.IValue() ) );
 						return true;
 					}
-					if( V_ToNumber( ref p1, out n1 ) && V_ToNumber( ref p2, out n2 ) )
+					if( ToNumberNS( ref p1, out n1 ) && ToNumberNS( ref p2, out n2 ) )
 					{
 						res.SetFltValue( NumArith( op, n1, n2 ) );
 						return true;
@@ -555,7 +575,7 @@ namespace Cosmos.Executable.Lua
 				case LuaOp.LUA_OPSUB: return v1-v2;
 				case LuaOp.LUA_OPMUL: return v1*v2;
 				case LuaOp.LUA_OPDIV: return v1/v2;
-				case LuaOp.LUA_OPPOW: return Math.Pow(v1, v2);
+				case LuaOp.LUA_OPPOW: return NumPow(v1, v2);
 				case LuaOp.LUA_OPIDIV: return Math.Floor(v1/v2);
 				case LuaOp.LUA_OPUNM: return -v1;
 				case LuaOp.LUA_OPMOD: return NumMod(v1, v2);
@@ -567,7 +587,7 @@ namespace Cosmos.Executable.Lua
 		internal static double NumMod( double a, double b )
 		{
 			double m = a % b;
-			if( m * b < 0 )
+			if( (m > 0) ? b < 0 : (m < 0 && b > 0) )
 				m += b;
 			return m;
 		}
@@ -602,7 +622,7 @@ namespace Cosmos.Executable.Lua
 		{
 			Utl.Assert(ci.IsLua);
 			var cl = Stack[ci.FuncIndex].V.ClLValue();
-			return cl.Proto.GetFuncLine(ci.CurrentPc);
+			return G_GetFuncLine(cl.Proto, ci.CurrentPc);
 		}
 	}
 

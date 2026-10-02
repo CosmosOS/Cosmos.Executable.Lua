@@ -7,7 +7,7 @@ namespace Cosmos.Executable.Lua
 {
 	using StringBuilder = System.Text.StringBuilder;
 
-	// ltablib.c of Lua 5.3: the functions read and write through
+	// ltablib.c of Lua 5.4: the functions read and write through
 	// metamethods, so that they work on objects that mimic tables
 	internal class LuaTableLib
 	{
@@ -66,10 +66,12 @@ namespace Cosmos.Executable.Lua
 			return lua.L_Len( n );
 		}
 
+		// tinsert
 		private static int TBL_Insert( ILuaState lua )
 		{
-			long e = AuxGetN( lua, 1, TAB_RW ) + 1; // first empty element
 			long pos; // where to insert new element
+			long e = AuxGetN( lua, 1, TAB_RW );
+			e = unchecked( e + 1 ); // first empty element
 			switch( lua.GetTop() )
 			{
 				case 2: // called with only 2 arguments
@@ -78,7 +80,9 @@ namespace Cosmos.Executable.Lua
 				case 3:
 				{
 					pos = lua.L_CheckInteger( 2 ); // 2nd argument is the position
-					lua.L_ArgCheck( 1 <= pos && pos <= e, 2, "position out of bounds" );
+					// check whether 'pos' is in [1, e]
+					lua.L_ArgCheck( unchecked( (ulong)pos - 1UL ) < (ulong)e, 2,
+						"position out of bounds" );
 					for( long i = e; i > pos; i-- ) // move up elements
 					{
 						lua.GetI( 1, i - 1 );
@@ -93,12 +97,15 @@ namespace Cosmos.Executable.Lua
 			return 0;
 		}
 
+		// tremove
 		private static int TBL_Remove( ILuaState lua )
 		{
 			long size = AuxGetN( lua, 1, TAB_RW );
 			long pos = lua.L_OptInteger( 2, size );
 			if( pos != size ) // validate 'pos' if given
-				lua.L_ArgCheck( 1 <= pos && pos <= size + 1, 1, "position out of bounds" );
+				// check whether 'pos' is in [1, size + 1]
+				lua.L_ArgCheck( unchecked( (ulong)pos - 1UL ) <= (ulong)size, 2,
+					"position out of bounds" );
 			lua.GetI( 1, pos ); // result = t[pos]
 			for( ; pos < size; pos++ )
 			{
@@ -106,7 +113,7 @@ namespace Cosmos.Executable.Lua
 				lua.SetI( 1, pos ); // t[pos] = t[pos + 1]
 			}
 			lua.PushNil();
-			lua.SetI( 1, pos ); // t[pos] = nil
+			lua.SetI( 1, pos ); // remove entry t[pos]
 			return 1;
 		}
 
@@ -176,6 +183,7 @@ namespace Cosmos.Executable.Lua
 			return 1;
 		}
 
+		// tpack
 		private static int TBL_Pack( ILuaState lua )
 		{
 			int n = lua.GetTop(); // number of elements to pack
@@ -188,6 +196,7 @@ namespace Cosmos.Executable.Lua
 			return 1; // return table
 		}
 
+		// tunpack
 		private static int TBL_Unpack( ILuaState lua )
 		{
 			long i = lua.L_OptInteger( 2, 1 );
@@ -202,7 +211,7 @@ namespace Cosmos.Executable.Lua
 			return (int)n;
 		}
 
-		// quicksort (based on 'Algorithms in MODULA-3', Robert Sedgewick;
+		// Quicksort (based on 'Algorithms in MODULA-3', Robert Sedgewick;
 		// Addison-Wesley, 1993.)
 
 		// arrays larger than 'RANLIMIT' may use randomized pivots

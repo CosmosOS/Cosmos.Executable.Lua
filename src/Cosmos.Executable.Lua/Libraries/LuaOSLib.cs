@@ -9,14 +9,16 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>os</c> library of Lua 5.3, where UniLua had <c>os.clock</c> only,
+/// The <c>os</c> library of Lua 5.4, where UniLua had <c>os.clock</c> only,
 /// on <see cref="Process"/>, which a kernel does not have.
 /// </summary>
 /// <remarks>
 /// On a Cosmos kernel the local time is UTC, there are no environment
 /// variables (<c>os.getenv</c> gives nil), and <c>os.execute</c> runs a
 /// command only if the host gave the interpreter a way to
-/// (<see cref="LuaInterpreter.ExecuteCommand"/>).
+/// (<see cref="LuaInterpreter.ExecuteCommand"/>). Times are counted as a
+/// 64-bit time_t counts them, with years in an <c>int</c>, and the local
+/// time is told as standard time (<c>isdst</c> is false).
 /// </remarks>
 internal static class LuaOSLib
 {
@@ -219,243 +221,514 @@ internal static class LuaOSLib
 
     // ---- time
 
+    /// <summary>
+    /// The conversions <c>os.date</c> accepts, as LUA_STRFTIMEOPTIONS has
+    /// them for C99: those of one character, then, after <c>||</c>, those of
+    /// two.
+    /// </summary>
+    private const string StrftimeOptions = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%" + "||" + "EcECExEXEyEY" + "OdOeOHOIOmOMOSOuOUOVOwOWOy";
+
+    /// <summary>
+    /// The times <see cref="TimeZoneInfo"/> gives the offsets of: those of
+    /// <see cref="DateTime"/>, a day in from its ends. A later time takes the
+    /// offset of the same time 400 years, or a multiple of them, earlier (the
+    /// calendar repeats, and so do the rules of the time zone); an earlier
+    /// time the offset of the first.
+    /// </summary>
+    private const long MinZoneTime = -62135596800 + 86400;
+    private const long MaxZoneTime = 253402300799 - 86400;
+
+    private const long SecondsPerDay = 86400;
+
+    /// <summary>The seconds of 400 years of the Gregorian calendar, which then repeats, weekdays and all.</summary>
+    private const long GregorianCycle = 146097 * SecondsPerDay;
+
+    private static readonly string[] DayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+    private static readonly string[] MonthNames =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+    /// <summary>
+    /// struct tm: a time broken down into its fields, as gmtime and
+    /// localtime give it and mktime takes it, with the offset and the name of
+    /// its time zone (tm_gmtoff and tm_zone).
+    /// </summary>
+    private struct Tm
+    {
+        public int Sec;
+        public int Min;
+        public int Hour;
+        public int MDay;
+
+        /// <summary>Months since January, 0 to 11.</summary>
+        public int Mon;
+
+        /// <summary>Years since 1900.</summary>
+        public int Year;
+
+        /// <summary>Days since Sunday, 0 to 6.</summary>
+        public int WDay;
+
+        /// <summary>Days since January 1, 0 to 365.</summary>
+        public int YDay;
+
+        /// <summary>Seconds east of UTC.</summary>
+        public long GmtOff;
+
+        public string Zone;
+    }
+
     private static int OS_Time(ILuaState lua)
     {
+        long t;
         if (lua.IsNoneOrNil(1))
         {
-            lua.PushInteger(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            return 1;
+            // called without args: the current time
+            t = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         }
-
-        lua.L_CheckType(1, LuaType.LUA_TTABLE);
-        lua.SetTop(1); // make sure the table is at the top
-        // In the order of the reference implementation, which says which field is missing first
-        int second = GetField(lua, "sec", 0, 0);
-        int minute = GetField(lua, "min", 0, 0);
-        int hour = GetField(lua, "hour", 12, 0);
-        int day = GetField(lua, "day", -1, 0);
-        int month = GetField(lua, "month", -1, 0);
-        int year = GetField(lua, "year", -1, 0);
-
-        // Out of range fields carry over, as mktime does: day 0 is the last of the month before
-        DateTime local;
-        try
+        else
         {
-            local = new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
-                .AddMonths(month - 1)
-                .AddDays(day - 1)
-                .AddHours(hour)
-                .AddMinutes(minute)
-                .AddSeconds(second);
+            lua.L_CheckType(1, LuaType.LUA_TTABLE);
+            lua.SetTop(1); // make sure table is at the top
+            Tm ts = default;
+            ts.Year = GetField(lua, "year", -1, 1900);
+            ts.Mon = GetField(lua, "month", -1, 1);
+            ts.MDay = GetField(lua, "day", -1, 0);
+            ts.Hour = GetField(lua, "hour", 12, 0);
+            ts.Min = GetField(lua, "min", 0, 0);
+            ts.Sec = GetField(lua, "sec", 0, 0);
+            GetBoolField(lua, "isdst"); // read, but the rules of the zone alone say whether daylight saving time applies
+            if (MkTime(ref ts, out t))
+            {
+                SetAllFields(lua, ts); // update fields with normalized values
+            }
+            else
+            {
+                t = -1; // what mktime gives when the year of the result does not fit
+            }
         }
-        catch (ArgumentOutOfRangeException)
+
+        if (t == -1)
         {
             return lua.L_Error("time result cannot be represented in this installation");
         }
 
-        // The fields as mktime normalizes them
-        lua.SetTop(1);
-        SetAllFields(lua, local);
-
-        DateTime utc = local - LocalOffset(local);
-        lua.PushInteger(new DateTimeOffset(utc.Ticks, TimeSpan.Zero).ToUnixTimeSeconds());
+        lua.PushInteger(t);
         return 1;
     }
 
     /// <summary>
-    /// A field of the date table, which must be an integer (in a range that
-    /// keeps the arithmetic on dates from overflowing), or else the default
-    /// <paramref name="fallback"/> if there is one.
+    /// getfield: a field of the date table, an integer that must fit in the
+    /// <c>int</c> of struct tm once <paramref name="delta"/> is taken from it,
+    /// or else the default <paramref name="d"/> if there is one.
     /// </summary>
-    private static int GetField(ILuaState lua, string key, int fallback, int delta)
+    private static int GetField(ILuaState lua, string key, int d, int delta)
     {
-        const long MaxDateField = int.MaxValue / 2;
-        LuaType type = lua.GetField(-1, key);
-        long value = lua.ToIntegerX(-1, out bool isInteger);
-        if (!isInteger)
+        LuaType t = lua.GetField(-1, key); // get field and its type
+        long res = lua.ToIntegerX(-1, out bool isNum);
+        if (!isNum)
         {
-            if (type != LuaType.LUA_TNIL)
+            // field is not an integer?
+            if (t != LuaType.LUA_TNIL) // some other value?
             {
                 return lua.L_Error("field '{0}' is not an integer", key);
             }
 
-            if (fallback < 0)
+            if (d < 0) // absent field; no default?
             {
                 return lua.L_Error("field '{0}' missing in date table", key);
             }
 
-            value = fallback;
+            res = d;
         }
         else
         {
-            if (!(-MaxDateField <= value && value <= MaxDateField))
+            if (!(res >= 0 ? res - delta <= int.MaxValue : int.MinValue + delta <= res))
             {
                 return lua.L_Error("field '{0}' is out-of-bound", key);
             }
 
-            value -= delta;
+            res -= delta;
         }
 
         lua.Pop(1);
-        return (int)value;
+        return (int)res;
     }
 
-    private static void SetAllFields(ILuaState lua, DateTime time)
+    /// <summary>getboolfield: -1 for an absent field, or else whether it is true.</summary>
+    private static int GetBoolField(ILuaState lua, string key)
     {
-        SetField(lua, "sec", time.Second);
-        SetField(lua, "min", time.Minute);
-        SetField(lua, "hour", time.Hour);
-        SetField(lua, "day", time.Day);
-        SetField(lua, "month", time.Month);
-        SetField(lua, "year", time.Year);
-        SetField(lua, "wday", (int)time.DayOfWeek + 1);
-        SetField(lua, "yday", time.DayOfYear);
+        int res = lua.GetField(-1, key) == LuaType.LUA_TNIL ? -1 : (lua.ToBoolean(-1) ? 1 : 0);
+        lua.Pop(1);
+        return res;
+    }
+
+    /// <summary>setallfields: sets the fields of the table on top of the stack from <paramref name="stm"/>.</summary>
+    private static void SetAllFields(ILuaState lua, in Tm stm)
+    {
+        SetField(lua, "year", stm.Year, 1900);
+        SetField(lua, "month", stm.Mon, 1);
+        SetField(lua, "day", stm.MDay, 0);
+        SetField(lua, "hour", stm.Hour, 0);
+        SetField(lua, "min", stm.Min, 0);
+        SetField(lua, "sec", stm.Sec, 0);
+        SetField(lua, "yday", stm.YDay, 1);
+        SetField(lua, "wday", stm.WDay, 1);
+        // tm_isdst: the local time is told as standard time
         lua.PushBoolean(false);
         lua.SetField(-2, "isdst");
     }
 
-    private static int OS_Date(ILuaState lua)
+    private static void SetField(ILuaState lua, string key, int value, int delta)
     {
-        string format = lua.L_OptString(1, "%c");
-        long seconds = lua.IsNoneOrNil(2) ? DateTimeOffset.UtcNow.ToUnixTimeSeconds() : lua.L_CheckInteger(2);
-
-        DateTime time;
-        TimeSpan offset;
-        try
-        {
-            DateTime utc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
-            bool universal = format.StartsWith('!');
-            if (universal)
-            {
-                format = format[1..];
-            }
-
-            offset = universal ? TimeSpan.Zero : LocalOffset(utc);
-            time = utc + offset;
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return lua.L_Error("time result cannot be represented in this installation");
-        }
-
-        if (format == "*t")
-        {
-            lua.CreateTable(0, 9); // 9 = number of fields
-            SetAllFields(lua, time);
-            return 1;
-        }
-
-        StringBuilder result = new();
-        for (int i = 0; i < format.Length; i++)
-        {
-            if (format[i] != '%')
-            {
-                result.Append(format[i]);
-                continue;
-            }
-
-            if (++i >= format.Length)
-            {
-                return lua.L_ArgError(1, "invalid conversion specifier '%'");
-            }
-
-            // The E and O modifiers ask for the locale's alternative forms, which
-            // the C locale does not have, of the conversions C99 allows them on
-            if (format[i] is 'E' or 'O')
-            {
-                string modified = format[i] == 'E' ? "cCxXyY" : "deHImMSuUVwWy";
-                if (i + 1 >= format.Length || modified.IndexOf(format[i + 1]) < 0)
-                {
-                    return lua.L_ArgError(1, "invalid conversion specifier '%" + format[i..] + "'");
-                }
-
-                i++;
-            }
-
-            if (!AppendConversion(result, format[i], time, offset))
-            {
-                return lua.L_ArgError(1, "invalid conversion specifier '%" + format[i..] + "'");
-            }
-        }
-
-        lua.PushString(result.ToString());
-        return 1;
-    }
-
-    private static void SetField(ILuaState lua, string key, int value)
-    {
-        lua.PushInteger(value);
+        lua.PushInteger((long)value + delta);
         lua.SetField(-2, key);
     }
 
-    /// <summary>Appends one strftime conversion, in the C locale; false for one it does not know.</summary>
-    private static bool AppendConversion(StringBuilder result, char conversion, DateTime time, TimeSpan offset)
+    private static int OS_Date(ILuaState lua)
     {
-        CultureInfo c = CultureInfo.InvariantCulture;
-        switch (conversion)
+        string s = lua.L_OptString(1, "%c");
+        long t = lua.IsNoneOrNil(2) ? DateTimeOffset.UtcNow.ToUnixTimeSeconds() : lua.L_CheckInteger(2); // l_checktime
+        int i = 0;
+        bool valid;
+        Tm stm;
+        if (s.Length > 0 && s[0] == '!')
         {
-            case 'a': result.Append(time.ToString("ddd", c)); break;
-            case 'A': result.Append(time.ToString("dddd", c)); break;
-            case 'b' or 'h': result.Append(time.ToString("MMM", c)); break;
-            case 'B': result.Append(time.ToString("MMMM", c)); break;
-            case 'c':
-                result.Append(time.ToString("ddd MMM ", c)).Append(time.Day.ToString(c).PadLeft(2))
-                    .Append(time.ToString(" HH:mm:ss yyyy", c));
-                break;
-            case 'C': result.Append((time.Year / 100).ToString("00", c)); break;
-            case 'd': result.Append(time.ToString("dd", c)); break;
-            case 'D': result.Append(time.ToString("MM'/'dd'/'yy", c)); break;
-            case 'e': result.Append(time.Day.ToString(c).PadLeft(2)); break;
-            case 'F': result.Append(time.ToString("yyyy-MM-dd", c)); break;
-            case 'g': result.Append((ISOWeek.GetYear(time) % 100).ToString("00", c)); break;
-            case 'G': result.Append(ISOWeek.GetYear(time).ToString(c)); break;
-            case 'H': result.Append(time.ToString("HH", c)); break;
-            case 'I': result.Append(time.ToString("hh", c)); break;
-            case 'j': result.Append(time.DayOfYear.ToString("000", c)); break;
-            case 'm': result.Append(time.ToString("MM", c)); break;
-            case 'M': result.Append(time.ToString("mm", c)); break;
-            case 'n': result.Append('\n'); break;
-            case 'p': result.Append(time.Hour < 12 ? "AM" : "PM"); break;
-            case 'r': result.Append(time.ToString("hh:mm:ss ", c)).Append(time.Hour < 12 ? "AM" : "PM"); break;
-            case 'R': result.Append(time.ToString("HH:mm", c)); break;
-            case 'S': result.Append(time.ToString("ss", c)); break;
-            case 't': result.Append('\t'); break;
-            case 'T' or 'X': result.Append(time.ToString("HH:mm:ss", c)); break;
-            case 'u': result.Append(time.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)time.DayOfWeek); break;
-            case 'U': result.Append(((time.DayOfYear + 6 - (int)time.DayOfWeek) / 7).ToString("00", c)); break;
-            case 'V': result.Append(ISOWeek.GetWeekOfYear(time).ToString("00", c)); break;
-            case 'w': result.Append((int)time.DayOfWeek); break;
-            case 'W': result.Append(((time.DayOfYear + 6 - ((int)time.DayOfWeek + 6) % 7) / 7).ToString("00", c)); break;
-            case 'x': result.Append(time.ToString("MM'/'dd'/'yy", c)); break;
-            case 'y': result.Append(time.ToString("yy", c)); break;
-            case 'Y': result.Append(time.Year.ToString(c)); break;
-            case 'z':
-                result.Append(offset < TimeSpan.Zero ? '-' : '+')
-                    .Append(Math.Abs(offset.Hours).ToString("00", c))
-                    .Append(Math.Abs(offset.Minutes).ToString("00", c));
-                break;
-            case 'Z': result.Append(offset == TimeSpan.Zero ? "UTC" : string.Empty); break;
-            case '%': result.Append('%'); break;
-            default: return false;
+            // UTC?
+            valid = GmTime(t, out stm);
+            i++; // skip '!'
+        }
+        else
+        {
+            valid = LocalTime(t, out stm);
         }
 
+        if (!valid)
+        {
+            // invalid date?
+            return lua.L_Error("date result cannot be represented in this installation");
+        }
+
+        if (CString(s, i) == "*t")
+        {
+            lua.CreateTable(0, 9); // 9 = number of fields
+            SetAllFields(lua, stm);
+            return 1;
+        }
+
+        StringBuilder b = new();
+        while (i < s.Length)
+        {
+            if (s[i] != '%')
+            {
+                // not a conversion specifier?
+                b.Append(s[i++]);
+            }
+            else
+            {
+                i++; // skip '%'
+                i = CheckOption(lua, s, i, out string conversion);
+                StrFTime(b, conversion[^1], stm); // the C locale has no alternative forms for E and O
+            }
+        }
+
+        lua.PushString(b.ToString());
+        return 1;
+    }
+
+    /// <summary>
+    /// checkoption: the conversion at <paramref name="conv"/> in
+    /// <paramref name="s"/>, which must be one of
+    /// <see cref="StrftimeOptions"/>; the index of the item after it.
+    /// </summary>
+    private static int CheckOption(ILuaState lua, string s, int conv, out string option)
+    {
+        int convlen = s.Length - conv;
+        int oplen = 1; // length of options being checked
+        for (int o = 0; o < StrftimeOptions.Length && oplen <= convlen; o += oplen)
+        {
+            if (StrftimeOptions[o] == '|')
+            {
+                // next block?
+                oplen++; // will check options with next length (+1)
+            }
+            else if (string.CompareOrdinal(s, conv, StrftimeOptions, o, oplen) == 0)
+            {
+                // match?
+                option = s.Substring(conv, oplen); // copy valid option
+                return conv + oplen; // return next item
+            }
+        }
+
+        option = string.Empty;
+        lua.L_ArgError(1, "invalid conversion specifier '%" + CString(s, conv) + "'");
+        return conv;
+    }
+
+    /// <summary>The C string at <paramref name="start"/> in <paramref name="s"/>: up to its first zero.</summary>
+    private static string CString(string s, int start)
+    {
+        int end = s.IndexOf('\0', start);
+        return end < 0 ? s[start..] : s[start..end];
+    }
+
+    /// <summary>
+    /// Appends one conversion of strftime as the C library of the reference
+    /// implementation (glibc) writes it in the C locale.
+    /// </summary>
+    private static void StrFTime(StringBuilder b, char conversion, in Tm tm)
+    {
+        CultureInfo c = CultureInfo.InvariantCulture;
+        long year = 1900L + tm.Year;
+        switch (conversion)
+        {
+            case 'a': b.Append(DayNames[tm.WDay], 0, 3); break;
+            case 'A': b.Append(DayNames[tm.WDay]); break;
+            case 'b' or 'h': b.Append(MonthNames[tm.Mon], 0, 3); break;
+            case 'B': b.Append(MonthNames[tm.Mon]); break;
+            case 'c': Compose(b, "%a %b %e %H:%M:%S %Y", tm); break;
+            case 'C': b.Append(FloorDiv(year, 100).ToString(c)); break;
+            case 'd': Number(b, tm.MDay, 2); break;
+            case 'D' or 'x': Compose(b, "%m/%d/%y", tm); break;
+            case 'e': b.Append(tm.MDay.ToString(c).PadLeft(2)); break;
+            case 'F': Compose(b, "%Y-%m-%d", tm); break;
+            case 'g': Number(b, FloorMod(IsoYear(tm, out _), 100), 2); break;
+            case 'G': b.Append(IsoYear(tm, out _).ToString(c)); break;
+            case 'H': Number(b, tm.Hour, 2); break;
+            case 'I': Number(b, tm.Hour % 12 == 0 ? 12 : tm.Hour % 12, 2); break;
+            case 'j': Number(b, tm.YDay + 1, 3); break;
+            case 'm': Number(b, tm.Mon + 1, 2); break;
+            case 'M': Number(b, tm.Min, 2); break;
+            case 'n': b.Append('\n'); break;
+            case 'p': b.Append(tm.Hour < 12 ? "AM" : "PM"); break;
+            case 'r': Compose(b, "%I:%M:%S %p", tm); break;
+            case 'R': Compose(b, "%H:%M", tm); break;
+            case 'S': Number(b, tm.Sec, 2); break;
+            case 't': b.Append('\t'); break;
+            case 'T' or 'X': Compose(b, "%H:%M:%S", tm); break;
+            case 'u': b.Append((tm.WDay - 1 + 7) % 7 + 1); break;
+            case 'U': Number(b, (tm.YDay - tm.WDay + 7) / 7, 2); break;
+            case 'V':
+                IsoYear(tm, out int days);
+                Number(b, days / 7 + 1, 2);
+                break;
+            case 'w': b.Append(tm.WDay); break;
+            case 'W': Number(b, (tm.YDay - (tm.WDay - 1 + 7) % 7 + 7) / 7, 2); break;
+            case 'y': Number(b, FloorMod(year, 100), 2); break;
+            case 'Y': b.Append(year.ToString(c)); break;
+            case 'z':
+                long minutes = Math.Abs(tm.GmtOff) / 60;
+                b.Append(tm.GmtOff < 0 ? '-' : '+');
+                Number(b, minutes / 60 * 100 + minutes % 60, 4);
+                break;
+            case 'Z': b.Append(tm.Zone); break;
+            case '%': b.Append('%'); break;
+        }
+    }
+
+    /// <summary>Appends the conversions of <paramref name="format"/>, which stands for one, such as <c>%T</c>.</summary>
+    private static void Compose(StringBuilder b, string format, in Tm tm)
+    {
+        for (int i = 0; i < format.Length; i++)
+        {
+            if (format[i] == '%')
+            {
+                StrFTime(b, format[++i], tm);
+            }
+            else
+            {
+                b.Append(format[i]);
+            }
+        }
+    }
+
+    private static void Number(StringBuilder b, long value, int digits)
+    {
+        b.Append(value.ToString(CultureInfo.InvariantCulture).PadLeft(digits, '0'));
+    }
+
+    /// <summary>
+    /// The ISO 8601 year of the week of <paramref name="tm"/>, and in
+    /// <paramref name="days"/> the days since the start of its first week,
+    /// as glibc's iso_week_days counts them.
+    /// </summary>
+    private static long IsoYear(in Tm tm, out int days)
+    {
+        long year = 1900L + tm.Year;
+        days = IsoWeekDays(tm.YDay, tm.WDay);
+        if (days < 0)
+        {
+            // This ISO week belongs to the previous year
+            days = IsoWeekDays(tm.YDay + 365 + (IsLeap(year - 1) ? 1 : 0), tm.WDay);
+            return year - 1;
+        }
+
+        int d = IsoWeekDays(tm.YDay - (365 + (IsLeap(year) ? 1 : 0)), tm.WDay);
+        if (0 <= d)
+        {
+            // This ISO week belongs to the next year
+            days = d;
+            return year + 1;
+        }
+
+        return year;
+    }
+
+    /// <summary>The days between the start of the first ISO week of the year (Monday) and the day <paramref name="yday"/>.</summary>
+    private static int IsoWeekDays(int yday, int wday)
+    {
+        // Add enough to the first operand of % to make it nonnegative
+        const int BigEnoughMultipleOf7 = (366 / 7 + 2) * 7;
+        return yday - (yday - wday + 4 + BigEnoughMultipleOf7) % 7 + 4 - 1;
+    }
+
+    private static bool IsLeap(long year)
+    {
+        return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    }
+
+    /// <summary>gmtime: the fields of the time <paramref name="t"/> in UTC; false when its year does not fit in an <c>int</c>.</summary>
+    private static bool GmTime(long t, out Tm tm)
+    {
+        return BreakDown(t, 0, "GMT", out tm);
+    }
+
+    /// <summary>localtime: the fields of the time <paramref name="t"/> in the local time zone; see <see cref="GmTime"/>.</summary>
+    private static bool LocalTime(long t, out Tm tm)
+    {
+        long offset = UtcOffset(t);
+        return BreakDown(t, offset, offset == 0 ? "UTC" : string.Empty, out tm);
+    }
+
+    private static bool BreakDown(long t, long offset, string zone, out Tm tm)
+    {
+        tm = default;
+        if (offset > 0 ? t > long.MaxValue - offset : t < long.MinValue - offset)
+        {
+            return false;
+        }
+
+        long local = t + offset;
+        long days = FloorDiv(local, SecondsPerDay);
+        long seconds = local - days * SecondsPerDay;
+        long year = CivilFromDays(days, out int month, out int day);
+        if (year - 1900 > int.MaxValue || year - 1900 < int.MinValue)
+        {
+            return false; // EOVERFLOW
+        }
+
+        tm.Year = (int)(year - 1900);
+        tm.Mon = month - 1;
+        tm.MDay = day;
+        tm.Hour = (int)(seconds / 3600);
+        tm.Min = (int)(seconds / 60 % 60);
+        tm.Sec = (int)(seconds % 60);
+        tm.WDay = (int)FloorMod(days + 4, 7); // January 1, 1970 was a Thursday
+        tm.YDay = (int)(days - DaysFromCivil(year, 1, 1));
+        tm.GmtOff = offset;
+        tm.Zone = zone;
         return true;
     }
 
     /// <summary>
-    /// How far the local time is ahead of UTC at <paramref name="time"/>:
-    /// none on a Cosmos kernel, which has no time zone, and none where the
-    /// time zone cannot be read.
+    /// mktime: the time the local fields of <paramref name="tm"/> name,
+    /// whichever their range (60 seconds is the next minute, day 0 the last
+    /// of the month before), and the fields normalized; false, and the fields
+    /// as they were, when the year of the result does not fit in an <c>int</c>.
     /// </summary>
-    private static TimeSpan LocalOffset(DateTime time)
+    private static bool MkTime(ref Tm tm, out long t)
+    {
+        // As ints, the fields cannot take the count of seconds out of a long
+        long year = 1900L + tm.Year + FloorDiv(tm.Mon, 12);
+        int month = (int)FloorMod(tm.Mon, 12) + 1;
+        long days = DaysFromCivil(year, month, 1) + tm.MDay - 1;
+        long local = days * SecondsPerDay + tm.Hour * 3600L + tm.Min * 60L + tm.Sec;
+        t = local - LocalOffset(local);
+        if (!LocalTime(t, out Tm normalized))
+        {
+            return false;
+        }
+
+        tm = normalized;
+        return true;
+    }
+
+    /// <summary>The days from January 1, 1970 to the date, in the proleptic Gregorian calendar.</summary>
+    private static long DaysFromCivil(long year, int month, int day)
+    {
+        year -= month <= 2 ? 1 : 0;
+        long era = FloorDiv(year, 400);
+        long yearOfEra = year - era * 400; // [0, 399]
+        long dayOfYear = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1; // [0, 365], from March 1
+        long dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear; // [0, 146096]
+        return era * 146097 + dayOfEra - 719468;
+    }
+
+    /// <summary>The date <paramref name="days"/> days from January 1, 1970: its year, month and day.</summary>
+    private static long CivilFromDays(long days, out int month, out int day)
+    {
+        days += 719468; // from March 1 of year 0
+        long era = FloorDiv(days, 146097);
+        long dayOfEra = days - era * 146097; // [0, 146096]
+        long yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365; // [0, 399]
+        long dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100); // [0, 365]
+        long mp = (5 * dayOfYear + 2) / 153; // [0, 11], from March
+        day = (int)(dayOfYear - (153 * mp + 2) / 5 + 1);
+        month = (int)(mp < 10 ? mp + 3 : mp - 9);
+        return yearOfEra + era * 400 + (month <= 2 ? 1 : 0);
+    }
+
+    private static long FloorDiv(long a, long b)
+    {
+        long q = a / b;
+        return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
+    }
+
+    private static long FloorMod(long a, long b)
+    {
+        return a - FloorDiv(a, b) * b;
+    }
+
+    /// <summary>
+    /// How far the local time is ahead of UTC at the time <paramref name="t"/>,
+    /// in seconds: none on a Cosmos kernel, which has no time zone, and none
+    /// where the time zone cannot be read.
+    /// </summary>
+    private static long UtcOffset(long t)
+    {
+        return ZoneOffset(new DateTime(ZoneTicks(t), DateTimeKind.Utc));
+    }
+
+    /// <summary>How far the local time <paramref name="local"/> (in seconds from 1970, as UTC would count them) is ahead of UTC.</summary>
+    private static long LocalOffset(long local)
+    {
+        return ZoneOffset(new DateTime(ZoneTicks(local), DateTimeKind.Unspecified));
+    }
+
+    /// <summary>The ticks of a <see cref="DateTime"/> whose offset is that of the time <paramref name="t"/>; see <see cref="MinZoneTime"/>.</summary>
+    private static long ZoneTicks(long t)
+    {
+        if (t > MaxZoneTime)
+        {
+            t -= ((t - MaxZoneTime - 1) / GregorianCycle + 1) * GregorianCycle;
+        }
+        else if (t < MinZoneTime)
+        {
+            t = MinZoneTime;
+        }
+
+        return DateTime.UnixEpoch.Ticks + t * TimeSpan.TicksPerSecond;
+    }
+
+    private static long ZoneOffset(DateTime time)
     {
         try
         {
-            return TimeZoneInfo.Local.GetUtcOffset(time);
+            return (long)TimeZoneInfo.Local.GetUtcOffset(time).TotalSeconds;
         }
         catch (Exception e) when (e is TimeZoneNotFoundException or InvalidTimeZoneException or IOException or UnauthorizedAccessException)
         {
-            return TimeSpan.Zero;
+            return 0;
         }
     }
 }

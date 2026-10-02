@@ -8,7 +8,7 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>io</c> library of Lua 5.3 on <see cref="System.IO"/>, where UniLua
+/// The <c>io</c> library of Lua 5.4 on <see cref="System.IO"/>, where UniLua
 /// had stubs. Files are userdata with the <c>FILE*</c> metatable; the
 /// standard ones are the host's console, so in a console session they are
 /// the session's terminal. Relative names start from the state's working
@@ -17,8 +17,8 @@ namespace Cosmos.Executable.Lua;
 /// <remarks>
 /// Not here: <c>io.popen</c>, which needs processes, and the closing of a
 /// forgotten file by the garbage collector (<c>__gc</c>), which UniLua does
-/// not run: close what you open, or read it to the end with
-/// <c>io.lines(name)</c>.
+/// not run: close what you open, in a to-be-closed variable or by hand, or
+/// read it with <c>io.lines(name)</c> in a generic for, which closes it.
 /// </remarks>
 internal static class LuaIOLib
 {
@@ -54,31 +54,43 @@ internal static class LuaIOLib
             new("write", IO_Write),
         ];
         lua.L_NewLib(library);
-
-        // The metatable of files, whose __index holds their methods
-        lua.L_NewMetaTable(FileType);
-        lua.PushValue(-1);
-        lua.SetField(-2, "__index");
-        NameFuncPair[] methods =
-        [
-            new("close", F_Close),
-            new("flush", F_Flush),
-            new("lines", F_Lines),
-            new("read", F_Read),
-            new("seek", F_Seek),
-            new("setvbuf", F_Setvbuf),
-            new("write", F_Write),
-            new("__gc", F_Gc),
-            new("__tostring", F_ToString),
-        ];
-        lua.L_SetFuncs(methods, 0);
-        lua.Pop(1);
+        CreateMeta(lua);
 
         LuaHost host = LuaHost.Of(lua);
         CreateStandardFile(lua, new LuaFileHandle(host, LuaFileHandle.StandardFile.Input), InputKey, "stdin");
         CreateStandardFile(lua, new LuaFileHandle(host, LuaFileHandle.StandardFile.Output), OutputKey, "stdout");
         CreateStandardFile(lua, new LuaFileHandle(host, LuaFileHandle.StandardFile.Error), null, "stderr");
         return 1;
+    }
+
+    /// <summary>
+    /// createmeta: the metatable of files, with their metamethods, and an
+    /// __index that holds their methods.
+    /// </summary>
+    private static void CreateMeta(ILuaState lua)
+    {
+        NameFuncPair[] methods =
+        [
+            new("read", F_Read),
+            new("write", F_Write),
+            new("lines", F_Lines),
+            new("flush", F_Flush),
+            new("seek", F_Seek),
+            new("close", F_Close),
+            new("setvbuf", F_Setvbuf),
+        ];
+        NameFuncPair[] metamethods =
+        [
+            new("__gc", F_Gc),
+            new("__close", F_Gc),
+            new("__tostring", F_ToString),
+        ];
+        lua.L_NewMetaTable(FileType); // metatable for file handles
+        lua.L_SetFuncs(metamethods, 0); // add metamethods to new metatable
+        lua.L_NewLibTable(methods); // create method table
+        lua.L_SetFuncs(methods, 0); // add file methods to method table
+        lua.SetField(-2, "__index"); // metatable.__index = method table
+        lua.Pop(1); // pop metatable
     }
 
     private static void CreateStandardFile(ILuaState lua, LuaFileHandle file, string? registryKey, string name)
@@ -95,7 +107,7 @@ internal static class LuaIOLib
 
     private static void PushFile(ILuaState lua, LuaFileHandle file)
     {
-        lua.NewUserData(file);
+        lua.NewUserDataUV(file, 0);
         lua.L_SetMetaTable(FileType);
     }
 
@@ -137,17 +149,19 @@ internal static class LuaIOLib
         {
             FileNotFoundException or DirectoryNotFoundException => "No such file or directory",
             UnauthorizedAccessException => "Permission denied",
+            NotSupportedException => "Bad file descriptor", // a read from a file not open for reading, or a write
             _ => LuaText.Encode(error.Message),
         };
     }
 
-    /// <summary>The errno of a failure, for the common ones: ENOENT, EACCES, or else EIO.</summary>
+    /// <summary>The errno of a failure, for the common ones: ENOENT, EACCES, EBADF, or else EIO.</summary>
     private static int ErrorNumber(Exception error)
     {
         return error switch
         {
             FileNotFoundException or DirectoryNotFoundException => 2,
             UnauthorizedAccessException => 13,
+            NotSupportedException => 9,
             _ => 5,
         };
     }
@@ -201,13 +215,24 @@ internal static class LuaIOLib
         return file!;
     }
 
-    /// <summary>Parses an <c>fopen</c> mode: <c>r</c>, <c>w</c> or <c>a</c>, then an optional <c>+</c>, then an optional <c>b</c>.</summary>
+    /// <summary>
+    /// Parses an <c>fopen</c> mode as l_checkmode checks it,
+    /// <c>[rwa]%+?b*</c>: <c>r</c>, <c>w</c> or <c>a</c>, then an optional
+    /// <c>+</c>, then any number of <c>b</c>; a C string, which ends at its
+    /// first zero.
+    /// </summary>
     private static bool TryParseMode(string mode, out FileMode fileMode, out FileAccess access, out bool append, out bool binary)
     {
         fileMode = FileMode.Open;
         access = FileAccess.Read;
         append = false;
         binary = false;
+        int end = mode.IndexOf('\0');
+        if (end >= 0)
+        {
+            mode = mode[..end];
+        }
+
         if (mode.Length == 0)
         {
             return false;
@@ -217,18 +242,16 @@ internal static class LuaIOLib
         bool update = i < mode.Length && mode[i] == '+';
         if (update)
         {
-            i++;
+            i++; // skip if char is '+'
         }
 
-        binary = i < mode.Length && mode[i] == 'b';
-        if (binary)
+        binary = i < mode.Length;
+        for (; i < mode.Length; i++)
         {
-            i++;
-        }
-
-        if (i != mode.Length)
-        {
-            return false;
+            if (mode[i] != 'b') // check extensions
+            {
+                return false;
+            }
         }
 
         switch (mode[0])
@@ -283,9 +306,10 @@ internal static class LuaIOLib
     {
         if (!lua.IsNoneOrNil(1))
         {
-            if (lua.Type(1) == LuaType.LUA_TSTRING)
+            string? fileName = lua.ToString(1); // a string, or a number as one
+            if (fileName is not null)
             {
-                PushFile(lua, OpenOrRaise(lua, lua.ToString(1), mode));
+                PushFile(lua, OpenOrRaise(lua, fileName, mode));
             }
             else
             {
@@ -300,6 +324,7 @@ internal static class LuaIOLib
         return 1;
     }
 
+    /// <summary>getiofile: the default input or output file, which must be open.</summary>
     private static LuaFileHandle DefaultFile(ILuaState lua, string key)
     {
         lua.GetField(LuaDef.LUA_REGISTRYINDEX, key);
@@ -307,22 +332,53 @@ internal static class LuaIOLib
         lua.Pop(1);
         if (file.IsClosed)
         {
-            lua.L_Error("standard {0} file is closed", key == InputKey ? "input" : "output");
+            lua.L_Error("default {0} file is closed", key == InputKey ? "input" : "output");
         }
 
         return file;
     }
 
+    /// <summary>
+    /// The iterator of the lines of a file or of the default input. For a
+    /// file it opened, it also returns the file as the fourth result, the
+    /// to-be-closed variable of a generic for, which closes the file when
+    /// the loop ends.
+    /// </summary>
     private static int IO_Lines(ILuaState lua)
     {
-        if (lua.IsNoneOrNil(1))
+        bool toClose;
+        if (lua.IsNone(1))
         {
-            // Lines of the default input, which stays open
-            return PushLinesIterator(lua, DefaultFile(lua, InputKey), 2, close: false);
+            lua.PushNil(); // at least one argument
         }
 
-        LuaFileHandle file = OpenOrRaise(lua, lua.L_CheckString(1), "r");
-        return PushLinesIterator(lua, file, 2, close: true);
+        if (lua.IsNil(1))
+        {
+            // no file name: the default input, which stays open
+            lua.GetField(LuaDef.LUA_REGISTRYINDEX, InputKey);
+            lua.Replace(1); // put it at index 1
+            ToFile(lua, 1); // check that it's a valid file handle
+            toClose = false;
+        }
+        else
+        {
+            // open a new file
+            string fileName = lua.L_CheckString(1);
+            PushFile(lua, OpenOrRaise(lua, fileName, "r"));
+            lua.Replace(1); // put file at index 1
+            toClose = true; // close it after iteration
+        }
+
+        AuxLines(lua, toClose); // push iteration function
+        if (toClose)
+        {
+            lua.PushNil(); // state
+            lua.PushNil(); // control
+            lua.PushValue(1); // file is the to-be-closed variable (4th result)
+            return 4;
+        }
+
+        return 1;
     }
 
     private static int IO_Read(ILuaState lua)
@@ -332,14 +388,7 @@ internal static class LuaIOLib
 
     private static int IO_Write(ILuaState lua)
     {
-        lua.GetField(LuaDef.LUA_REGISTRYINDEX, OutputKey);
-        LuaFileHandle file = (LuaFileHandle)lua.ToUserData(-1);
-        lua.Pop(1);
-        if (file.IsClosed)
-        {
-            return lua.L_Error("standard output file is closed");
-        }
-
+        LuaFileHandle file = DefaultFile(lua, OutputKey);
         int results = Write(lua, file, 1);
         if (results == 1)
         {
@@ -350,8 +399,14 @@ internal static class LuaIOLib
         return results;
     }
 
+    /// <summary>io.popen, as the reference implementation is where there are no processes.</summary>
     private static int IO_Popen(ILuaState lua)
     {
+        lua.L_CheckString(1);
+        string mode = lua.L_OptString(2, "r");
+        // l_checkmodep: only "r" or "w" (a C string, which ends at its first zero)
+        bool valid = mode.Length > 0 && (mode[0] == 'r' || mode[0] == 'w') && (mode.Length == 1 || mode[1] == '\0');
+        lua.L_ArgCheck(valid, 2, "invalid mode");
         return lua.L_Error("'popen' not supported");
     }
 
@@ -399,7 +454,9 @@ internal static class LuaIOLib
 
     private static int F_Lines(ILuaState lua)
     {
-        return PushLinesIterator(lua, ToFile(lua, 1), 2, close: false);
+        ToFile(lua, 1); // check that it's a valid file handle
+        AuxLines(lua, false);
+        return 1;
     }
 
     private static int F_Read(ILuaState lua)
@@ -486,9 +543,13 @@ internal static class LuaIOLib
         return 1;
     }
 
+    /// <summary>
+    /// f_gc, which is also __close: the reference implementation's
+    /// collector calls __gc, which only a script does here, and the end of
+    /// the scope of a to-be-closed variable calls __close.
+    /// </summary>
     private static int F_Gc(ILuaState lua)
     {
-        // As in the reference implementation, which the collector calls: here only a script does
         LuaFileHandle file = (LuaFileHandle)lua.L_CheckUData(1, FileType);
         if (!file.IsClosed && !file.IsStandard)
         {
@@ -509,67 +570,59 @@ internal static class LuaIOLib
 
     // ---- reading and writing
 
-    private static int PushLinesIterator(ILuaState lua, LuaFileHandle file, int firstFormat, bool close)
+    /// <summary>
+    /// aux_lines: the iteration function of lines(), a closure over
+    /// <see cref="IO_ReadLine"/> with these upvalues: the file being read
+    /// (at index 1), the number of formats, whether to close the file at
+    /// its end, and the formats (the rest of the stack).
+    /// </summary>
+    private static void AuxLines(ILuaState lua, bool toClose)
     {
-        // The formats lines() was given, read again on every call
-        int formatCount = Math.Max(0, lua.GetTop() - firstFormat + 1);
-        lua.L_ArgCheck(formatCount <= MaxLinesFormats, MaxLinesFormats + 2, "too many arguments");
-        string[] formats = new string[formatCount];
-        double[] counts = new double[formatCount];
-        for (int i = 0; i < formatCount; i++)
+        int n = lua.GetTop() - 1; // number of arguments to read
+        lua.L_ArgCheck(n <= MaxLinesFormats, MaxLinesFormats + 2, "too many arguments");
+        lua.PushValue(1); // file
+        lua.PushInteger(n); // number of arguments to read
+        lua.PushBoolean(toClose); // close/not close file when finished
+        lua.Rotate(2, 3); // move the three values to their positions
+        lua.PushCSharpClosure(IO_ReadLine, 3 + n);
+    }
+
+    /// <summary>io_readline: the iteration function for lines().</summary>
+    private static int IO_ReadLine(ILuaState lua)
+    {
+        LuaFileHandle file = (LuaFileHandle)lua.ToUserData(lua.UpvalueIndex(1));
+        int n = (int)lua.ToInteger(lua.UpvalueIndex(2));
+        if (file.IsClosed) // file is already closed?
         {
-            if (lua.Type(firstFormat + i) == LuaType.LUA_TNUMBER)
-            {
-                counts[i] = lua.ToNumber(firstFormat + i);
-            }
-            else
-            {
-                formats[i] = lua.L_CheckString(firstFormat + i);
-            }
+            return lua.L_Error("file is already closed");
         }
 
-        lua.PushCSharpFunction(iterator =>
+        lua.SetTop(1);
+        lua.L_CheckStack(n, "too many arguments");
+        for (int i = 1; i <= n; i++)
         {
-            if (file.IsClosed)
-            {
-                return iterator.L_Error("file is already closed");
-            }
+            lua.PushValue(lua.UpvalueIndex(3 + i)); // push arguments to 'g_read'
+        }
 
-            int top = iterator.GetTop();
-            iterator.L_CheckStack(formatCount, "too many arguments");
-            for (int i = 0; i < formatCount; i++)
-            {
-                if (formats[i] is null)
-                {
-                    iterator.PushNumber(counts[i]);
-                }
-                else
-                {
-                    iterator.PushString(formats[i]);
-                }
-            }
+        n = Read(lua, file, 2); // 'n' is number of results
+        if (lua.ToBoolean(-n)) // read at least one value?
+        {
+            return n; // return them
+        }
 
-            int results = Read(iterator, file, top + 1);
-            if (!iterator.IsNil(-results))
-            {
-                return results;
-            }
+        // first result is false: EOF or error
+        if (n > 1)
+        {
+            // is there error information? 2nd result is error message
+            return lua.L_Error("{0}", lua.ToString(-n + 1));
+        }
 
-            if (results > 1)
-            {
-                // nil and the reason: not the end of the file, but a failure
-                return iterator.L_Error("{0}", iterator.ToString(-results + 1));
-            }
+        if (lua.ToBoolean(lua.UpvalueIndex(3))) // generator created file?
+        {
+            Try(file.Close); // close it (aux_close, whose results are dropped)
+        }
 
-            // The end of the file: io.lines(name) closes it
-            if (close)
-            {
-                file.Close();
-            }
-
-            return 0;
-        });
-        return 1;
+        return 0;
     }
 
     /// <summary>Reads what the formats from <paramref name="first"/> on ask for; the first that fails gives nil and stops.</summary>

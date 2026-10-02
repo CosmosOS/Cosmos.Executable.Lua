@@ -3,106 +3,124 @@
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
 
+using System.Runtime.CompilerServices;
+
 namespace Cosmos.Executable.Lua
 {
 	public class LuaDebug
 	{
 		public int			Event;
-		public string 		Name;
-		public string 		NameWhat;
-		public int 			ActiveCIIndex;
-		public int			CurrentLine;
-		public int			NumUps;
-		public bool			IsVarArg;
-		public int			NumParams;
-		public bool			IsTailCall;
-		public string		Source;
-		public int			LineDefined;
-		public int			LastLineDefined;
-		public string		What;
-		public string		ShortSrc;
+		public string 		Name;			// (n)
+		public string 		NameWhat;		// (n) 'global', 'local', 'field', 'method'
+		public int 			ActiveCIIndex;	// active function
+		public int			CurrentLine;	// (l)
+		public int			NumUps;			// (u) number of upvalues
+		public bool			IsVarArg;		// (u)
+		public int			NumParams;		// (u) number of parameters
+		public bool			IsTailCall;		// (t)
+		public int			FTransfer;		// (r) index of first value transferred
+		public int			NTransfer;		// (r) number of transferred values
+		public string		Source;			// (S)
+		public int			LineDefined;	// (S)
+		public int			LastLineDefined;	// (S)
+		public string		What;			// (S) 'Lua', 'C', 'main', 'tail'
+		public string		ShortSrc;		// (S)
 	}
 
+	// ldebug.c of Lua 5.4: debug interface
 	internal partial class LuaState
 	{
-		bool ILuaAPI.GetStack( int level, LuaDebug ar )
+		private const string StrLocal = "local";
+		private const string StrUpval = "upvalue";
+
+		/*
+		** Mark for entries in 'lineinfo' array that has absolute information in
+		** 'abslineinfo' array
+		*/
+		internal const sbyte ABSLINEINFO = -0x80;
+
+		/*
+		** MAXimum number of successive Instructions WiTHout ABSolute line
+		** information. (A power of two allows fast divisions.)
+		*/
+		internal const int MAXIWTHABS = 128;
+
+		private static int CurrentPc( CallInfo ci )
 		{
-			if( level < 0 )
-				return false;
-
-			int index;
-			for( index = CI.Index; level > 0 && index > 0; --index )
-				{ level--; }
-
-			bool status = false;
-			if( level == 0 && index > 0 ) {
-				status = true;
-				ar.ActiveCIIndex = index;
-			}
-			return status;
+			Utl.Assert( ci.IsLua );
+			return ci.SavedPc.Index - 1;
 		}
 
-		public int GetInfo( string what, LuaDebug ar )
+		/*
+		** Get a "base line" to find the line corresponding to an instruction.
+		** Base lines are regularly placed at MAXIWTHABS intervals, so usually
+		** an integer division gets the right place. When the source file has
+		** large sequences of empty/comment lines, it may need extra entries,
+		** so the original estimate needs a correction.
+		** If the original estimate is -1, the initial 'if' ensures that the
+		** 'while' will run at least once.
+		** The assertion that the estimate is a lower bound for the correct base
+		** is valid as long as the debug info has been generated with the same
+		** value for MAXIWTHABS or smaller. (Previous releases use a little
+		** smaller value.)
+		*/
+		private static int GetBaseLine( LuaProto f, int pc, out int basepc )
 		{
-			CallInfo 	ci;
-			StkId		func;
-
-			int	pos = 0;
-			if( what[pos] == '>' )
+			var abs = f.AbsLineInfo;
+			if( abs.Count == 0 || pc < abs[0].Pc )
 			{
-				ci = null;
-				func = Stack[Top.Index - 1];
-
-				Utl.ApiCheck(func.V.TtIsFunction(), "function expected");
-				pos++;
-
-				Top = Stack[Top.Index-1];
+				basepc = -1; // start from the beginning
+				return f.LineDefined;
 			}
 			else
 			{
-				ci = BaseCI[ar.ActiveCIIndex];
-				func = Stack[ci.FuncIndex];
-				Utl.Assert(Stack[ci.FuncIndex].V.TtIsFunction());
+				int i = (int)((uint)pc / MAXIWTHABS) - 1; // get an estimate
+				/* estimate must be a lower bound of the correct base */
+				Utl.Assert( i < 0 || (i < abs.Count && abs[i].Pc <= pc) );
+				while( i + 1 < abs.Count && pc >= abs[i + 1].Pc )
+					i++; // low estimate; adjust it
+				basepc = abs[i].Pc;
+				return abs[i].Line;
 			}
+		}
 
-			// var IsClosure( func.Value ) ? func.Value
-			int status = AuxGetInfo( what, ar, func, ci );
-			if( what.Contains( "f" ) )
+		/*
+		** Get the line corresponding to instruction 'pc' in function 'f';
+		** first gets a base line and from there does the increments until
+		** the desired instruction.
+		*/
+		internal static int G_GetFuncLine( LuaProto f, int pc )
+		{
+			if( f.LineInfo.Count == 0 ) // no debug information?
+				return -1;
+			else
 			{
-				Top.V.SetObj(ref func.V);
-				IncrTop();
+				int basepc;
+				int baseline = GetBaseLine( f, pc, out basepc );
+				while( basepc++ < pc ) // walk until given instruction
+				{
+					Utl.Assert( f.LineInfo[basepc] != ABSLINEINFO );
+					baseline += f.LineInfo[basepc]; // correct line
+				}
+				return baseline;
 			}
-			if( what.Contains( "L" ) )
+		}
+
+		private int GetCurrentLineOf( CallInfo ci )
+		{
+			return G_GetFuncLine( Stack[ci.FuncIndex].V.ClLValue().Proto, CurrentPc( ci ) );
+		}
+
+		/*
+		** Set 'trap' for all active Lua frames.
+		*/
+		private void SetTraps()
+		{
+			for( int i = CI.Index; i >= 0; --i )
 			{
-				CollectValidLines( func );
+				if( BaseCI[i].IsLua )
+					BaseCI[i].Trap = true;
 			}
-			return status;
-		}
-
-		internal bool IsLuaFunction( int index )
-		{
-			StkId addr;
-			return Index2Addr( index, out addr )
-				&& addr.V.TtIsFunction() && addr.V.ClIsLuaClosure();
-		}
-
-		// lua_upvalueid: the closures sharing an upvalue give the same object
-		internal object UpvalueId( int funcIndex, int n )
-		{
-			StkId addr;
-			if( !Index2Addr( funcIndex, out addr ) )
-				return null;
-			if( addr.V.ClIsLuaClosure() )
-				return addr.V.ClLValue().Upvals[n-1];
-			return addr.V.ClCsValue().Upvals[n-1];
-		}
-
-		internal void UpvalueJoin( int funcIndex1, int n1, int funcIndex2, int n2 )
-		{
-			StkId f1, f2;
-			Index2Addr( funcIndex1, out f1 );
-			Index2Addr( funcIndex2, out f2 );
-			f1.V.ClLValue().Upvals[n1-1] = f2.V.ClLValue().Upvals[n2-1];
 		}
 
 		// lua_sethook
@@ -113,105 +131,73 @@ namespace Cosmos.Executable.Lua
 				mask = 0;
 				func = null;
 			}
-			if( CI.IsLua )
-				OldPc = CI.SavedPc.Index;
 			Hook = func;
 			BaseHookCount = count;
 			ResetHookCount();
 			HookMask = (byte)mask;
+			if( mask != 0 )
+				SetTraps(); // to trace inside 'luaV_execute'
 		}
 
-		// luaD_hook: runs the hook with the stack and the frame of the event
-		internal void D_Hook( int ev, int line )
+		bool ILuaAPI.GetStack( int level, LuaDebug ar )
 		{
-			var hook = Hook;
-			if( hook != null && AllowHook )
-			{
-				CallInfo ci = CI;
-				int top = Top.Index;
-				int ciTop = ci.TopIndex;
-				LuaDebug ar = new LuaDebug();
-				ar.Event = ev;
-				ar.CurrentLine = line;
-				ar.ActiveCIIndex = ci.Index;
-				D_CheckStack( LuaDef.LUA_MINSTACK ); // ensure minimum stack size
-				ci.TopIndex = Top.Index + LuaDef.LUA_MINSTACK;
-				AllowHook = false; // cannot call hooks inside a hook
-				ci.CallStatus |= CallStatus.CIST_HOOKED;
-				hook( this, ar );
-				AllowHook = true;
-				ci.TopIndex = ciTop;
-				Top = Stack[top];
-				ci.CallStatus &= ~CallStatus.CIST_HOOKED;
+			if( level < 0 )
+				return false; // invalid (negative) level
+
+			int index;
+			for( index = CI.Index; level > 0 && index > 0; --index )
+				{ level--; }
+
+			bool status = false;
+			if( level == 0 && index > 0 ) { // level found?
+				status = true;
+				ar.ActiveCIIndex = index;
 			}
+			return status; // else no such level
 		}
 
-		// the call hook of a Lua function, before its first instruction
-		private void CallHook( CallInfo ci )
+		private static string UpvalName( LuaProto p, int uv )
 		{
-			int hook = LuaDef.LUA_HOOKCALL;
-			ci.SavedPc.Index++; // hooks assume 'pc' is already incremented
-			var prev = BaseCI[ci.Index-1];
-			if( prev.IsLua &&
-				(prev.SavedPc - 1).Value.GET_OPCODE() == OpCode.OP_TAILCALL )
-			{
-				ci.CallStatus |= CallStatus.CIST_TAIL;
-				hook = LuaDef.LUA_HOOKTAILCALL;
-			}
-			D_Hook( hook, -1 );
-			ci.SavedPc.Index--; // correct 'pc'
-		}
-
-		// the count and line hooks, before an instruction runs
-		private void TraceExec( CallInfo ci )
-		{
-			byte mask = HookMask;
-			if( (mask & LuaDef.LUA_MASKCOUNT) != 0 && HookCount == 0 )
-			{
-				ResetHookCount();
-				D_Hook( LuaDef.LUA_HOOKCOUNT, -1 );
-			}
-			if( (mask & LuaDef.LUA_MASKLINE) != 0 )
-			{
-				var p = GetCurrentLuaFunc(ci).Proto;
-				int npc = ci.SavedPc.Index - 1;
-				int newline = p.GetFuncLine( npc );
-				if( npc == 0 || // call linehook when enter a new function,
-					ci.SavedPc.Index <= OldPc || // when jump back (loop), or when
-					newline != p.GetFuncLine( OldPc - 1 ) ) // enter a new line
-					D_Hook( LuaDef.LUA_HOOKLINE, newline );
-			}
-			OldPc = ci.SavedPc.Index;
+			Utl.Assert( uv < p.Upvalues.Count );
+			var name = p.Upvalues[uv].Name;
+			return name ?? "?";
 		}
 
 		private string FindVararg( CallInfo ci, int n, out StkId pos )
 		{
-			int nparams = Stack[ci.FuncIndex].V.ClLValue().Proto.NumParams;
 			pos = null;
-			if( n >= ci.BaseIndex - ci.FuncIndex - nparams )
-				return null; // no such vararg
-			pos = Stack[ci.FuncIndex + nparams + n];
-			return "(*vararg)"; // generic name for any vararg
+			if( Stack[ci.FuncIndex].V.ClLValue().Proto.IsVarArg )
+			{
+				int nextra = ci.NExtraArgs;
+				if( n >= -nextra ) // 'n' is negative
+				{
+					pos = Stack[ci.FuncIndex - nextra - (n + 1)];
+					return "(vararg)"; // generic name for any vararg
+				}
+			}
+			return null; // no such vararg
 		}
 
-		private string FindLocal( CallInfo ci, int n, out StkId pos )
+		internal string G_FindLocal( CallInfo ci, int n, out StkId pos )
 		{
+			int stackBase = ci.FuncIndex + 1;
 			string name = null;
-			int stackBase;
 			pos = null;
 			if( ci.IsLua )
 			{
 				if( n < 0 ) // access to vararg values?
-					return FindVararg( ci, -n, out pos );
-				stackBase = ci.BaseIndex;
-				name = F_GetLocalName( GetCurrentLuaFunc(ci).Proto, n, ci.CurrentPc );
+					return FindVararg( ci, n, out pos );
+				else
+					name = F_GetLocalName( Stack[ci.FuncIndex].V.ClLValue().Proto, n, CurrentPc( ci ) );
 			}
-			else stackBase = ci.FuncIndex + 1;
 			if( name == null ) // no 'standard' name?
 			{
-				int limit = (ci == CI) ? Top.Index : BaseCI[ci.Index+1].FuncIndex;
+				int limit = (ci == CI) ? Top.Index : BaseCI[ci.Index + 1].FuncIndex;
 				if( limit - stackBase >= n && n > 0 ) // is 'n' inside 'ci' stack?
-					name = "(*temporary)"; // generic name for any valid slot
+				{
+					/* generic name for any valid slot */
+					name = ci.IsLua ? "(temporary)" : "(C temporary)";
+				}
 				else
 					return null; // no name
 			}
@@ -219,22 +205,27 @@ namespace Cosmos.Executable.Lua
 			return name;
 		}
 
-		// lua_getlocal: with no `ar', the parameter names of the function on top
+		// lua_getlocal: with no 'ar', the parameter names of the function on top
 		internal string GetLocal( LuaDebug ar, int n )
 		{
-			if( ar == null )
+			string name;
+			if( ar == null ) // information about non-active function?
 			{
 				var f = Stack[Top.Index-1];
-				if( !f.V.TtIsFunction() || !f.V.ClIsLuaClosure() )
-					return null;
-				return F_GetLocalName( f.V.ClLValue().Proto, n, 0 );
+				if( !f.V.TtIsFunction() || !f.V.ClIsLuaClosure() ) // not a Lua function?
+					name = null;
+				else // consider live variables at function start (parameters)
+					name = F_GetLocalName( f.V.ClLValue().Proto, n, 0 );
 			}
-			StkId pos;
-			var name = FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
-			if( name != null )
+			else // active function; get information through 'ar'
 			{
-				Top.V.SetObj(ref pos.V);
-				IncrTop();
+				StkId pos;
+				name = G_FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
+				if( name != null )
+				{
+					Top.V.SetObj( ref pos.V );
+					ApiIncrTop();
+				}
 			}
 			return name;
 		}
@@ -243,11 +234,86 @@ namespace Cosmos.Executable.Lua
 		internal string SetLocal( LuaDebug ar, int n )
 		{
 			StkId pos;
-			var name = FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
+			var name = G_FindLocal( BaseCI[ar.ActiveCIIndex], n, out pos );
 			if( name != null )
-				pos.V.SetObj(ref Stack[Top.Index-1].V);
-			Top = Stack[Top.Index-1];
+			{
+				pos.V.SetObj( ref Stack[Top.Index-1].V );
+				Top = Stack[Top.Index-1]; // pop value
+			}
 			return name;
+		}
+
+		private void FuncInfo( LuaDebug ar, StkId func )
+		{
+			if( !func.V.ClIsLuaClosure() )
+			{
+				ar.Source = "=[C]";
+				ar.LineDefined = -1;
+				ar.LastLineDefined = -1;
+				ar.What = "C";
+			}
+			else
+			{
+				var p = func.V.ClLValue().Proto;
+				ar.Source = p.Source ?? "=?";
+				ar.LineDefined = p.LineDefined;
+				ar.LastLineDefined = p.LastLineDefined;
+				ar.What = (ar.LineDefined == 0) ? "main" : "Lua";
+			}
+			ar.ShortSrc = O_ChunkId( ar.Source );
+		}
+
+		private static int NextLine( LuaProto p, int currentline, int pc )
+		{
+			if( p.LineInfo[pc] != ABSLINEINFO )
+				return currentline + p.LineInfo[pc];
+			else
+				return G_GetFuncLine( p, pc );
+		}
+
+		private void CollectValidLines( StkId func )
+		{
+			if( !func.V.ClIsLuaClosure() )
+			{
+				Top.V.SetNilValue();
+				ApiIncrTop();
+			}
+			else
+			{
+				var p = func.V.ClLValue().Proto;
+				int currentline = p.LineDefined;
+				var t = new LuaTable( this ); // new table to store active lines
+				Top.V.SetHValue( t ); // push it on stack
+				ApiIncrTop();
+				if( p.LineInfo.Count != 0 ) // proto with debug information?
+				{
+					int i;
+					var v = new TValue();
+					v.SetBValue( true ); // boolean 'true' to be the value of all indices
+					if( !p.IsVarArg ) // regular function?
+						i = 0; // consider all instructions
+					else // vararg function
+					{
+						Utl.Assert( p.Code[0].GET_OPCODE() == OpCode.OP_VARARGPREP );
+						currentline = NextLine( p, currentline, 0 );
+						i = 1; // skip first instruction (OP_VARARGPREP)
+					}
+					for( ; i < p.LineInfo.Count; i++ ) // for each instruction
+					{
+						currentline = NextLine( p, currentline, i ); // get its line
+						t.SetInt( currentline, ref v ); // table[line] = true
+					}
+				}
+			}
+		}
+
+		private string GetFuncName( CallInfo ci, out string name )
+		{
+			/* calling function is a known function? */
+			if( ci != null && (ci.CallStatus & CallStatus.CIST_TAIL) == 0 )
+				return FuncNameFromCall( ci.Previous, out name );
+			name = null;
+			return null; // no way to find a name
 		}
 
 		private int AuxGetInfo( string what, LuaDebug ar, StkId func, CallInfo ci )
@@ -255,8 +321,7 @@ namespace Cosmos.Executable.Lua
 			int status = 1;
 			for( int i=0; i<what.Length; ++i )
 			{
-				char c = what[i];
-				switch( c )
+				switch( what[i] )
 				{
 					case 'S':
 					{
@@ -265,46 +330,35 @@ namespace Cosmos.Executable.Lua
 					}
 					case 'l':
 					{
-						ar.CurrentLine = (ci != null && ci.IsLua) ? GetCurrentLine(ci) : -1;
+						ar.CurrentLine = (ci != null && ci.IsLua) ? GetCurrentLineOf( ci ) : -1;
 						break;
 					}
 					case 'u':
 					{
-						Utl.Assert(func.V.TtIsFunction());
-						if(func.V.ClIsLuaClosure()) {
-							var lcl = func.V.ClLValue();
-							ar.NumUps = lcl.Upvals.Length;
-							ar.IsVarArg = lcl.Proto.IsVarArg;
-							ar.NumParams = lcl.Proto.NumParams;
-						}
-						else if(func.V.ClIsCsClosure()) {
+						if( !func.V.ClIsLuaClosure() )
+						{
 							var ccl = func.V.ClCsValue();
 							ar.NumUps = ccl.Upvals == null ? 0 : ccl.Upvals.Length;
 							ar.IsVarArg = true;
 							ar.NumParams = 0;
 						}
-						else throw new System.NotImplementedException();
+						else
+						{
+							var lcl = func.V.ClLValue();
+							ar.NumUps = lcl.Upvals.Length;
+							ar.IsVarArg = lcl.Proto.IsVarArg;
+							ar.NumParams = lcl.Proto.NumParams;
+						}
 						break;
 					}
 					case 't':
 					{
-						ar.IsTailCall = (ci != null)
-							? ( (ci.CallStatus & CallStatus.CIST_TAIL) != 0 )
-							: false;
+						ar.IsTailCall = (ci != null) && (ci.CallStatus & CallStatus.CIST_TAIL) != 0;
 						break;
 					}
 					case 'n':
 					{
-						if( ci != null
-							&& ((ci.CallStatus & CallStatus.CIST_TAIL) == 0)
-							&& BaseCI[ci.Index-1].IsLua )
-						{
-							ar.NameWhat = GetFuncName( BaseCI[ci.Index-1], out ar.Name );
-						}
-						else
-						{
-							ar.NameWhat = null;
-						}
+						ar.NameWhat = GetFuncName( ci, out ar.Name );
 						if( ar.NameWhat == null )
 						{
 							ar.NameWhat = ""; // not found
@@ -312,8 +366,19 @@ namespace Cosmos.Executable.Lua
 						}
 						break;
 					}
+					case 'r':
+					{
+						if( ci == null || (ci.CallStatus & CallStatus.CIST_TRAN) == 0 )
+							ar.FTransfer = ar.NTransfer = 0;
+						else
+						{
+							ar.FTransfer = ci.FTransfer;
+							ar.NTransfer = ci.NTransfer;
+						}
+						break;
+					}
 					case 'L':
-					case 'f': // handled by GetInfo
+					case 'f': // handled by lua_getinfo
 						break;
 					default: status = 0; // invalid option
 						break;
@@ -322,102 +387,485 @@ namespace Cosmos.Executable.Lua
 			return status;
 		}
 
-		private void CollectValidLines( StkId func )
+		// lua_getinfo
+		public int GetInfo( string what, LuaDebug ar )
 		{
-			Utl.Assert(func.V.TtIsFunction());
-			if(func.V.ClIsLuaClosure()) {
-				var lcl = func.V.ClLValue();
-				var p = lcl.Proto;
-				var lineinfo = p.LineInfo;
-				var t = new LuaTable(this);
-				Top.V.SetHValue(t);
-				IncrTop();
-				var v = new TValue();
-				v.SetBValue(true);
-				for( int i=0; i<lineinfo.Count; ++i )
-					t.SetInt(lineinfo[i], ref v);
+			CallInfo ci;
+			StkId func;
+			if( what.Length > 0 && what[0] == '>' )
+			{
+				ci = null;
+				func = Stack[Top.Index - 1];
+				Utl.ApiCheck( func.V.TtIsFunction(), "function expected" );
+				what = what.Substring( 1 ); // skip the '>'
+				Top = Stack[Top.Index - 1]; // pop function
 			}
-			else if(func.V.ClIsCsClosure()) {
-				Top.V.SetNilValue();
-				IncrTop();
+			else
+			{
+				ci = BaseCI[ar.ActiveCIIndex];
+				func = Stack[ci.FuncIndex];
+				Utl.Assert( func.V.TtIsFunction() );
 			}
-			else throw new System.NotImplementedException();
+			int status = AuxGetInfo( what, ar, func, ci );
+			if( what.IndexOf( 'f' ) >= 0 )
+			{
+				Top.V.SetObj( ref func.V );
+				ApiIncrTop();
+			}
+			if( what.IndexOf( 'L' ) >= 0 )
+				CollectValidLines( func );
+			return status;
 		}
 
-		private string GetFuncName( CallInfo ci, out string name )
+		internal bool IsLuaFunction( int index )
 		{
-			var proto = GetCurrentLuaFunc(ci).Proto; // calling function
-			var pc = ci.CurrentPc; // calling instruction index
-			var ins = proto.Code[pc]; // calling instruction
+			StkId addr;
+			return Index2Addr( index, out addr )
+				&& addr.V.TtIsFunction() && addr.V.ClIsLuaClosure();
+		}
 
-			if( (ci.CallStatus & CallStatus.CIST_HOOKED) != 0 ) { // was it called inside a hook?
-				name = "?";
-				return "hook";
+		// lua_upvalueid: the closures sharing an upvalue give the same object;
+		// null for an index out of range
+		internal object UpvalueId( int funcIndex, int n )
+		{
+			StkId addr;
+			if( !Index2Addr( funcIndex, out addr ) || !addr.V.TtIsFunction() )
+				return null;
+			if( addr.V.ClIsLuaClosure() )
+			{
+				var f = addr.V.ClLValue();
+				return (1 <= n && n <= f.Upvals.Length) ? f.Upvals[n-1] : null;
 			}
+			var c = addr.V.ClCsValue();
+			if( c.Upvals != null && 1 <= n && n <= c.Upvals.Length )
+				return c.Upvals[n-1];
+			return null; // light C functions have no upvalues
+		}
 
+		internal void UpvalueJoin( int funcIndex1, int n1, int funcIndex2, int n2 )
+		{
+			StkId f1, f2;
+			Index2Addr( funcIndex1, out f1 );
+			Index2Addr( funcIndex2, out f2 );
+			f1.V.ClLValue().Upvals[n1-1] = f2.V.ClLValue().Upvals[n2-1];
+		}
+
+		/*
+		** {======================================================
+		** Symbolic Execution
+		** =======================================================
+		*/
+
+		private static int FilterPc( int pc, int jmptarget )
+		{
+			if( pc < jmptarget ) // is code conditional (inside a jump)?
+				return -1; // cannot know who sets that register
+			else return pc; // current position sets that register
+		}
+
+		/*
+		** Try to find last instruction before 'lastpc' that modified register 'reg'.
+		*/
+		private static int FindSetReg( LuaProto p, int lastpc, int reg )
+		{
+			int setreg = -1; // keep last instruction that changed 'reg'
+			int jmptarget = 0; // any code before this address is conditional
+			if( OpCodeInfo.TestMMMode( p.Code[lastpc].GET_OPCODE() ) )
+				lastpc--; // previous instruction was not actually executed
+			for( int pc = 0; pc < lastpc; pc++ )
+			{
+				Instruction i = p.Code[pc];
+				OpCode op = i.GET_OPCODE();
+				int a = i.GETARG_A();
+				bool change; // true if current instruction changed 'reg'
+				switch( op )
+				{
+					case OpCode.OP_LOADNIL: // set registers from 'a' to 'a+b'
+					{
+						int b = i.GETARG_B();
+						change = (a <= reg && reg <= a + b);
+						break;
+					}
+					case OpCode.OP_TFORCALL: // affect all regs above its base
+					{
+						change = (reg >= a + 2);
+						break;
+					}
+					case OpCode.OP_CALL:
+					case OpCode.OP_TAILCALL: // affect all registers above base
+					{
+						change = (reg >= a);
+						break;
+					}
+					case OpCode.OP_JMP: // doesn't change registers, but changes 'jmptarget'
+					{
+						int b = i.GETARG_sJ();
+						int dest = pc + 1 + b;
+						/* jump does not skip 'lastpc' and is larger than current one? */
+						if( dest <= lastpc && dest > jmptarget )
+							jmptarget = dest; // update 'jmptarget'
+						change = false;
+						break;
+					}
+					default: // any instruction that sets A
+						change = (OpCodeInfo.TestAMode( op ) && reg == a);
+						break;
+				}
+				if( change )
+					setreg = FilterPc( pc, jmptarget );
+			}
+			return setreg;
+		}
+
+		/*
+		** Find a "name" for the constant 'c'.
+		*/
+		private static string KName( LuaProto p, int index, out string name )
+		{
+			var kvalue = p.K[index];
+			if( kvalue.V.TtIsString() )
+			{
+				name = kvalue.V.SValue();
+				return "constant";
+			}
+			else
+			{
+				name = "?";
+				return null;
+			}
+		}
+
+		private static string BasicGetObjName( LuaProto p, ref int ppc, int reg, out string name )
+		{
+			int pc = ppc;
+			name = F_GetLocalName( p, reg + 1, pc );
+			if( name != null ) // is a local?
+				return StrLocal;
+			/* else try symbolic execution */
+			ppc = pc = FindSetReg( p, pc, reg );
+			if( pc != -1 ) // could find instruction?
+			{
+				Instruction i = p.Code[pc];
+				OpCode op = i.GET_OPCODE();
+				switch( op )
+				{
+					case OpCode.OP_MOVE:
+					{
+						int b = i.GETARG_B(); // move from 'b' to 'a'
+						if( b < i.GETARG_A() )
+							return BasicGetObjName( p, ref ppc, b, out name ); // get name for 'b'
+						break;
+					}
+					case OpCode.OP_GETUPVAL:
+					{
+						name = UpvalName( p, i.GETARG_B() );
+						return StrUpval;
+					}
+					case OpCode.OP_LOADK: return KName( p, i.GETARG_Bx(), out name );
+					case OpCode.OP_LOADKX: return KName( p, p.Code[pc + 1].GETARG_Ax(), out name );
+					default: break;
+				}
+			}
+			return null; // could not find reasonable name
+		}
+
+		/*
+		** Find a "name" for the register 'c'.
+		*/
+		private static void RName( LuaProto p, int pc, int c, out string name )
+		{
+			string what = BasicGetObjName( p, ref pc, c, out name ); // search for 'c'
+			if( !(what != null && what[0] == 'c') ) // did not find a constant name?
+				name = "?";
+		}
+
+		/*
+		** Find a "name" for a 'C' value in an RK instruction.
+		*/
+		private static void RKName( LuaProto p, int pc, Instruction i, out string name )
+		{
+			int c = i.GETARG_C(); // key index
+			if( i.GETARG_k() != 0 ) // is 'c' a constant?
+				KName( p, c, out name );
+			else // 'c' is a register
+				RName( p, pc, c, out name );
+		}
+
+		/*
+		** Check whether table being indexed by instruction 'i' is the
+		** environment '_ENV'. If the table is an upvalue, get its name;
+		** otherwise, find some "name" for the table and check whether
+		** that name is the name of a local variable (and not, for instance,
+		** a string). Then check that, if there is a name, it is '_ENV'.
+		*/
+		private static string IsEnv( LuaProto p, int pc, Instruction i, bool isup )
+		{
+			int t = i.GETARG_B(); // table index
+			string name; // name of indexed variable
+			if( isup ) // is 't' an upvalue?
+				name = UpvalName( p, t );
+			else // 't' is a register
+			{
+				string what = BasicGetObjName( p, ref pc, t, out name );
+				if( (object)what != (object)StrLocal && (object)what != (object)StrUpval )
+					name = null; // cannot be the variable _ENV
+			}
+			return (name != null && name == LuaDef.LUA_ENV) ? "global" : "field";
+		}
+
+		/*
+		** Extend 'basicgetobjname' to handle table accesses
+		*/
+		private static string GetObjName( LuaProto p, int lastpc, int reg, out string name )
+		{
+			string kind = BasicGetObjName( p, ref lastpc, reg, out name );
+			if( kind != null )
+				return kind;
+			else if( lastpc != -1 ) // could find instruction?
+			{
+				Instruction i = p.Code[lastpc];
+				OpCode op = i.GET_OPCODE();
+				switch( op )
+				{
+					case OpCode.OP_GETTABUP:
+					{
+						int k = i.GETARG_C(); // key index
+						KName( p, k, out name );
+						return IsEnv( p, lastpc, i, true );
+					}
+					case OpCode.OP_GETTABLE:
+					{
+						int k = i.GETARG_C(); // key index
+						RName( p, lastpc, k, out name );
+						return IsEnv( p, lastpc, i, false );
+					}
+					case OpCode.OP_GETI:
+					{
+						name = "integer index";
+						return "field";
+					}
+					case OpCode.OP_GETFIELD:
+					{
+						int k = i.GETARG_C(); // key index
+						KName( p, k, out name );
+						return IsEnv( p, lastpc, i, false );
+					}
+					case OpCode.OP_SELF:
+					{
+						RKName( p, lastpc, i, out name );
+						return "method";
+					}
+					default: break; // go through to return NULL
+				}
+			}
+			return null; // could not find reasonable name
+		}
+
+		/*
+		** Try to find a name for a function based on the code that called it.
+		** (Only works when function was called by a Lua function.)
+		** Returns what the name is (e.g., "for iterator", "method",
+		** "metamethod") and sets '*name' to point to the name.
+		*/
+		private static string FuncNameFromCode( LuaProto p, int pc, out string name )
+		{
 			TMS tm;
-			switch( ins.GET_OPCODE() )
+			Instruction i = p.Code[pc]; // calling instruction
+			switch( i.GET_OPCODE() )
 			{
 				case OpCode.OP_CALL:
-				case OpCode.OP_TAILCALL:  /* get function name */
-					return GetObjName(proto, pc, ins.GETARG_A(), out name);
-
-				case OpCode.OP_TFORCALL: {  /* for iterator */
+				case OpCode.OP_TAILCALL:
+					return GetObjName( p, pc, i.GETARG_A(), out name ); // get function name
+				case OpCode.OP_TFORCALL: // for iterator
+				{
 					name = "for iterator";
 					return "for iterator";
 				}
-
-				/* all other instructions can call only through metamethods */
-				case OpCode.OP_SELF:
-				case OpCode.OP_GETTABUP:
-				case OpCode.OP_GETTABLE: tm = TMS.TM_INDEX; break;
-
-				case OpCode.OP_SETTABUP:
-				case OpCode.OP_SETTABLE: tm = TMS.TM_NEWINDEX; break;
-
-				case OpCode.OP_ADD: case OpCode.OP_SUB: case OpCode.OP_MUL: case OpCode.OP_MOD:
-				case OpCode.OP_POW: case OpCode.OP_DIV: case OpCode.OP_IDIV: case OpCode.OP_BAND:
-				case OpCode.OP_BOR: case OpCode.OP_BXOR: case OpCode.OP_SHL: case OpCode.OP_SHR:
-					// ORDER OP, ORDER TM
-					tm = (TMS)((int)TMS.TM_ADD + (int)(ins.GET_OPCODE() - OpCode.OP_ADD));
+				/* other instructions can do calls through metamethods */
+				case OpCode.OP_SELF: case OpCode.OP_GETTABUP: case OpCode.OP_GETTABLE:
+				case OpCode.OP_GETI: case OpCode.OP_GETFIELD:
+					tm = TMS.TM_INDEX;
+					break;
+				case OpCode.OP_SETTABUP: case OpCode.OP_SETTABLE: case OpCode.OP_SETI: case OpCode.OP_SETFIELD:
+					tm = TMS.TM_NEWINDEX;
+					break;
+				case OpCode.OP_MMBIN: case OpCode.OP_MMBINI: case OpCode.OP_MMBINK:
+					tm = (TMS)i.GETARG_C();
 					break;
 				case OpCode.OP_UNM: tm = TMS.TM_UNM; break;
 				case OpCode.OP_BNOT: tm = TMS.TM_BNOT; break;
 				case OpCode.OP_LEN: tm = TMS.TM_LEN; break;
-				case OpCode.OP_EQ: tm = TMS.TM_EQ; break;
-				case OpCode.OP_LT: tm = TMS.TM_LT; break;
-				case OpCode.OP_LE: tm = TMS.TM_LE; break;
 				case OpCode.OP_CONCAT: tm = TMS.TM_CONCAT; break;
-
+				case OpCode.OP_EQ: tm = TMS.TM_EQ; break;
+				/* no cases for OP_EQI and OP_EQK, as they don't call metamethods */
+				case OpCode.OP_LT: case OpCode.OP_LTI: case OpCode.OP_GTI: tm = TMS.TM_LT; break;
+				case OpCode.OP_LE: case OpCode.OP_LEI: case OpCode.OP_GEI: tm = TMS.TM_LE; break;
+				case OpCode.OP_CLOSE: case OpCode.OP_RETURN: tm = TMS.TM_CLOSE; break;
 				default:
 					name = null;
-					return null;  /* else no useful name can be found */
+					return null; // cannot find a reasonable name
 			}
-
-			name = GetTagMethodName( tm );
+			name = GetTagMethodName( tm ).Substring( 2 );
 			return "metamethod";
 		}
 
-		private void FuncInfo( LuaDebug ar, StkId func )
+		/*
+		** Try to find a name for a function based on how it was called.
+		*/
+		private string FuncNameFromCall( CallInfo ci, out string name )
 		{
-			Utl.Assert(func.V.TtIsFunction());
-			if(func.V.ClIsLuaClosure()) {
-				var lcl = func.V.ClLValue();
-				var p = lcl.Proto;
-				ar.Source = p.Source ?? "=?";
-				ar.LineDefined = p.LineDefined;
-				ar.LastLineDefined = p.LastLineDefined;
-				ar.What = (ar.LineDefined == 0) ? "main" : "Lua";
+			if( (ci.CallStatus & CallStatus.CIST_HOOKED) != 0 ) // was it called inside a hook?
+			{
+				name = "?";
+				return "hook";
 			}
-			else if(func.V.ClIsCsClosure()) {
-				ar.Source = "=[C]";
-				ar.LineDefined = -1;
-				ar.LastLineDefined = -1;
-				ar.What = "C";
+			else if( (ci.CallStatus & CallStatus.CIST_FIN) != 0 ) // was it called as a finalizer?
+			{
+				name = "__gc";
+				return "metamethod"; // report it as such
 			}
-			else throw new System.NotImplementedException();
+			else if( ci.IsLua )
+				return FuncNameFromCode( Stack[ci.FuncIndex].V.ClLValue().Proto, CurrentPc( ci ), out name );
+			name = null;
+			return null;
+		}
 
-			ar.ShortSrc = O_ChunkId( ar.Source );
+		/* }====================================================== */
+
+		/*
+		** Check whether pointer 'o' points to some value in the stack frame of
+		** the current function and, if so, returns its index.
+		*/
+		private int InStack( CallInfo ci, ref TValue o )
+		{
+			int stackBase = ci.FuncIndex + 1;
+			for( int pos = 0; stackBase + pos < ci.TopIndex; pos++ )
+			{
+				if( Unsafe.AreSame( ref o, ref Stack[stackBase + pos].V ) )
+					return pos;
+			}
+			return -1; // not found
+		}
+
+		/*
+		** Checks whether value 'o' came from an upvalue. (That can only happen
+		** with instructions OP_GETTABUP/OP_SETTABUP, which operate directly on
+		** upvalues.)
+		*/
+		private string GetUpvalName( CallInfo ci, ref TValue o, out string name )
+		{
+			var c = Stack[ci.FuncIndex].V.ClLValue();
+			for( int i = 0; i < c.Upvals.Length; i++ )
+			{
+				if( Unsafe.AreSame( ref c.Upvals[i].V.V, ref o ) )
+				{
+					name = UpvalName( c.Proto, i );
+					return StrUpval;
+				}
+			}
+			name = null;
+			return null;
+		}
+
+		private static string FormatVarInfo( string kind, string name )
+		{
+			if( kind == null )
+				return ""; // no information
+			else
+				return string.Format( " ({0} '{1}')", kind, name );
+		}
+
+		/*
+		** Build a string with a "description" for the value 'o', such as
+		** "variable 'x'" or "upvalue 'y'".
+		*/
+		private string VarInfo( ref TValue o )
+		{
+			CallInfo ci = CI;
+			string name = null; // to avoid warnings
+			string kind = null;
+			if( ci.IsLua )
+			{
+				kind = GetUpvalName( ci, ref o, out name ); // check whether 'o' is an upvalue
+				if( kind == null ) // not an upvalue?
+				{
+					int reg = InStack( ci, ref o ); // try a register
+					if( reg >= 0 ) // is 'o' a register?
+						kind = GetObjName( Stack[ci.FuncIndex].V.ClLValue().Proto, CurrentPc( ci ), reg, out name );
+				}
+			}
+			return FormatVarInfo( kind, name );
+		}
+
+		/*
+		** Raise a type error
+		*/
+		private void TypeError( ref TValue o, string op, string extra )
+		{
+			string t = ObjTypeName( ref o );
+			G_RunError( "attempt to {0} a {1} value{2}", op, t, extra );
+		}
+
+		/*
+		** Raise a type error with "standard" information about the faulty
+		** object 'o' (using 'varinfo').
+		*/
+		internal void G_TypeError( ref TValue o, string op )
+		{
+			TypeError( ref o, op, VarInfo( ref o ) );
+		}
+
+		/*
+		** Raise an error for calling a non-callable object. Try to find a name
+		** for the object based on how it was called ('funcnamefromcall'); if it
+		** cannot get a name there, try 'varinfo'.
+		*/
+		private void G_CallError( StkId o )
+		{
+			CallInfo ci = CI;
+			string name;
+			string kind = FuncNameFromCall( ci, out name );
+			string extra = (kind != null) ? FormatVarInfo( kind, name ) : VarInfo( ref o.V );
+			TypeError( ref o.V, "call", extra );
+		}
+
+		private void G_ForError( ref TValue o, string what )
+		{
+			G_RunError( "bad 'for' {0} (number expected, got {1})", what, ObjTypeName( ref o ) );
+		}
+
+		private void G_ConcatError( ref TValue p1, ref TValue p2 )
+		{
+			if( p1.TtIsString() || p1.TtIsNumber() ) p1 = ref p2;
+			G_TypeError( ref p1, "concatenate" );
+		}
+
+		private void G_OpIntError( ref TValue p1, ref TValue p2, string msg )
+		{
+			if( !p1.TtIsNumber() ) // first operand is wrong?
+				p2 = ref p1; // now second is wrong
+			G_TypeError( ref p2, msg );
+		}
+
+		/*
+		** Error when both values are convertible to numbers, but not to integers
+		*/
+		private void G_ToIntError( ref TValue p1, ref TValue p2 )
+		{
+			long temp;
+			if( !V_ToIntegerNS( ref p1, out temp, F2Imod.F2Ieq ) )
+				p2 = ref p1;
+			G_RunError( "number{0} has no integer representation", VarInfo( ref p2 ) );
+		}
+
+		private void G_OrderError( ref TValue p1, ref TValue p2 )
+		{
+			string t1 = ObjTypeName( ref p1 );
+			string t2 = ObjTypeName( ref p2 );
+			if( t1 == t2 )
+				G_RunError( "attempt to compare two {0} values", t1 );
+			else
+				G_RunError( "attempt to compare {0} with {1}", t1, t2 );
 		}
 
 		// luaO_chunkid: a chunk name as messages show it, "file.lua" for
@@ -442,288 +890,154 @@ namespace Cosmos.Executable.Lua
 			return "[string \"" + source.Substring(0, l) + "...\"]";
 		}
 
-		private void AddInfo( string msg )
+		/* add src:line information to 'msg' */
+		internal string G_AddInfo( string msg, string src, int line )
 		{
-			if( CI.IsLua )
-			{
-				var line = GetCurrentLine(CI);
-				var src = GetCurrentLuaFunc(CI).Proto.Source;
-
-				// 不能用 PushString, 因为 PushString 是 API 接口
-				// API 接口中的 ApiIncrTop 会检查 Top 是否超过了 CI.Top 导致出错
-				// api.PushString( msg );
-				O_PushString( string.Format( "{0}:{1}: {2}",
-					O_ChunkId( src ), line, msg ) );
-			}
-			else O_PushString( msg ); // no position outside Lua code, but a message
+			return string.Format( "{0}:{1}: {2}", src != null ? O_ChunkId( src ) : "?", line, msg );
 		}
 
-		internal void G_RunError( string fmt, params object[] args )
-		{
-			AddInfo( args.Length == 0 ? fmt : string.Format( fmt, args ) );
-			G_ErrorMsg();
-		}
-
-		private void G_ErrorMsg()
+		internal void G_ErrorMsg()
 		{
 			if( ErrFunc != 0 ) // is there an error handling function?
 			{
 				StkId errFunc = RestoreStack( ErrFunc );
-
-				if(!errFunc.V.TtIsFunction())
-					D_Throw( ThreadStatus.LUA_ERRERR );
-
-				var below = Stack[Top.Index-1];
-				Top.V.SetObj(ref below.V);
-				below.V.SetObj(ref errFunc.V);
-				IncrTop();
-				
-				D_Call( below, 1, false );
+				Utl.Assert( errFunc.V.TtIsFunction() );
+				Top.V.SetObj( ref Stack[Top.Index-1].V ); // move argument
+				Stack[Top.Index-1].V.SetObj( ref errFunc.V ); // push function
+				StkId.inc( ref Top ); // assume EXTRA_STACK
+				D_CallNoYield( Stack[Top.Index-2], 1 ); // call it
 			}
-
 			D_Throw( ThreadStatus.LUA_ERRRUN );
 		}
 
-		private string UpvalName( LuaProto p, int uv )
-		{
-			var name = (uv < p.Upvalues.Count) ? p.Upvalues[uv].Name : null;
-			return name ?? "?";
-		}
-
-		private string GetUpvalueName( CallInfo ci, StkId o, out string name )
-		{
-			var func = Stack[ci.FuncIndex];
-			Utl.Assert(func.V.TtIsFunction() && func.V.ClIsLuaClosure());
-			var lcl = func.V.ClLValue();
-			for(int i=0; i<lcl.Upvals.Length; ++i) {
-				if( lcl.Upvals[i].V == o ) {
-					name = UpvalName( lcl.Proto, i );
-					return "upvalue";
-				}
-			}
-			name = default(string);
-			return null;
-		}
-
-		private void KName( LuaProto proto, int pc, int c, out string name )
-		{
-			if( Instruction.ISK(c) ) { // is `c' a constant
-				var val = proto.K[Instruction.INDEXK(c)];
-				if(val.V.TtIsString()) { // literal constant?
-					name = val.V.SValue();
-					return;
-				}
-				// else no reasonable name found
-			}
-			else { // `c' is a register
-				string what = GetObjName( proto, pc, c, out name );
-				if( what == "constant" ) { // found a constant name
-					return; // `name' already filled
-				}
-				// else no reasonable name found
-			}
-			name = "?"; // no reasonable name found
-		}
-
-		// filterpc: code inside a jump cannot tell who sets the register
-		private static int FilterPc( int pc, int jmptarget )
-		{
-			return pc < jmptarget ? -1 : pc;
-		}
-
-		private int FindSetReg( LuaProto proto, int lastpc, int reg )
-		{
-			var setreg = -1; // keep last instruction that changed `reg'
-			var jmptarget = 0; // any code before this address is conditional
-			for( int pc=0; pc<lastpc; ++pc ) {
-				var ins = proto.Code[pc];
-				var op  = ins.GET_OPCODE();
-				var a 	= ins.GETARG_A();
-				switch( op ) {
-					case OpCode.OP_LOADNIL: {
-						var b = ins.GETARG_B();
-						// set registers from `a' to `a+b'
-						if( a <= reg && reg <= a + b )
-							setreg = FilterPc( pc, jmptarget );
-						break;
-					}
-
-					case OpCode.OP_TFORCALL: {
-						// affect all regs above its base
-						if( reg >= a+2 )
-							setreg = FilterPc( pc, jmptarget );
-						break;
-					}
-
-					case OpCode.OP_CALL:
-					case OpCode.OP_TAILCALL: {
-						// affect all registers above base
-						if( reg >= a )
-							setreg = FilterPc( pc, jmptarget );
-						break;
-					}
-
-					case OpCode.OP_JMP: {
-						var b = ins.GETARG_sBx();
-						var dest = pc + 1 + b;
-						// jump is forward and do not skip `lastpc'?
-						if( pc < dest && dest <= lastpc ) {
-							if( dest > jmptarget )
-								jmptarget = dest; // update 'jmptarget'
-						}
-						break;
-					}
-
-					default: {
-						// any instruction that set A
-						if( Coder.TestAMode( op ) && reg == a ) {
-							setreg = FilterPc( pc, jmptarget );
-						}
-						break;
-					}
-				}
-			}
-			return setreg;
-		}
-
-		private string GetObjName( LuaProto proto, int lastpc, int reg,
-			out string name )
-		{
-			name = F_GetLocalName( proto, reg+1, lastpc );
-			if( name != null ) // is a local?
-				return "local";
-
-			// else try symbolic execution
-			var pc = FindSetReg( proto, lastpc, reg );
-			if( pc != -1 )
-			{
-				var ins = proto.Code[pc];
-				var op = ins.GET_OPCODE();
-				switch( op )
-				{
-					case OpCode.OP_MOVE: {
-						var b = ins.GETARG_B(); // move from `b' to `a'
-						if( b < ins.GETARG_A() )
-							return GetObjName(proto, pc, b, out name);
-						break;
-					}
-					case OpCode.OP_GETTABUP:
-					case OpCode.OP_GETTABLE: {
-						var k = ins.GETARG_C();
-						var t = ins.GETARG_B();
-						var vn = (op == OpCode.OP_GETTABLE)
-							? F_GetLocalName( proto, t+1, pc )
-							: UpvalName( proto, t );
-						KName( proto, pc, k, out name );
-						return (vn == LuaDef.LUA_ENV) ? "global" : "field";
-					}
-
-					case OpCode.OP_GETUPVAL: {
-						name = UpvalName( proto, ins.GETARG_B() );
-						return "upvalue";
-					}
-
-					case OpCode.OP_LOADK:
-					case OpCode.OP_LOADKX: {
-						var b = (op == OpCode.OP_LOADK)
-							? ins.GETARG_Bx()
-							: proto.Code[pc+1].GETARG_Ax();
-						var val = proto.K[b];
-						if(val.V.TtIsString())
-						{
-							name = val.V.SValue();
-							return "constant";
-						}
-						break;
-					}
-
-					case OpCode.OP_SELF: {
-						var k = ins.GETARG_C(); // key index
-						KName( proto, pc, k, out name );
-						return "method";
-					}
-
-					default: break; // go through to return null
-				}
-			}
-
-			return null; // could not find reasonable name
-		}
-
-		private bool IsInStack( CallInfo ci, StkId o )
-		{
-			// a register of the frame, not a constant or a closed upvalue
-			return ci.BaseIndex <= o.Index && o.Index < ci.TopIndex
-				&& o.Index < Stack.Length && Stack[o.Index] == o;
-		}
-
-		private void G_SimpleTypeError( ref TValue o, string op )
-		{
-			string t = ObjTypeName( ref o );
-			G_RunError( "attempt to {0} a {1} value", op, t );
-		}
-
-		// varinfo: " (kind 'name')" for a value with a name in the code
-		private string VarInfo( StkId o )
+		internal void G_RunError( string fmt, params object[] args )
 		{
 			CallInfo ci = CI;
-			string name = null;
-			string kind = null;
-			if( ci.IsLua )
+			string msg = args.Length == 0 ? fmt : string.Format( fmt, args ); // format message
+			if( ci.IsLua ) // if Lua function, add source:line information
+				msg = G_AddInfo( msg, Stack[ci.FuncIndex].V.ClLValue().Proto.Source, GetCurrentLineOf( ci ) );
+			O_PushString( msg );
+			G_ErrorMsg();
+		}
+
+		/*
+		** Check whether new instruction 'newpc' is in a different line from
+		** previous instruction 'oldpc'. More often than not, 'newpc' is only
+		** one or a few instructions after 'oldpc' (it must be after, see
+		** caller), so try to avoid calling 'luaG_getfuncline'. If they are
+		** too far apart, there is a good chance of a ABSLINEINFO in the way,
+		** so it goes directly to 'luaG_getfuncline'.
+		*/
+		private static bool ChangedLine( LuaProto p, int oldpc, int newpc )
+		{
+			if( p.LineInfo.Count == 0 ) // no debug information?
+				return false;
+			if( newpc - oldpc < MAXIWTHABS / 2 ) // not too far apart?
 			{
-				kind = GetUpvalueName( ci, o, out name); // check whether 'o' is an upvalue
-				if( kind == null && IsInStack( ci, o ) ) // no? try a register
+				int delta = 0; // line difference
+				int pc = oldpc;
+				for( ;; )
 				{
-					var lcl = Stack[ci.FuncIndex].V.ClLValue();
-					kind = GetObjName( lcl.Proto, ci.CurrentPc,
-						(o.Index - ci.BaseIndex), out name );
+					int lineinfo = p.LineInfo[++pc];
+					if( lineinfo == ABSLINEINFO )
+						break; // cannot compute delta; fall through
+					delta += lineinfo;
+					if( pc == newpc )
+						return (delta != 0); // delta computed successfully
 				}
 			}
-			return kind != null ? string.Format( " ({0} '{1}')", kind, name ) : "";
+			/* either instructions are too far apart or there is an absolute line
+			   info in the way; compute line difference explicitly */
+			return G_GetFuncLine( p, oldpc ) != G_GetFuncLine( p, newpc );
 		}
 
-		private void G_TypeError( StkId o, string op )
+		/*
+		** Traces Lua calls. If code is running the first instruction of a function,
+		** and function is not vararg, and it is not coming from an yield,
+		** calls 'luaD_hookcall'. (Vararg functions will call 'luaD_hookcall'
+		** after adjusting its variable arguments; otherwise, they could call
+		** a line/count hook before the call hook. Functions coming from
+		** an yield already called 'luaD_hookcall' before yielding.)
+		*/
+		private bool G_TraceCall()
 		{
-			string t = ObjTypeName(ref o.V);
-			G_RunError( "attempt to {0} a {1} value{2}", op, t, VarInfo( o ) );
+			CallInfo ci = CI;
+			LuaProto p = Stack[ci.FuncIndex].V.ClLValue().Proto;
+			ci.Trap = true; // ensure hooks will be checked
+			if( ci.SavedPc.Index == 0 ) // first instruction (not resuming)?
+			{
+				if( p.IsVarArg )
+					return false; // hooks will start at VARARGPREP instruction
+				else if( (ci.CallStatus & CallStatus.CIST_HOOKYIELD) == 0 ) // not yieded?
+					D_HookCall( ci ); // check 'call' hook
+			}
+			return true; // keep 'trap' on
 		}
 
-		// luaG_opinterror: an operation on a value that is not a number
-		private void G_OpIntError( StkId p1, StkId p2, string msg )
+		/*
+		** Traces the execution of a Lua function. Called before the execution
+		** of each opcode, when debug is on. 'L->oldpc' stores the last
+		** instruction traced, to detect line changes. When entering a new
+		** function, 'npci' will be zero and will test as a new line whatever
+		** the value of 'oldpc'.  Some exceptional conditions may return to
+		** a function without setting 'oldpc'. In that case, 'oldpc' may be
+		** invalid; if so, use zero as a valid value. (A wrong but valid 'oldpc'
+		** at most causes an extra call to a line hook.)
+		** 'ci.SavedPc' points to the instruction about to run, before and
+		** after; the hooks see it as already fetched, as Lua's do.
+		*/
+		private bool G_TraceExec( CallInfo ci )
 		{
-			double temp;
-			if( !V_ToNumber( ref p1.V, out temp ) ) // first operand is wrong?
-				{ p2 = p1; } // now second is wrong too
-
-			G_TypeError( p2, msg );
+			byte mask = HookMask;
+			LuaProto p = Stack[ci.FuncIndex].V.ClLValue().Proto;
+			if( (mask & (LuaDef.LUA_MASKLINE | LuaDef.LUA_MASKCOUNT)) == 0 ) // no hooks?
+			{
+				ci.Trap = false; // don't need to stop again
+				return false; // turn off 'trap'
+			}
+			ci.SavedPc.Index++; // reference is always next instruction
+			bool counthook = (mask & LuaDef.LUA_MASKCOUNT) != 0 && (--HookCount == 0);
+			if( counthook )
+				ResetHookCount(); // reset count
+			else if( (mask & LuaDef.LUA_MASKLINE) == 0 )
+			{
+				ci.SavedPc.Index--;
+				return true; // no line hook and count != 0; nothing to be done now
+			}
+			if( (ci.CallStatus & CallStatus.CIST_HOOKYIELD) != 0 ) // hook yielded last time?
+			{
+				ci.CallStatus &= ~CallStatus.CIST_HOOKYIELD; // erase mark
+				ci.SavedPc.Index--;
+				return true; // do not call hook again (VM yielded, so it did not move)
+			}
+			if( !OpCodeInfo.IsIT( p.Code[ci.SavedPc.Index - 1] ) ) // top not being used?
+				Top = Stack[ci.TopIndex]; // correct top
+			if( counthook )
+				D_Hook( LuaDef.LUA_HOOKCOUNT, -1, 0, 0 ); // call count hook
+			if( (mask & LuaDef.LUA_MASKLINE) != 0 )
+			{
+				/* 'L->oldpc' may be invalid; use zero in this case */
+				int oldpc = (OldPc < p.Code.Count) ? OldPc : 0;
+				int npci = ci.SavedPc.Index - 1;
+				if( npci <= oldpc || // call hook when jump back (loop),
+					ChangedLine( p, oldpc, npci ) ) // or when enter new line
+				{
+					int newline = G_GetFuncLine( p, npci );
+					D_Hook( LuaDef.LUA_HOOKLINE, newline, 0, 0 ); // call line hook
+				}
+				OldPc = npci; // 'pc' of last call to line hook
+			}
+			if( Status == ThreadStatus.LUA_YIELD ) // did hook yield?
+			{
+				if( counthook )
+					HookCount = 1; // undo decrement to zero
+				ci.CallStatus |= CallStatus.CIST_HOOKYIELD; // mark that it yielded
+				D_Throw( ThreadStatus.LUA_YIELD );
+			}
+			ci.SavedPc.Index--;
+			return true; // keep 'trap' on
 		}
 
-		// luaG_tointerror: a bitwise operation on a float with no integer value
-		private void G_ToIntError( StkId p1, StkId p2 )
-		{
-			long temp;
-			if( !V_ToInteger( ref p1.V, out temp, 0 ) )
-				{ p2 = p1; }
-			G_RunError( "number{0} has no integer representation", VarInfo( p2 ) );
-		}
-
-		private void G_OrderError( StkId p1, StkId p2 )
-		{
-			string t1 = ObjTypeName(ref p1.V);
-			string t2 = ObjTypeName(ref p2.V);
-			if( t1 == t2 )
-				G_RunError( "attempt to compare two {0} values", t1 );
-			else
-				G_RunError( "attempt to compare {0} with {1}", t1, t2 );
-		}
-
-		private void G_ConcatError( StkId p1, StkId p2 )
-		{
-			if( p1.V.TtIsString() || p1.V.TtIsNumber() )
-				p1 = p2;
-			G_TypeError( p1, "concatenate" );
-		}
 	}
 
 }
-

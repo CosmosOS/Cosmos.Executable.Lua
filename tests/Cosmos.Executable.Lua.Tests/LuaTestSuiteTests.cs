@@ -9,13 +9,15 @@ using NUnit.Framework;
 namespace Cosmos.Executable.Lua.Tests;
 
 /// <summary>
-/// Runs the files of the official Lua 5.3 test suite (lua-5.3-tests, from
-/// lua-5.3.4-tests) one by one, then all together through all.lua, which
+/// Runs the files of the official Lua 5.4 test suite (lua-5.4-tests, from
+/// lua-5.4.9-tests) one by one, then all together through all.lua, which
 /// loads most of them again from <c>string.dump</c>; with <c>_port</c> set
 /// (no tests of the platform of the reference implementation) and the slow
-/// tests on. Left out: gc.lua, which tests the collector, weak tables and
-/// <c>__gc</c>; main.lua, which runs the lua program, is there for all.lua
-/// and tests nothing with <c>_port</c> set.
+/// tests on. Left out: gc.lua and gengc.lua, which test the collector, weak
+/// tables and <c>__gc</c>; heavy.lua, which all.lua does not run either;
+/// main.lua, which runs the lua program, is there for all.lua and tests
+/// nothing with <c>_port</c> set; bwcoercion.lua and tracegc.lua are
+/// modules the other files require.
 /// </summary>
 public class LuaTestSuiteTests
 {
@@ -28,20 +30,19 @@ public class LuaTestSuiteTests
     /// </summary>
     private static readonly (string File, string Line, string Replacement)[] Patches =
     [
-        // No collector to test
+        // TODO: Cosmos gives no control over its collector, so there is
+        // none to test
         ("all.lua", "local f = assert(loadfile('gc.lua'))", "local f = function () end  -- no collector to test"),
+        ("all.lua", "dofile('gengc.lua')", "-- dofile('gengc.lua')  -- no collector to test"),
 
-        // No weak tables: there is no collection to wait for
+        // TODO: Cosmos has no weak references: there is no collection to wait for
         ("closure.lua", "while x[1] do   -- repeat until GC", "x[1] = nil; while x[1] do   -- repeat until GC"),
 
-        // No weak tables: the coroutine stays in the table
-        ("coroutine.lua", "assert(C[1] == nil)", "-- assert(C[1] == nil)"),
+        // TODO: Cosmos has no weak references: the coroutine stays in the table
+        ("coroutine.lua", "assert(C[1] == undef)", "-- assert(C[1] == undef)"),
 
-        // No __gc: the finalizer the test waits for never runs
+        // TODO: Cosmos has no finalizers: the one the test waits for never runs
         ("db.lua", "do   -- testing debug info for finalizers", "if false then   -- testing debug info for finalizers"),
-
-        // LUAI_MAXCCALLS is 150, not 200: the kernel's threads have small stacks
-        ("errors.lua", "local maxClevel = 200", "local maxClevel = 150"),
     ];
 
     [TestCase("all")]
@@ -54,6 +55,7 @@ public class LuaTestSuiteTests
     [TestCase("code")]
     [TestCase("constructs")]
     [TestCase("coroutine")]
+    [TestCase("cstack")]
     [TestCase("db")]
     [TestCase("errors")]
     [TestCase("events")]
@@ -73,7 +75,7 @@ public class LuaTestSuiteTests
     public void Passes(string name)
     {
         // A copy, next to which files.lua writes its files
-        string directory = Directory.CreateTempSubdirectory("lua-5.3-tests-").FullName;
+        string directory = Directory.CreateTempSubdirectory("lua-5.4-tests-").FullName;
         try
         {
             CopySuite(directory);
@@ -126,7 +128,7 @@ public class LuaTestSuiteTests
     /// <summary>Copies the suite to <paramref name="directory"/>, and patches the copy.</summary>
     private static void CopySuite(string directory)
     {
-        string suite = Path.Combine(AppContext.BaseDirectory, "lua-5.3-tests");
+        string suite = Path.Combine(AppContext.BaseDirectory, "lua-5.4-tests");
         foreach (string file in Directory.GetFiles(suite))
         {
             File.Copy(file, Path.Combine(directory, Path.GetFileName(file)));
