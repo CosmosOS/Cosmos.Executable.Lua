@@ -6,10 +6,12 @@ using System.Globalization;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// Numbers as Lua 5.4 writes them: an integer in decimal, and a float as
-/// <c>%.14g</c>, with <c>.0</c> added when that looks like an integer:
-/// <c>tostring(1/3)</c> is <c>0.33333333333333</c>, <c>tostring(2^53)</c>
-/// is <c>9.007199254741e+15</c> and <c>tostring(3.0)</c> is <c>3.0</c>, on
+/// Numbers as Lua 5.5 writes them: an integer in decimal, and a float as
+/// <c>%.15g</c>, or as <c>%.17g</c> when reading that back gives another
+/// number, with <c>.0</c> added when that looks like an integer:
+/// <c>tostring(0.1)</c> is <c>0.1</c>, <c>tostring(1/3)</c> is
+/// <c>0.33333333333333331</c>, <c>tostring(2^53)</c> is
+/// <c>9.007199254740992e+15</c> and <c>tostring(3.0)</c> is <c>3.0</c>, on
 /// any culture.
 /// </summary>
 /// <remarks>
@@ -19,8 +21,11 @@ namespace Cosmos.Executable.Lua;
 /// </remarks>
 internal static class LuaNumber
 {
-    /// <summary>The significant digits of <c>%.14g</c>.</summary>
-    private const int Precision = 14;
+    /// <summary>The significant digits of <c>%.15g</c> (LUA_NUMBER_FMT).</summary>
+    private const int Precision = 15;
+
+    /// <summary>The significant digits of <c>%.17g</c> (LUA_NUMBER_FMT_N), enough to read any float back.</summary>
+    private const int PrecisionN = 17;
 
     /// <summary>The string <c>tostring</c> makes of an integer.</summary>
     public static string ToString(long value)
@@ -31,7 +36,15 @@ internal static class LuaNumber
     /// <summary>The string <c>tostring</c> makes of a float.</summary>
     public static string ToString(double value)
     {
+        // First try with a not too large number of digits, to avoid noise
+        // (1.1 going to 1.1000000000000001); if that loses precision, convert
+        // again with extra precision
         string text = Format(value, Precision, alternate: false);
+        if (double.IsFinite(value)
+            && double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture) != value)
+        {
+            text = Format(value, PrecisionN, alternate: false);
+        }
 
         // Looks like an integer? Then it says it is a float
         foreach (char c in text)

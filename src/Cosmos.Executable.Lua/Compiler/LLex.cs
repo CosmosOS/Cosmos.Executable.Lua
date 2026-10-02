@@ -29,6 +29,7 @@ namespace Cosmos.Executable.Lua
 		FALSE,
 		FOR,
 		FUNCTION,
+		GLOBAL,
 		GOTO,
 		IF,
 		IN,
@@ -226,6 +227,9 @@ namespace Cosmos.Executable.Lua
 			ReservedWordDict.Add("true", TK.TRUE);
 			ReservedWordDict.Add("until", TK.UNTIL);
 			ReservedWordDict.Add("while", TK.WHILE);
+			// LUA_COMPAT_GLOBAL, on in the reference build: "global" is not a
+			// reserved word, and the parser reads 'global' statements by
+			// looking ahead
 		}
 
 		// the strings of the chunk, one copy of each (the scanner table of
@@ -649,7 +653,7 @@ namespace Cosmos.Executable.Lua
 		private const int FIRST_RESERVED = (int)TK.AND;
 		private static readonly string[] ReservedWords = {
 			"and", "break", "do", "else", "elseif", "end", "false", "for",
-			"function", "goto", "if", "in", "local", "nil", "not", "or",
+			"function", "global", "goto", "if", "in", "local", "nil", "not", "or",
 			"repeat", "return", "then", "true", "until", "while",
 		};
 
@@ -683,9 +687,11 @@ namespace Cosmos.Executable.Lua
 			_LexError( msg, Token.TokenType );
 		}
 
-		// an error about the meaning of the code: no `near' part
+		// an error about the meaning of the code: no `near' part, and the
+		// line of the last token used
 		public void SemanticError( string msg )
 		{
+			LineNumber = LastLine; // back to line of last used token
 			_LexError( msg, 0 );
 		}
 

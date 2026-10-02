@@ -57,6 +57,7 @@ namespace Cosmos.Executable.Lua
 		double	L_OptNumber( int narg, double def );
 		string 	L_OptString( int narg, string def );
 		int 	L_CheckOption( int narg, string def, string[] lst );
+		uint	L_MakeSeed();
 		bool 	L_CallMeta( int obj, string name );
 		void	L_Traceback( ILuaState otherLua, string msg, int level );
 		long	L_Len( int index );
@@ -268,6 +269,22 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		/*
+		** luaL_makeseed: a "random" seed. The reference relies on Address
+		** Space Layout Randomization and on the current time; here the
+		** high-resolution clock stands for the address.
+		*/
+		public uint L_MakeSeed()
+		{
+			ulong stamp = unchecked( (ulong)System.Diagnostics.Stopwatch.GetTimestamp() );
+			ulong t = unchecked( (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() );
+			uint[] buff = { (uint)stamp, (uint)(stamp >> 32), (uint)t, (uint)(t >> 32) };
+			uint res = buff[0];
+			for( int i = 1; i < buff.Length; i++ )
+				res ^= unchecked( (res >> 3) + (res << 7) + buff[i] );
+			return res;
+		}
+
 		// luaL_checkoption: the index of the option the argument names in 'lst'
 		public int L_CheckOption( int narg, string def, string[] lst )
 		{
@@ -322,17 +339,26 @@ namespace Cosmos.Executable.Lua
 			if( !API.GetStack( 0, ar ) ) // no stack frame ?
 				return L_Error( "bad argument #{0} ({1})", narg, extraMsg );
 
-			GetInfo( "n", ar );
-			if( ar.NameWhat == "method" )
+			string argword;
+			GetInfo( "nt", ar );
+			if( narg <= ar.ExtraArgs ) // error in an extra argument?
+				argword = "extra argument";
+			else
 			{
-				narg--; // do not count 'self'
-				if( narg == 0 ) // error is in the self argument itself?
-					return L_Error( "calling '{0}' on bad self ({1})", ar.Name, extraMsg );
+				narg -= ar.ExtraArgs; // do not count extra arguments
+				if( ar.NameWhat == "method" ) // colon syntax?
+				{
+					narg--; // do not count (extra) self argument
+					if( narg == 0 ) // error in self argument?
+						return L_Error( "calling '{0}' on bad self ({1})", ar.Name, extraMsg );
+					/* else go through; error in a regular argument */
+				}
+				argword = "argument";
 			}
 			if( ar.Name == null )
 				ar.Name = PushGlobalFuncName( ar, this ) ? API.ToString(-1) : "?";
-			return L_Error( "bad argument #{0} to '{1}' ({2})",
-				narg, ar.Name, extraMsg );
+			return L_Error( "bad {0} #{1} to '{2}' ({3})",
+				argword, narg, ar.Name, extraMsg );
 		}
 
 		public string L_TypeName( int index )
@@ -409,15 +435,15 @@ namespace Cosmos.Executable.Lua
 
 		private void PushFuncName( LuaDebug ar, LuaState L1 )
 		{
-			if( PushGlobalFuncName( ar, L1 ) ) // try first a global name
+			if( !string.IsNullOrEmpty( ar.NameWhat ) ) // is there a name from code?
+				API.PushString( string.Format( "{0} '{1}'", ar.NameWhat, ar.Name ) ); // use it
+			else if( ar.What.Length > 0 && ar.What[0] == 'm' ) // main?
+				API.PushString( "main chunk" );
+			else if( PushGlobalFuncName( ar, L1 ) ) // try a global name
 			{
 				API.PushString( string.Format( "function '{0}'", API.ToString(-1) ) );
 				API.Remove( -2 ); // remove name
 			}
-			else if( !string.IsNullOrEmpty( ar.NameWhat ) ) // is there a name from code?
-				API.PushString( string.Format( "{0} '{1}'", ar.NameWhat, ar.Name ) ); // use it
-			else if( ar.What.Length > 0 && ar.What[0] == 'm' ) // main?
-				API.PushString( "main chunk" );
 			else if( ar.What.Length > 0 && ar.What[0] != 'C' ) // for Lua functions, use <file:line>
 				API.PushString( string.Format( "function <{0}:{1}>", ar.ShortSrc, ar.LineDefined ) );
 			else // nothing left...
@@ -556,7 +582,7 @@ namespace Cosmos.Executable.Lua
 
 		public ThreadStatus L_LoadString( string s )
 		{
-			return L_LoadBuffer( s, s );
+			return L_LoadBufferX( s, s, "t" );
 		}
 
 		public ThreadStatus L_DoString( string s )

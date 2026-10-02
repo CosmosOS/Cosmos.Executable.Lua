@@ -18,10 +18,14 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	// lundump.c of Lua 5.4: loads a precompiled chunk as DumpState writes it
+	// lundump.c of Lua 5.5: loads a precompiled chunk as DumpState writes it
 	internal class Undump
 	{
 		private ILoadInfo LoadInfo;
+		private long Offset; // current position relative to beginning of dump
+		// the strings loaded so far, by their indices (1-based)
+		private readonly System.Collections.Generic.List<string> Strings =
+			new System.Collections.Generic.List<string>();
 
 		public static LuaProto LoadBinary( ILuaState lua,
 			ILoadInfo loadinfo, string name )
@@ -36,9 +40,10 @@ namespace Cosmos.Executable.Lua
 				var undump = new Undump( loadinfo );
 				undump.CheckHeader();
 				int nupvalues = undump.LoadByte(); // number of upvalues of the main function
-				var proto = undump.LoadFunction( null );
+				var proto = new LuaProto();
+				undump.LoadFunction( proto );
 				if( nupvalues != proto.Upvalues.Count )
-					throw new UndumpException( "upvalues mismatch" );
+					throw new UndumpException( "corrupted chunk" );
 				return proto;
 			}
 			catch( UndumpException e )
@@ -66,7 +71,15 @@ namespace Cosmos.Executable.Lua
 					throw new UndumpException( "truncated chunk" );
 				ret[i] = (byte)c;
 			}
+			Offset += count;
 			return ret;
+		}
+
+		private void LoadAlign( int align )
+		{
+			int padding = align - (int)(Offset % align);
+			if( padding < align ) // (padding == align) means no padding
+				LoadBlock( padding );
 		}
 
 		private int LoadByte()
@@ -74,36 +87,32 @@ namespace Cosmos.Executable.Lua
 			var c = LoadInfo.ReadByte();
 			if( c == -1 )
 				throw new UndumpException( "truncated chunk" );
+			Offset++;
 			return c;
 		}
 
-		private ulong LoadUnsigned( ulong limit )
+		private ulong LoadVarint( ulong limit )
 		{
 			ulong x = 0;
 			int b;
 			limit >>= 7;
 			do {
 				b = LoadByte();
-				if( x >= limit )
+				if( x > limit )
 					throw new UndumpException( "integer overflow" );
 				x = (x << 7) | (uint)(b & 0x7f);
-			} while( (b & 0x80) == 0 );
+			} while( (b & 0x80) != 0 );
 			return x;
 		}
 
 		private ulong LoadSize()
 		{
-			return LoadUnsigned( ulong.MaxValue );
+			return LoadVarint( long.MaxValue ); // MAX_SIZE
 		}
 
 		private int LoadInt()
 		{
-			return (int)LoadUnsigned( int.MaxValue );
-		}
-
-		private long LoadInteger()
-		{
-			return BitConverter.ToInt64( LoadBlock( DumpState.SIZEOF_INTEGER ), 0 );
+			return (int)LoadVarint( int.MaxValue );
 		}
 
 		private double LoadNumber()
@@ -111,32 +120,41 @@ namespace Cosmos.Executable.Lua
 			return BitConverter.ToDouble( LoadBlock( DumpState.SIZEOF_NUMBER ), 0 );
 		}
 
-		/*
-		** Load a nullable string.
-		*/
-		private string LoadStringN()
+		private long LoadInteger()
 		{
-			ulong size = LoadSize();
-			if( size == 0 ) // no string?
-				return null;
-			if( --size > int.MaxValue )
-				throw new UndumpException( "truncated chunk" );
-			var bytes = LoadBlock( (int)size );
-			var chars = new char[bytes.Length];
-			for( int i=0; i<bytes.Length; ++i )
-				chars[i] = (char)bytes[i];
-			return new string( chars );
+			ulong cx = LoadVarint( ulong.MaxValue );
+			/* decode unsigned to signed */
+			if( (cx & 1) != 0 )
+				return unchecked((long)~(cx >> 1));
+			else
+				return unchecked((long)(cx >> 1));
 		}
 
 		/*
-		** Load a non-nullable string.
+		** Load a nullable string.
 		*/
 		private string LoadString()
 		{
-			string st = LoadStringN();
-			if( st == null )
-				throw new UndumpException( "bad format for constant string" );
-			return st;
+			ulong size = LoadSize();
+			if( size == 0 ) // previously saved string?
+			{
+				ulong idx = LoadVarint( ulong.MaxValue ); // get its index
+				if( idx == 0 ) // no string?
+					return null;
+				if( idx > (ulong)Strings.Count )
+					throw new UndumpException( "invalid string index" );
+				return Strings[(int)idx - 1]; // do not save it again
+			}
+			if( --size > int.MaxValue )
+				throw new UndumpException( "truncated chunk" );
+			var bytes = LoadBlock( (int)size + 1 ); // with its ending '\0'
+			var chars = new char[size];
+			for( int i=0; i<(int)size; ++i )
+				chars[i] = (char)bytes[i];
+			var ts = new string( chars );
+			/* add string to list of saved strings */
+			Strings.Add( ts );
+			return ts;
 		}
 
 		private void CheckLiteral( string s, string msg )
@@ -149,52 +167,57 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
-		private void CheckSize( int size, string tname )
+		private void CheckNumSize( int size, string tname )
 		{
-			if( LoadByte() != size )
+			if( size != LoadByte() )
 				throw new UndumpException( tname + " size mismatch" );
+		}
+
+		private void CheckNumFormat( bool eq, string tname )
+		{
+			if( !eq )
+				throw new UndumpException( tname + " format mismatch" );
 		}
 
 		private void CheckHeader()
 		{
+			/* (the 1st char was only peeked at) */
 			CheckLiteral( LuaConf.LUA_SIGNATURE, "not a binary chunk" );
 			if( LoadByte() != DumpState.LUAC_VERSION )
 				throw new UndumpException( "version mismatch" );
 			if( LoadByte() != DumpState.LUAC_FORMAT )
 				throw new UndumpException( "format mismatch" );
 			CheckLiteral( DumpState.LUAC_DATA, "corrupted chunk" );
-			CheckSize( DumpState.SIZEOF_INSTRUCTION, "Instruction" );
-			CheckSize( DumpState.SIZEOF_INTEGER, "lua_Integer" );
-			CheckSize( DumpState.SIZEOF_NUMBER, "lua_Number" );
-			if( LoadInteger() != DumpState.LUAC_INT )
-				throw new UndumpException( "integer format mismatch" );
-			if( LoadNumber() != DumpState.LUAC_NUM )
-				throw new UndumpException( "float format mismatch" );
+			CheckNumSize( DumpState.SIZEOF_INT, "int" );
+			CheckNumFormat( BitConverter.ToInt32( LoadBlock( DumpState.SIZEOF_INT ), 0 ) == DumpState.LUAC_INT, "int" );
+			CheckNumSize( DumpState.SIZEOF_INSTRUCTION, "instruction" );
+			CheckNumFormat( BitConverter.ToUInt32( LoadBlock( DumpState.SIZEOF_INSTRUCTION ), 0 ) == DumpState.LUAC_INST, "instruction" );
+			CheckNumSize( DumpState.SIZEOF_INTEGER, "Lua integer" );
+			CheckNumFormat( BitConverter.ToInt64( LoadBlock( DumpState.SIZEOF_INTEGER ), 0 ) == DumpState.LUAC_INT, "Lua integer" );
+			CheckNumSize( DumpState.SIZEOF_NUMBER, "Lua number" );
+			CheckNumFormat( LoadNumber() == DumpState.LUAC_NUM, "Lua number" );
 		}
 
-		private LuaProto LoadFunction( string psource )
+		private void LoadFunction( LuaProto proto )
 		{
-			LuaProto proto = new LuaProto();
-			proto.Source = LoadStringN();
-			if( proto.Source == null ) // no source in dump?
-				proto.Source = psource; // reuse parent's source
 			proto.LineDefined = LoadInt();
 			proto.LastLineDefined = LoadInt();
 			proto.NumParams = LoadByte();
-			proto.IsVarArg = LoadByte() != 0;
+			/* get only the meaningful flags */
+			proto.Flag = (byte)(LoadByte() & (LuaProto.PF_VAHID | LuaProto.PF_VATAB));
 			proto.MaxStackSize = (byte)LoadByte();
-
 			LoadCode( proto );
 			LoadConstants( proto );
 			LoadUpvalues( proto );
 			LoadProtos( proto );
+			proto.Source = LoadString();
 			LoadDebug( proto );
-			return proto;
 		}
 
 		private void LoadCode( LuaProto proto )
 		{
 			var n = LoadInt();
+			LoadAlign( DumpState.SIZEOF_INSTRUCTION );
 			proto.Code.Clear();
 			for( int i=0; i<n; ++i )
 				proto.Code.Add( (Instruction)BitConverter.ToUInt32( LoadBlock( 4 ), 0 ) );
@@ -227,10 +250,15 @@ namespace Cosmos.Executable.Lua
 						break;
 					case DumpState.LUA_VSHRSTR:
 					case DumpState.LUA_VLNGSTR:
-						v.V.SetSValue( LoadString() );
+					{
+						string ts = LoadString();
+						if( ts == null )
+							throw new UndumpException( "bad format for constant string" );
+						v.V.SetSValue( ts );
 						break;
+					}
 					default:
-						throw new UndumpException( "bad constant" );
+						throw new UndumpException( "invalid constant" );
 				}
 				proto.K.Add( v );
 			}
@@ -255,7 +283,11 @@ namespace Cosmos.Executable.Lua
 			var n = LoadInt();
 			proto.P.Clear();
 			for( int i=0; i<n; ++i )
-				proto.P.Add( LoadFunction( proto.Source ) );
+			{
+				var p = new LuaProto();
+				proto.P.Add( p );
+				LoadFunction( p );
+			}
 		}
 
 		private void LoadDebug( LuaProto proto )
@@ -267,12 +299,16 @@ namespace Cosmos.Executable.Lua
 
 			n = LoadInt();
 			proto.AbsLineInfo.Clear();
-			for( int i=0; i<n; ++i )
+			if( n > 0 )
 			{
-				var abs = new AbsLineInfo();
-				abs.Pc = LoadInt();
-				abs.Line = LoadInt();
-				proto.AbsLineInfo.Add( abs );
+				LoadAlign( DumpState.SIZEOF_INT );
+				for( int i=0; i<n; ++i )
+				{
+					var abs = new AbsLineInfo();
+					abs.Pc = BitConverter.ToInt32( LoadBlock( DumpState.SIZEOF_INT ), 0 );
+					abs.Line = BitConverter.ToInt32( LoadBlock( DumpState.SIZEOF_INT ), 0 );
+					proto.AbsLineInfo.Add( abs );
+				}
 			}
 
 			n = LoadInt();
@@ -280,7 +316,7 @@ namespace Cosmos.Executable.Lua
 			for( int i=0; i<n; ++i )
 			{
 				var v = new LocVar();
-				v.VarName = LoadStringN();
+				v.VarName = LoadString();
 				v.StartPc = LoadInt();
 				v.EndPc = LoadInt();
 				proto.LocVars.Add( v );
@@ -290,7 +326,7 @@ namespace Cosmos.Executable.Lua
 			if( n != 0 ) // does it have debug information?
 				n = proto.Upvalues.Count; // must be this many
 			for( int i=0; i<n; ++i )
-				proto.Upvalues[i].Name = LoadStringN();
+				proto.Upvalues[i].Name = LoadString();
 		}
 	}
 

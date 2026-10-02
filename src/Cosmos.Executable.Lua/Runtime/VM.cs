@@ -20,7 +20,7 @@ namespace Cosmos.Executable.Lua
 		F2Iceil		/* takes the ceil of the number */
 	}
 
-	// lvm.c of Lua 5.4: the virtual machine
+	// lvm.c of Lua 5.5: the virtual machine
 	internal partial class LuaState
 	{
 		/* limit for table tag-method chains (to avoid infinite loops) */
@@ -183,10 +183,9 @@ namespace Cosmos.Executable.Lua
 		** Prepare a numerical for loop (opcode OP_FORPREP).
 		** Return true to skip the loop. Otherwise,
 		** after preparation, stack will be as follows:
-		**   ra : internal index (safe copy of the control variable)
-		**   ra + 1 : loop counter (integer loops) or limit (float loops)
-		**   ra + 2 : step
-		**   ra + 3 : control variable
+		**   ra     : loop counter (integer loops) or limit (float loops)
+		**   ra + 1 : step
+		**   ra + 2 : control variable
 		*/
 		private bool ForPrep( int ra )
 		{
@@ -200,7 +199,6 @@ namespace Cosmos.Executable.Lua
 				long limit;
 				if( step == 0 )
 					G_RunError( "'for' step is zero" );
-				Stack[ra + 3].V.SetIValue( init ); // control variable
 				if( ForLimit( init, ref plimit.V, out limit, step ) )
 					return true; // skip the loop
 				else // prepare loop counter
@@ -218,9 +216,9 @@ namespace Cosmos.Executable.Lua
 							/* 'step+1' avoids negating 'mininteger' */
 							count /= (ulong)(-(step + 1)) + 1u;
 						}
-						/* store the counter in place of the limit (which won't be
-						   needed anymore) */
-						plimit.V.SetIValue( (long)count );
+						pinit.V.SetIValue( (long)count ); // change init to count
+						plimit.V.SetIValue( step ); // change limit to step
+						pstep.V.SetIValue( init ); // change step to init
 					}
 				}
 			}
@@ -239,11 +237,10 @@ namespace Cosmos.Executable.Lua
 					return true; // skip the loop
 				else
 				{
-					/* make sure internal values are all floats */
-					plimit.V.SetFltValue( limit );
-					pstep.V.SetFltValue( step );
-					pinit.V.SetFltValue( init ); // internal index
-					Stack[ra + 3].V.SetFltValue( init ); // control variable
+					/* make sure all values are floats */
+					pinit.V.SetFltValue( limit );
+					plimit.V.SetFltValue( step );
+					pstep.V.SetFltValue( init ); // control variable
 				}
 			}
 			return false;
@@ -252,18 +249,17 @@ namespace Cosmos.Executable.Lua
 		/*
 		** Execute a step of a float numerical for loop, returning
 		** true iff the loop must continue. (The integer case is
-		** written online with opcode OP_FORLOOP, for performance.)
+		** written inline with opcode OP_FORLOOP, for performance.)
 		*/
 		private bool FloatForLoop( int ra )
 		{
-			double step = Stack[ra + 2].V.FltValue;
-			double limit = Stack[ra + 1].V.FltValue;
-			double idx = Stack[ra].V.FltValue; // internal index
+			double step = Stack[ra + 1].V.FltValue;
+			double limit = Stack[ra].V.FltValue;
+			double idx = Stack[ra + 2].V.FltValue; // control variable
 			idx = idx + step; // increment index
 			if( (0 < step) ? (idx <= limit) : (limit <= idx) )
 			{
-				Stack[ra].V.SetFltValue( idx ); // update internal index
-				Stack[ra + 3].V.SetFltValue( idx ); // and control variable
+				Stack[ra + 2].V.SetFltValue( idx ); // update control variable
 				return true; // jump back
 			}
 			else
@@ -882,11 +878,6 @@ namespace Cosmos.Executable.Lua
 				{
 					bool res = !IsFalse( ref Stack[Top.Index - 1].V );
 					Top = Stack[Top.Index - 1];
-					if( (ci.CallStatus & CallStatus.CIST_LEQ) != 0 ) // "<=" using "<" instead?
-					{
-						ci.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
-						res = !res; // negate result
-					}
 					Utl.Assert( ci.SavedPc.Value.GET_OPCODE() == OpCode.OP_JMP );
 					if( (res ? 1 : 0) != inst.GETARG_k() ) // condition failed?
 						ci.SavedPc.Index++; // skip jump instruction
@@ -1172,13 +1163,16 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_NEWTABLE:
 					{
-						int b = i.GETARG_B(); // log2(hash size) + 1
-						int c = i.GETARG_C(); // array size
+						int b = i.GETARG_vB(); // log2(hash size) + 1
+						int c = i.GETARG_vC(); // array size
 						if( b > 0 )
-							b = 1 << (b - 1); // size is 2^(b - 1)
-						Utl.Assert( (!i.TESTARG_k()) == (code[ci.SavedPc.Index].GETARG_Ax() == 0) );
+							b = 1 << (b - 1); // hash size is 2^(b - 1)
 						if( i.TESTARG_k() ) // non-zero extra argument?
-							c += code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_C + 1); // add it to size
+						{
+							Utl.Assert( code[ci.SavedPc.Index].GETARG_Ax() != 0 );
+							/* add it to array size */
+							c += code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_vC + 1);
+						}
 						ci.SavedPc.Index++; // skip extra argument
 						Top = Stack[ra.Index + 1]; // correct top in case of emergency GC
 						var t = new LuaTable( this );
@@ -1191,7 +1185,7 @@ namespace Cosmos.Executable.Lua
 					case OpCode.OP_SELF:
 					{
 						StkId rb = Stack[stackBase + i.GETARG_B()];
-						StkId rc = i.TESTARG_k() ? k[i.GETARG_C()] : Stack[stackBase + i.GETARG_C()];
+						StkId rc = k[i.GETARG_C()]; // key must be a short string
 						Stack[ra.Index + 1].V.SetObj( ref rb.V );
 						if( rb.V.TtIsTable() )
 						{
@@ -1253,21 +1247,21 @@ namespace Cosmos.Executable.Lua
 						}
 						break;
 					}
-					case OpCode.OP_SHRI:
-					{
-						int ic = i.GETARG_sC();
-						long ib;
-						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out ib, F2Imod.F2Ieq ) ) {
-							ci.SavedPc.Index++; ra.V.SetIValue( V_ShiftL( ib, -ic ) );
-						}
-						break;
-					}
 					case OpCode.OP_SHLI:
 					{
 						int ic = i.GETARG_sC();
 						long ib;
 						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out ib, F2Imod.F2Ieq ) ) {
 							ci.SavedPc.Index++; ra.V.SetIValue( V_ShiftL( ic, ib ) );
+						}
+						break;
+					}
+					case OpCode.OP_SHRI:
+					{
+						int ic = i.GETARG_sC();
+						long ib;
+						if( V_ToIntegerNS( ref Stack[stackBase + i.GETARG_B()].V, out ib, F2Imod.F2Ieq ) ) {
+							ci.SavedPc.Index++; ra.V.SetIValue( V_ShiftL( ib, -ic ) );
 						}
 						break;
 					}
@@ -1396,6 +1390,7 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_CLOSE:
 					{
+						Utl.Assert( i.GETARG_B() == 0 ); // 'close must be alive
 						Top = Stack[ci.TopIndex];
 						F_Close( ra.Index, ThreadStatus.LUA_OK, true );
 						trap = ci.Trap;
@@ -1620,17 +1615,16 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_FORLOOP:
 					{
-						if( Stack[ra.Index + 2].V.TtIsInteger() ) // integer loop?
+						if( Stack[ra.Index + 1].V.TtIsInteger() ) // integer loop?
 						{
-							ulong count = unchecked((ulong)Stack[ra.Index + 1].V.IValue());
+							ulong count = unchecked((ulong)ra.V.IValue());
 							if( count > 0 ) // still more iterations?
 							{
-								long step = Stack[ra.Index + 2].V.IValue();
-								long idx = ra.V.IValue(); // internal index
-								Stack[ra.Index + 1].V.SetIValue( unchecked((long)(count - 1)) ); // update counter
+								long step = Stack[ra.Index + 1].V.IValue();
+								long idx = Stack[ra.Index + 2].V.IValue(); // control variable
+								ra.V.SetIValue( unchecked((long)(count - 1)) ); // update counter
 								idx = unchecked(idx + step); // add step to index
-								ra.V.SetIValue( idx ); // update internal index
-								Stack[ra.Index + 3].V.SetIValue( idx ); // and control variable
+								Stack[ra.Index + 2].V.SetIValue( idx ); // update control variable
 								ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
 							}
 						}
@@ -1648,13 +1642,24 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_TFORPREP:
 					{
-						/* create to-be-closed upvalue (if needed) */
+						/* before: 'ra' has the iterator function, 'ra + 1' has the state,
+						   'ra + 2' has the initial value for the control variable, and
+						   'ra + 3' has the closing variable. This opcode then swaps the
+						   control and the closing variables and marks the closing variable
+						   as to-be-closed.
+						*/
+						var temp = new TValue(); // to swap control and closing variables
+						temp.SetObj( ref Stack[ra.Index + 3].V );
+						Stack[ra.Index + 3].V.SetObj( ref Stack[ra.Index + 2].V );
+						Stack[ra.Index + 2].V.SetObj( ref temp );
+						/* create to-be-closed upvalue (if closing var. is not nil) */
 						Top = Stack[ci.TopIndex];
-						F_NewTbcUpval( Stack[ra.Index + 3] );
-						ci.SavedPc.Index += i.GETARG_Bx();
-						i = code[ci.SavedPc.Index++]; // go to next instruction
+						F_NewTbcUpval( Stack[ra.Index + 2] );
+						ci.SavedPc.Index += i.GETARG_Bx(); // go to end of the loop
+						i = code[ci.SavedPc.Index++]; // fetch next instruction
 						Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORCALL && ra.Index == stackBase + i.GETARG_A() );
 						TForCall( ci, code, i, ra );
+						trap = ci.Trap;
 						break;
 					}
 					case OpCode.OP_TFORCALL:
@@ -1665,17 +1670,14 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_TFORLOOP:
 					{
-						if( !Stack[ra.Index + 4].V.TtIsNil() ) // continue loop?
-						{
-							Stack[ra.Index + 2].V.SetObj( ref Stack[ra.Index + 4].V ); // save control variable
+						if( !Stack[ra.Index + 3].V.TtIsNil() ) // continue loop?
 							ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
-						}
 						break;
 					}
 					case OpCode.OP_SETLIST:
 					{
-						int n = i.GETARG_B();
-						long last = i.GETARG_C();
+						int n = i.GETARG_vB();
+						long last = i.GETARG_vC();
 						var h = ra.V.HValue();
 						if( n == 0 )
 							n = Top.Index - ra.Index - 1; // get up to the top
@@ -1684,7 +1686,7 @@ namespace Cosmos.Executable.Lua
 						last += n;
 						if( i.TESTARG_k() )
 						{
-							last += (long)code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_C + 1);
+							last += (long)code[ci.SavedPc.Index].GETARG_Ax() * (Instruction.MAXARG_vC + 1);
 							ci.SavedPc.Index++;
 						}
 						if( last > h.ArraySize ) // needs more space?
@@ -1707,15 +1709,30 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_VARARG:
 					{
-						int n = i.GETARG_C() - 1; // required results
+						int n = i.GETARG_C() - 1; // required results (-1 means all)
+						int vatab = i.GETARG_k() != 0 ? i.GETARG_B() : -1;
 						Top = Stack[ci.TopIndex];
-						T_GetVarargs( ci, ra.Index, n );
+						T_GetVarargs( ci, ra.Index, n, vatab );
 						trap = ci.Trap;
+						break;
+					}
+					case OpCode.OP_GETVARG:
+					{
+						T_GetVararg( ci, ra, ref Stack[stackBase + i.GETARG_C()].V );
+						break;
+					}
+					case OpCode.OP_ERRNNIL:
+					{
+						if( !ra.V.TtIsNil() )
+						{
+							Top = Stack[ci.TopIndex];
+							G_ErrNNil( cl, i.GETARG_Bx() );
+						}
 						break;
 					}
 					case OpCode.OP_VARARGPREP:
 					{
-						T_AdjustVarargs( i.GETARG_A(), ci, cl.Proto );
+						T_AdjustVarargs( ci, cl.Proto );
 						trap = ci.Trap;
 						if( trap ) // previous "Protect" updated trap
 						{
@@ -1831,25 +1848,22 @@ namespace Cosmos.Executable.Lua
 		private void TForCall( CallInfo ci, List<Instruction> code, Instruction i, StkId ra )
 		{
 			/* 'ra' has the iterator function, 'ra + 1' has the state,
-			   'ra + 2' has the control variable, and 'ra + 3' has the
-			   to-be-closed variable. The call will use the stack after
-			   these values (starting at 'ra + 4')
+			   'ra + 2' has the closing variable, and 'ra + 3' has the control
+			   variable. The call will use the stack starting at 'ra + 3',
+			   so that it preserves the first three values, and the first
+			   return will be the new value for the control variable.
 			*/
-			/* push function, state, and control variable */
 			int r = ra.Index;
-			Stack[r + 4].V.SetObj( ref Stack[r].V );
-			Stack[r + 5].V.SetObj( ref Stack[r + 1].V );
-			Stack[r + 6].V.SetObj( ref Stack[r + 2].V );
-			Top = Stack[r + 4 + 3];
-			D_Call( Stack[r + 4], i.GETARG_C() ); // do the call
+			Stack[r + 5].V.SetObj( ref Stack[r + 3].V ); // copy the control variable
+			Stack[r + 4].V.SetObj( ref Stack[r + 1].V ); // copy state
+			Stack[r + 3].V.SetObj( ref Stack[r].V ); // copy function
+			Top = Stack[r + 3 + 3];
+			D_Call( Stack[r + 3], i.GETARG_C() ); // do the call
 			i = code[ci.SavedPc.Index++]; // go to next instruction
 			Utl.Assert( i.GET_OPCODE() == OpCode.OP_TFORLOOP && r == ci.FuncIndex + 1 + i.GETARG_A() );
 			/* OP_TFORLOOP */
-			if( !Stack[r + 4].V.TtIsNil() ) // continue loop?
-			{
-				Stack[r + 2].V.SetObj( ref Stack[r + 4].V ); // save control variable
+			if( !Stack[r + 3].V.TtIsNil() ) // continue loop?
 				ci.SavedPc.Index -= i.GETARG_Bx(); // jump back
-			}
 		}
 
 	}

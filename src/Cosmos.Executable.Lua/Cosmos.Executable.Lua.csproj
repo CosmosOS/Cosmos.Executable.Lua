@@ -18,11 +18,11 @@
 
   <PropertyGroup>
     <PackageId>Cosmos.Executable.Lua</PackageId>
-    <Version>3.0.0</Version>
+    <Version>4.0.0</Version>
     <Title>Cosmos.Executable.Lua</Title>
     <Authors>Cosmos</Authors>
     <Company>Cosmos</Company>
-    <Description>Lua 5.4 interpreter for Cosmos Gen3 kernels, based on UniLua.</Description>
+    <Description>Lua 5.5 interpreter for Cosmos Gen3 kernels, based on UniLua.</Description>
     <PackageTags>cosmos;lua;interpreter;scripting;kernel</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>

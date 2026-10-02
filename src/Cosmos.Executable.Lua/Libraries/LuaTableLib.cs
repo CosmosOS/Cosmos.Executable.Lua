@@ -7,7 +7,7 @@ namespace Cosmos.Executable.Lua
 {
 	using StringBuilder = System.Text.StringBuilder;
 
-	// ltablib.c of Lua 5.4: the functions read and write through
+	// ltablib.c of Lua 5.5: the functions read and write through
 	// metamethods, so that they work on objects that mimic tables
 	internal class LuaTableLib
 	{
@@ -18,6 +18,7 @@ namespace Cosmos.Executable.Lua
 			NameFuncPair[] define = new NameFuncPair[]
 			{
 				new NameFuncPair( "concat", 	TBL_Concat 	),
+				new NameFuncPair( "create", 	TBL_Create 	),
 				new NameFuncPair( "insert", 	TBL_Insert 	),
 				new NameFuncPair( "pack", 		TBL_Pack 	),
 				new NameFuncPair( "unpack", 	TBL_Unpack 	),
@@ -45,13 +46,15 @@ namespace Cosmos.Executable.Lua
 		// checktab: 'arg' is a table, or has the metamethods to behave as one
 		private static void CheckTab( ILuaState lua, int arg, int what )
 		{
-			if( lua.Type( arg ) != LuaType.LUA_TTABLE ) // is it not a table?
+			LuaType tp = lua.Type( arg );
+			if( tp != LuaType.LUA_TTABLE ) // is it not a table?
 			{
 				int n = 1; // number of elements to pop
 				if( lua.GetMetaTable( arg ) && // must have metatable
 					((what & TAB_R) == 0 || CheckField( lua, "__index", ++n )) &&
 					((what & TAB_W) == 0 || CheckField( lua, "__newindex", ++n )) &&
-					((what & TAB_L) == 0 || CheckField( lua, "__len", ++n )) )
+					((what & TAB_L) == 0 || // strings don't need '__len' to have a length
+						tp == LuaType.LUA_TSTRING || CheckField( lua, "__len", ++n )) )
 				{
 					lua.Pop( n ); // pop metatable and tested metamethods
 				}
@@ -64,6 +67,17 @@ namespace Cosmos.Executable.Lua
 		{
 			CheckTab( lua, n, w | TAB_L );
 			return lua.L_Len( n );
+		}
+
+		// tcreate
+		private static int TBL_Create( ILuaState lua )
+		{
+			ulong sizeseq = unchecked( (ulong)lua.L_CheckInteger( 1 ) );
+			ulong sizerest = unchecked( (ulong)lua.L_OptInteger( 2, 0 ) );
+			lua.L_ArgCheck( sizeseq <= int.MaxValue, 1, "out of range" );
+			lua.L_ArgCheck( sizerest <= int.MaxValue, 2, "out of range" );
+			lua.CreateTable( (int)sizeseq, (int)sizerest );
+			return 1;
 		}
 
 		// tinsert
@@ -199,8 +213,9 @@ namespace Cosmos.Executable.Lua
 		// tunpack
 		private static int TBL_Unpack( ILuaState lua )
 		{
+			long len = AuxGetN( lua, 1, TAB_R );
 			long i = lua.L_OptInteger( 2, 1 );
-			long e = lua.IsNoneOrNil( 3 ) ? lua.L_Len( 1 ) : lua.L_CheckInteger( 3 );
+			long e = lua.IsNoneOrNil( 3 ) ? len : lua.L_CheckInteger( 3 );
 			if( i > e ) return 0; // empty range
 			ulong n = unchecked( (ulong)e - (ulong)i ); // number of elements minus 1 (avoid overflows)
 			if( n >= (ulong)int.MaxValue || !lua.CheckStack( (int)(++n) ) )
@@ -217,9 +232,9 @@ namespace Cosmos.Executable.Lua
 		// arrays larger than 'RANLIMIT' may use randomized pivots
 		private const uint RANLIMIT = 100u;
 
-		private static uint RandomizePivot()
+		private static uint RandomizePivot( ILuaState lua )
 		{
-			return unchecked( (uint)System.Environment.TickCount + (uint)System.DateTime.UtcNow.Ticks );
+			return lua.L_MakeSeed();
 		}
 
 		private static void Set2( ILuaState lua, uint i, uint j )
@@ -293,7 +308,7 @@ namespace Cosmos.Executable.Lua
 		private static uint ChoosePivot( uint lo, uint up, uint rnd )
 		{
 			uint r4 = (up - lo) / 4; // range/4
-			return rnd % (r4 * 2) + (lo + r4);
+			return (rnd ^ lo ^ up) % (r4 * 2) + (lo + r4);
 		}
 
 		private static void AuxSort( ILuaState lua, uint lo, uint up, uint rnd )
@@ -349,7 +364,7 @@ namespace Cosmos.Executable.Lua
 					up = p - 1; // tail call for [lo .. p - 1]  (lower interval)
 				}
 				if( (up - lo) / 128 > n ) // partition too imbalanced?
-					rnd = RandomizePivot(); // try a new randomization
+					rnd = RandomizePivot( lua ); // try a new randomization
 			}
 		}
 

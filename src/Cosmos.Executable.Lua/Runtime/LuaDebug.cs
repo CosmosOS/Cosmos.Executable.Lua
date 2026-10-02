@@ -18,6 +18,7 @@ namespace Cosmos.Executable.Lua
 		public bool			IsVarArg;		// (u)
 		public int			NumParams;		// (u) number of parameters
 		public bool			IsTailCall;		// (t)
+		public int			ExtraArgs;		// (t) number of extra arguments
 		public int			FTransfer;		// (r) index of first value transferred
 		public int			NTransfer;		// (r) number of transferred values
 		public string		Source;			// (S)
@@ -27,7 +28,7 @@ namespace Cosmos.Executable.Lua
 		public string		ShortSrc;		// (S)
 	}
 
-	// ldebug.c of Lua 5.4: debug interface
+	// ldebug.c of Lua 5.5: debug interface
 	internal partial class LuaState
 	{
 		private const string StrLocal = "local";
@@ -166,7 +167,7 @@ namespace Cosmos.Executable.Lua
 		private string FindVararg( CallInfo ci, int n, out StkId pos )
 		{
 			pos = null;
-			if( Stack[ci.FuncIndex].V.ClLValue().Proto.IsVarArg )
+			if( (Stack[ci.FuncIndex].V.ClLValue().Proto.Flag & LuaProto.PF_VAHID) != 0 )
 			{
 				int nextra = ci.NExtraArgs;
 				if( n >= -nextra ) // 'n' is negative
@@ -353,7 +354,16 @@ namespace Cosmos.Executable.Lua
 					}
 					case 't':
 					{
-						ar.IsTailCall = (ci != null) && (ci.CallStatus & CallStatus.CIST_TAIL) != 0;
+						if( ci != null )
+						{
+							ar.IsTailCall = (ci.CallStatus & CallStatus.CIST_TAIL) != 0;
+							ar.ExtraArgs = ci.NCallMeta;
+						}
+						else
+						{
+							ar.IsTailCall = false;
+							ar.ExtraArgs = 0;
+						}
 						break;
 					}
 					case 'n':
@@ -368,12 +378,12 @@ namespace Cosmos.Executable.Lua
 					}
 					case 'r':
 					{
-						if( ci == null || (ci.CallStatus & CallStatus.CIST_TRAN) == 0 )
+						if( ci == null || (ci.CallStatus & CallStatus.CIST_HOOKED) == 0 )
 							ar.FTransfer = ar.NTransfer = 0;
 						else
 						{
-							ar.FTransfer = ci.FTransfer;
-							ar.NTransfer = ci.NTransfer;
+							ar.FTransfer = FTransfer;
+							ar.NTransfer = NTransfer;
 						}
 						break;
 					}
@@ -580,23 +590,8 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Find a "name" for a 'C' value in an RK instruction.
-		*/
-		private static void RKName( LuaProto p, int pc, Instruction i, out string name )
-		{
-			int c = i.GETARG_C(); // key index
-			if( i.GETARG_k() != 0 ) // is 'c' a constant?
-				KName( p, c, out name );
-			else // 'c' is a register
-				RName( p, pc, c, out name );
-		}
-
-		/*
 		** Check whether table being indexed by instruction 'i' is the
-		** environment '_ENV'. If the table is an upvalue, get its name;
-		** otherwise, find some "name" for the table and check whether
-		** that name is the name of a local variable (and not, for instance,
-		** a string). Then check that, if there is a name, it is '_ENV'.
+		** environment '_ENV'
 		*/
 		private static string IsEnv( LuaProto p, int pc, Instruction i, bool isup )
 		{
@@ -607,6 +602,8 @@ namespace Cosmos.Executable.Lua
 			else // 't' is a register
 			{
 				string what = BasicGetObjName( p, ref pc, t, out name );
+				/* 'name' must be the name of a local variable (at the current
+				   level or an upvalue) */
 				if( (object)what != (object)StrLocal && (object)what != (object)StrUpval )
 					name = null; // cannot be the variable _ENV
 			}
@@ -633,7 +630,7 @@ namespace Cosmos.Executable.Lua
 						KName( p, k, out name );
 						return IsEnv( p, lastpc, i, true );
 					}
-					case OpCode.OP_GETTABLE:
+					case OpCode.OP_GETTABLE: case OpCode.OP_GETVARG:
 					{
 						int k = i.GETARG_C(); // key index
 						RName( p, lastpc, k, out name );
@@ -652,7 +649,8 @@ namespace Cosmos.Executable.Lua
 					}
 					case OpCode.OP_SELF:
 					{
-						RKName( p, lastpc, i, out name );
+						int k = i.GETARG_C(); // key index
+						KName( p, k, out name );
 						return "method";
 					}
 					default: break; // go through to return NULL
@@ -890,10 +888,21 @@ namespace Cosmos.Executable.Lua
 			return "[string \"" + source.Substring(0, l) + "...\"]";
 		}
 
+		internal void G_ErrNNil( LuaLClosureValue cl, int k )
+		{
+			string globalname = "?"; // default name if k == 0
+			if( k > 0 )
+				KName( cl.Proto, k - 1, out globalname );
+			G_RunError( "global '{0}' already defined", globalname );
+		}
+
 		/* add src:line information to 'msg' */
 		internal string G_AddInfo( string msg, string src, int line )
 		{
-			return string.Format( "{0}:{1}: {2}", src != null ? O_ChunkId( src ) : "?", line, msg );
+			if( src == null ) // no debug information?
+				return string.Format( "?:?: {0}", msg );
+			else
+				return string.Format( "{0}:{1}: {2}", O_ChunkId( src ), line, msg );
 		}
 
 		internal void G_ErrorMsg()
@@ -906,6 +915,11 @@ namespace Cosmos.Executable.Lua
 				Stack[Top.Index-1].V.SetObj( ref errFunc.V ); // push function
 				StkId.inc( ref Top ); // assume EXTRA_STACK
 				D_CallNoYield( Stack[Top.Index-2], 1 ); // call it
+			}
+			if( Stack[Top.Index-1].V.TtIsNil() ) // error object is nil?
+			{
+				/* change it to a proper message */
+				Stack[Top.Index-1].V.SetSValue( "<no error object>" );
 			}
 			D_Throw( ThreadStatus.LUA_ERRRUN );
 		}

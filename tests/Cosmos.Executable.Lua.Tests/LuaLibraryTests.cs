@@ -11,13 +11,14 @@ namespace Cosmos.Executable.Lua.Tests;
 
 public class LuaLibraryTests : LuaTest
 {
-    [TestCase("1/3", "0.33333333333333")]
-    [TestCase("2^53", "9.007199254741e+15")]
+    [TestCase("1/3", "0.33333333333333331")]
+    [TestCase("2^53", "9007199254740992.0")]
     [TestCase("100", "100")]
     [TestCase("-7.25", "-7.25")]
     [TestCase("1e15", "1e+15")]
     [TestCase("1e100", "1e+100")]
-    [TestCase("0.1 + 0.2", "0.3")]
+    [TestCase("0.1 + 0.2", "0.30000000000000004")]
+    [TestCase("0.1", "0.1")]
     [TestCase("123456789012", "123456789012")]
     [TestCase("1e-5", "1e-05")]
     [TestCase("-0.0", "-0.0")]
@@ -29,7 +30,7 @@ public class LuaLibraryTests : LuaTest
     [TestCase("3.0", "3.0")]
     [TestCase("10 / 2", "5.0")]
     [TestCase("2^2", "4.0")]
-    [TestCase("2^63", "9.2233720368548e+18")]
+    [TestCase("2^63", "9.2233720368547758e+18")]
     [TestCase("'10' + 1", "11")]
     [TestCase("'10.0' + 1", "11.0")]
     [TestCase("math.maxinteger", "9223372036854775807")]
@@ -286,11 +287,14 @@ public class LuaLibraryTests : LuaTest
     }
 
     [Test]
-    public void WritesReachTheFileBeforeItIsClosed()
+    public void AFileIsBufferedUntilItIsFlushed()
     {
+        string path = Path.Combine(Directory, "leak.txt");
         Run("leaked = io.open('leak.txt', 'w') leaked:write('written')");
+        Assert.That(File.ReadAllText(path), Is.Empty);
 
-        Assert.That(File.ReadAllText(Path.Combine(Directory, "leak.txt")), Is.EqualTo("written"));
+        Run("leaked:flush()");
+        Assert.That(File.ReadAllText(path), Is.EqualTo("written"));
     }
 
     [Test]

@@ -196,12 +196,26 @@ public class LuaInterpreterTests : LuaTest
     [Test]
     public void ThePromptPrintsExpressionsAndRunsStatements()
     {
-        Lua.Input = new StringReader("1 + 1\nx = 'set'\nx\n=x .. '!'\n");
+        Lua.Input = new StringReader("1 + 1\nx = 'set'\nx\n");
 
         int code = Lua.RunPrompt();
 
         Assert.That(code, Is.Zero);
-        Assert.That(Output, Is.EqualTo("> 2\n> > set\n> set!\n> \n"));
+        Assert.That(Output, Is.EqualTo("> 2\n> > set\n> \n"));
+    }
+
+    [Test]
+    public void ThePromptWarnsThatLocalsDoNotSurvive()
+    {
+        StringWriter error = new();
+        Lua.Error = error;
+        Lua.Input = new StringReader("local y = 1\n=y\n");
+
+        Lua.RunPrompt();
+
+        // and =expr is no longer return expr, as in Lua 5.5
+        Assert.That(error.ToString(), Does.Contain("warning: locals do not survive across lines in interactive mode\n"));
+        Assert.That(error.ToString(), Does.Contain("stdin:1: unexpected symbol near '='"));
     }
 
     [Test]

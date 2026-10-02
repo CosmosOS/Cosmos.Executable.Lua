@@ -13,10 +13,11 @@ namespace Cosmos.Executable.Lua;
 /// Lua strings hold bytes (see <see cref="LuaText"/>): a file gives and
 /// takes its bytes as they are, in text mode as in binary mode, as on
 /// POSIX. The console is text, which the standard files encode to and
-/// decode from UTF-8. A write reaches the file at once, unless the script
-/// asked <c>setvbuf</c> for a buffer, which closing the file flushes: by
-/// the script, by the collector for a file the script lost, or at the end
-/// of the interpreter (see <see cref="BufferMode"/>).
+/// decode from UTF-8. A file is fully buffered, as C's are, unless the
+/// script asks <c>setvbuf</c> otherwise (see <see cref="BufferMode"/>):
+/// <c>flush</c> writes the buffer, and so does closing the file, by the
+/// script, by the collector for a file the script lost, or at the end of
+/// the interpreter.
 /// </remarks>
 internal sealed class LuaFileHandle
 {
@@ -32,7 +33,7 @@ internal sealed class LuaFileHandle
     private byte[]? _writeBuffer;
     private int _writeCount;
     private int _bufferSize = DefaultBufferSize;
-    private BufferMode _bufferMode = BufferMode.No;
+    private BufferMode _bufferMode = BufferMode.Full;
 
     /// <summary>The byte <see cref="UnreadByte"/> put back, or -1.</summary>
     private int _pushback = -1;
@@ -153,7 +154,7 @@ internal sealed class LuaFileHandle
 
         byte[] bytes = LuaText.ToBytes(text);
         DropReadAhead();
-        if (_bufferMode == BufferMode.No || bytes.Length >= _bufferSize)
+        if (_bufferMode == BufferMode.No || bytes.Length >= _bufferSize || !_stream!.CanWrite)
         {
             FlushBuffer();
             WriteThrough(bytes, bytes.Length);

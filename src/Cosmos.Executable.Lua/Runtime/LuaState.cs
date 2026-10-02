@@ -61,7 +61,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	// Bits in CallInfo status (lstate.h of Lua 5.4)
+	// Bits in CallInfo status (lstate.h of Lua 5.5)
 	internal enum CallStatus
 	{
 		CIST_NONE		= 0,
@@ -74,10 +74,8 @@ namespace Cosmos.Executable.Lua
 		CIST_TAIL		= (1<<5),	/* call was tail called */
 		CIST_HOOKYIELD	= (1<<6),	/* last hook called yielded */
 		CIST_FIN		= (1<<7),	/* function "called" a finalizer */
-		CIST_TRAN		= (1<<8),	/* 'ci' has transfer information */
 		CIST_CLSRET		= (1<<9),	/* function is closing tbc variables */
 		/* Bits 10-12 are used for CIST_RECST (see below) */
-		CIST_LEQ		= (1<<13),	/* using __lt for __le */
 		// the continuation of the function runs after a yield or an error
 		// (what 'lua_getctx' of Lua 5.2 reports, as the C# API keeps it)
 		CIST_YIELDED	= (1<<14),
@@ -98,6 +96,7 @@ namespace Cosmos.Executable.Lua
 		public InstructionPtr SavedPc;
 		public bool Trap;		// function is tracing lines/counts
 		public int NExtraArgs;	// # of extra arguments in vararg functions
+		public int NCallMeta;	// number of '__call' metamethods (and extra arguments) of the call
 
 		// for C# functions
 		public CSharpFunctionDelegate ContinueFunc;	// continuation in case of yields
@@ -105,12 +104,10 @@ namespace Cosmos.Executable.Lua
 		public int Context;		// context info. in case of yields
 		public ThreadStatus Status;	// status the continuation gets (lua_getctx)
 
-		// 'u2' of Lua 5.4
+		// 'u2' of Lua 5.5
 		public int FuncIdx;		// called-function index
 		public int NYield;		// number of values yielded
 		public int NRes;		// number of values returned
-		public int FTransfer;	// offset of first value transferred
-		public int NTransfer;	// number of values transferred
 
 		public bool IsLua
 		{
@@ -195,7 +192,7 @@ namespace Cosmos.Executable.Lua
 		public CallInfo 		CI;
 		public CallInfo[] 		BaseCI;
 		public GlobalState		G;
-		// 'nCcalls' of Lua 5.4: the number of nested C# calls (calls of
+		// 'nCcalls' of Lua 5.5: the number of nested C# calls (calls of
 		// V_Execute, metamethods, parser levels...) and of non-yieldable ones
 		public int				NumNonYieldable;
 		public int				NumCSharpCalls;
@@ -203,6 +200,9 @@ namespace Cosmos.Executable.Lua
 		public ThreadStatus		Status { get; set; }
 		public bool				AllowHook;
 		public byte				HookMask;
+		public int				ProtectedLevel;	// protected calls running (error entries of 'errorJmp')
+		public int				FTransfer;	// offset of first value transferred (for hooks)
+		public int				NTransfer;	// number of values transferred
 		public int				BaseHookCount;
 		public int				HookCount;
 		public LuaHookDelegate	Hook;

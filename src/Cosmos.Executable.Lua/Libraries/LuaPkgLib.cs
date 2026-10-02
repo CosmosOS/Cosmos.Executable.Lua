@@ -7,7 +7,7 @@ namespace Cosmos.Executable.Lua
 {
 	using StringBuilder = System.Text.StringBuilder;
 
-	// loadlib.c of Lua 5.4: the package library
+	// loadlib.c of Lua 5.5: the package library
 	internal class LuaPkgLib
 	{
 		public const string LIB_NAME = "package";
@@ -124,7 +124,7 @@ namespace Cosmos.Executable.Lua
 
 		/*
 		** Set a path: the default one, relative to the working directory of
-		** the state (Cosmos has no LUA_PATH_5_4 or LUA_PATH variables)
+		** the state (Cosmos has no LUA_PATH_5_5 or LUA_PATH variables)
 		*/
 		private static void SetPath( ILuaState lua, string fieldName, string dft )
 		{

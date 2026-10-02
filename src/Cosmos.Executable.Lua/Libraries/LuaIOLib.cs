@@ -8,7 +8,7 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>io</c> library of Lua 5.4 on <see cref="System.IO"/>, where UniLua
+/// The <c>io</c> library of Lua 5.5 on <see cref="System.IO"/>, where UniLua
 /// had stubs. Files are userdata with the <c>FILE*</c> metatable; the
 /// standard ones are the host's console, so in a console session they are
 /// the session's terminal. Relative names start from the state's working
@@ -188,7 +188,9 @@ internal static class LuaIOLib
     {
         try
         {
-            FileStream stream = new(LuaHost.Of(lua).ResolvePath(fileName), fileMode, access, FileShare.ReadWrite);
+            // no buffer of the stream's own: the file keeps one (see LuaFileHandle),
+            // which forgets what a failed flush could not write, as C's does
+            FileStream stream = new(LuaHost.Of(lua).ResolvePath(fileName), fileMode, access, FileShare.ReadWrite, bufferSize: 1);
             error = null;
             return new LuaFileHandle(LuaHost.Of(lua), stream, append);
         }
@@ -848,26 +850,25 @@ internal static class LuaIOLib
     private static int Write(ILuaState lua, LuaFileHandle file, int first)
     {
         int last = lua.GetTop();
+        long totalbytes = 0; // total number of bytes written
         try
         {
             for (int i = first; i <= last; i++)
             {
-                if (lua.Type(i) == LuaType.LUA_TNUMBER)
-                {
-                    // as fprintf writes them: a float with %.14g, so that 1.0 is 1
-                    file.Write(lua.IsInteger(i)
-                        ? LuaNumber.ToString(lua.ToInteger(i))
-                        : LuaNumber.Format(lua.ToNumber(i), 14, alternate: false));
-                }
-                else
-                {
-                    file.Write(lua.L_CheckString(i));
-                }
+                // a number as lua_numbertocstring writes it: as tostring does
+                string text = lua.Type(i) != LuaType.LUA_TNUMBER ? lua.L_CheckString(i)
+                    : lua.IsInteger(i) ? LuaNumber.ToString(lua.ToInteger(i))
+                    : LuaNumber.ToString(lua.ToNumber(i));
+                file.Write(text);
+                totalbytes += text.Length;
             }
         }
         catch (Exception e) when (LuaFile.IsFileError(e))
         {
-            return PushResult(lua, e, null);
+            // fail, error message, error code, and the bytes written
+            int n = PushResult(lua, e, null);
+            lua.PushInteger(totalbytes);
+            return n + 1;
         }
 
         lua.PushBoolean(true);

@@ -6,7 +6,7 @@ using System.IO;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// A Lua 5.4 interpreter: a state with the standard libraries open, which
+/// A Lua 5.5 interpreter: a state with the standard libraries open, which
 /// runs chunks, files and an interactive prompt, as the reference
 /// <c>lua</c> does.
 /// </summary>
@@ -19,8 +19,9 @@ namespace Cosmos.Executable.Lua;
 /// not wrap, such as registering C# functions for scripts to call. Lua
 /// strings hold bytes there; this class takes and gives text, which
 /// <see cref="LuaText"/> converts to and from UTF-8.</para>
-/// <para>Nothing collects the files a script opened and forgot:
-/// <see cref="Dispose"/> closes them.</para>
+/// <para>Files are buffered, as C's are: the collector closes, and so
+/// flushes, the files a script lost, and <see cref="Dispose"/> those it
+/// left open.</para>
 /// </remarks>
 public sealed class LuaInterpreter : IDisposable
 {
@@ -106,7 +107,8 @@ public sealed class LuaInterpreter : IDisposable
         ArgumentNullException.ThrowIfNull(chunk);
         string code = LuaText.Encode(chunk);
         int top = State.GetTop();
-        ThrowIfFailed(State.L_LoadBuffer(code, chunkName is null ? code : LuaText.Encode(chunkName)), top);
+        // text only, as lua -e loads its chunks
+        ThrowIfFailed(State.L_LoadBufferX(code, chunkName is null ? code : LuaText.Encode(chunkName), "t"), top);
         Call(top, 0);
     }
 
@@ -227,18 +229,18 @@ public sealed class LuaInterpreter : IDisposable
         syntaxError = null;
         int top = State.GetTop();
 
-        // An expression first, so that it is printed; =expr as in Lua 5.1
-        string expression = line.StartsWith('=') ? line[1..] : line;
-        if (State.L_LoadBuffer("return " + expression, "=stdin") == ThreadStatus.LUA_OK)
+        // An expression first, so that it is printed
+        if (State.L_LoadBufferX("return " + line, "=stdin", "t") == ThreadStatus.LUA_OK)
         {
             return true;
         }
 
         State.SetTop(top);
+        CheckLocal(line);
         string chunk = line;
         while (true)
         {
-            ThreadStatus status = State.L_LoadBuffer(chunk, "=stdin");
+            ThreadStatus status = State.L_LoadBufferX(chunk, "=stdin", "t");
             if (status == ThreadStatus.LUA_OK)
             {
                 return true;
@@ -260,6 +262,16 @@ public sealed class LuaInterpreter : IDisposable
             }
 
             chunk += "\n" + next;
+        }
+    }
+
+    /// <summary>Warns that a local declared at the prompt is gone on the next line, as lua.c's checklocal.</summary>
+    private void CheckLocal(string line)
+    {
+        line = line.TrimStart(' ', '\t');
+        if (line.Length > 5 && line.StartsWith("local", StringComparison.Ordinal) && (line[5] == ' ' || line[5] == '\t'))
+        {
+            _host.WriteErr("warning: locals do not survive across lines in interactive mode\n");
         }
     }
 

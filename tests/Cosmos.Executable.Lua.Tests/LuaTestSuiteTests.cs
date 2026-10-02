@@ -8,14 +8,15 @@ using NUnit.Framework;
 namespace Cosmos.Executable.Lua.Tests;
 
 /// <summary>
-/// Runs the files of the official Lua 5.4 test suite (lua-5.4-tests, from
-/// lua-5.4.9-tests), as their authors wrote them, one by one, then all
+/// Runs the files of the official Lua 5.5 test suite (lua-5.5-tests, from
+/// lua-5.5.1-tests), as their authors wrote them, one by one, then all
 /// together through all.lua, which loads most of them again from
 /// <c>string.dump</c>; with <c>_port</c> set (no tests of the platform of
 /// the reference implementation) and the slow tests on. Left out:
 /// heavy.lua, which all.lua does not run either; main.lua, which runs the
-/// lua program, is there for all.lua and tests nothing with <c>_port</c>
-/// set; bwcoercion.lua and tracegc.lua are modules the other files require.
+/// lua program, and memerr.lua, which needs the test library of the
+/// reference (T), are there for all.lua and test nothing here;
+/// bwcoercion.lua and tracegc.lua are modules the other files require.
 /// </summary>
 public class LuaTestSuiteTests
 {
@@ -54,7 +55,7 @@ public class LuaTestSuiteTests
     public void Passes(string name)
     {
         // A copy, next to which files.lua writes its files
-        string directory = Directory.CreateTempSubdirectory("lua-5.4-tests-").FullName;
+        string directory = Directory.CreateTempSubdirectory("lua-5.5-tests-").FullName;
         try
         {
             CopySuite(directory);
@@ -108,7 +109,7 @@ public class LuaTestSuiteTests
     /// <summary>Copies the suite to <paramref name="directory"/>.</summary>
     private static void CopySuite(string directory)
     {
-        string suite = Path.Combine(AppContext.BaseDirectory, "lua-5.4-tests");
+        string suite = Path.Combine(AppContext.BaseDirectory, "lua-5.5-tests");
         foreach (string file in Directory.GetFiles(suite))
         {
             File.Copy(file, Path.Combine(directory, Path.GetFileName(file)));

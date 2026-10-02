@@ -347,13 +347,26 @@ namespace Cosmos.Executable.Lua
 		public int					LastLineDefined;
 
 		public int					NumParams;	// number of fixed (named) parameters
-		public bool					IsVarArg;
+		public byte					Flag;
 		public byte					MaxStackSize;	// number of registers needed by this function
 
 		public string				Source;
 		public List<sbyte>			LineInfo;	// information about source lines (debug information)
 		public List<AbsLineInfo>	AbsLineInfo;	// idem
 		public List<LocVar>			LocVars;	// information about local variables (debug information)
+
+		/* flags in Proto */
+		public const byte PF_VAHID	= 1;	/* function has hidden vararg arguments */
+		public const byte PF_VATAB	= 2;	/* function has vararg table */
+
+		/* a vararg function either has hidden vararg arguments or a vararg table */
+		public bool IsVarArg { get { return (Flag & (PF_VAHID | PF_VATAB)) != 0; } }
+
+		/*
+		** mark that a function needs a vararg table. (The flag PF_VAHID will
+		** be cleared later.)
+		*/
+		public void NeedVaTab() { Flag |= PF_VATAB; }
 
 		public LuaProto()
 		{

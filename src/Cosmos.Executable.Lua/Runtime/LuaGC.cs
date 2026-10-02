@@ -9,13 +9,13 @@ using System.Runtime.CompilerServices;
 namespace Cosmos.Executable.Lua
 {
 	/*
-	** lgc.c of Lua 5.4: the garbage collector, as far as a script sees it.
+	** lgc.c of Lua 5.5: the garbage collector, as far as a script sees it.
 	**
 	** The .NET collector (the kernel's, on Cosmos) owns the memory: it frees
 	** an object once nothing references it. What it cannot do is what Lua
 	** promises on top of that: weak tables, '__gc' finalizers called in
 	** order with their objects resurrected, and a count of the memory in use
-	** by the state. So the state runs the collector of Lua 5.4 over its own
+	** by the state. So the state runs the collector of Lua 5.5 over its own
 	** objects, as the reference implementation does: it marks what a script
 	** can reach from the registry, the main thread and the stacks, clears
 	** the weak tables of what it did not reach, and finalizes what it did
@@ -41,11 +41,21 @@ namespace Cosmos.Executable.Lua
 		LUA_GCCOUNT		= 3,
 		LUA_GCCOUNTB	= 4,
 		LUA_GCSTEP		= 5,
-		LUA_GCSETPAUSE	= 6,
-		LUA_GCSETSTEPMUL	= 7,
-		LUA_GCISRUNNING	= 9,
-		LUA_GCGEN		= 10,
-		LUA_GCINC		= 11,
+		LUA_GCISRUNNING	= 6,
+		LUA_GCGEN		= 7,
+		LUA_GCINC		= 8,
+		LUA_GCPARAM		= 9,
+	}
+
+	// the parameters of the collector (LUA_GCP*), in the order of 'gcparams'
+	internal enum LuaGCParam
+	{
+		LUA_GCPMINORMUL		= 0,	// control minor collections
+		LUA_GCPMAJORMINOR	= 1,	// control shift major->minor
+		LUA_GCPMINORMAJOR	= 2,	// control shift minor->major
+		LUA_GCPPAUSE		= 3,	// size of pause between successive GCs
+		LUA_GCPSTEPMUL		= 4,	// GC "speed"
+		LUA_GCPSTEPSIZE		= 5,	// GC granularity
 	}
 
 	// The part of the global state the collector keeps
@@ -58,11 +68,16 @@ namespace Cosmos.Executable.Lua
 		public int Stp;
 
 		public bool Generational;
-		public int Pause = 200;		// LUAI_GCPAUSE: wait for the memory to double
-		public int StepMul = 100;	// LUAI_GCMUL
-		public int StepSize = 13;	// LUAI_GCSTEPSIZE: log2 of 8 KB
-		public int GenMinorMul = 20;	// LUAI_GENMINORMUL
-		public int GenMajorMul = 100;	// LUAI_GENMAJORMUL
+		// 'gcparams': the parameters, as floating-point bytes (luaO_codeparam)
+		public byte[] Params =
+		{
+			CodeParam( 20 ),	// LUAI_GENMINORMUL
+			CodeParam( 50 ),	// LUAI_MAJORMINOR
+			CodeParam( 70 ),	// LUAI_MINORMAJOR
+			CodeParam( 250 ),	// LUAI_GCPAUSE
+			CodeParam( 200 ),	// LUAI_GCMUL
+			CodeParam( 200 * 48 ),	// LUAI_GCSTEPSIZE: 200 * sizeof(Table)
+		};
 
 		// What the state uses, as Lua counts it: the estimate of the last
 		// cycle and what was allocated since. A cycle starts once it
@@ -86,6 +101,77 @@ namespace Cosmos.Executable.Lua
 		// the long strings the cycle reached, each an object of its own
 		public HashSet<string> LongStrings = new HashSet<string>( new StringIdentity() );
 
+		/*
+		** luaO_codeparam: encodes 'p'% as a floating-point byte, represented
+		** as (eeeexxxx). The exponent is represented using excess-7.
+		** Mimicking IEEE 754, the representation normalizes the number when
+		** possible, assuming an extra 1 before the mantissa (xxxx) and adding
+		** one to the exponent (eeee) to signal that. So, the real value is
+		** (1xxxx) * 2^(eeee - 7 - 1) if eeee != 0, and (xxxx) * 2^-7
+		** otherwise (subnormal numbers).
+		*/
+		public static byte CodeParam( uint p )
+		{
+			if( p >= ((ulong)0x1F << (0xF - 7 - 1)) * 100u ) // overflow?
+				return 0xFF; // return maximum value
+			else
+			{
+				p = (uint)(((ulong)p * 128 + 99) / 100); // round up the division
+				if( p < 0x10 ) // subnormal number?
+				{
+					/* exponent bits are already zero; nothing else to do */
+					return (byte)p;
+				}
+				else // p >= 0x10 implies ceil(log2(p + 1)) >= 5
+				{
+					/* preserve 5 bits in 'p' */
+					int log = LuaTable.CeilLog2( (int)p + 1 ) - 5;
+					return (byte)(((p >> log) - 0x10) | (uint)((log + 1) << 4));
+				}
+			}
+		}
+
+		/*
+		** luaO_applyparam: computes 'p' times 'x', where 'p' is a
+		** floating-point byte. Roughly, we have to multiply 'x' by the mantissa
+		** and then shift accordingly to the exponent. If the exponent is
+		** positive, both the multiplication and the shift increase 'x', so we
+		** have to care only about overflows. For negative exponents, however,
+		** multiplying before the shift keeps more significant bits, as long as
+		** the multiplication does not overflow, so we check which order is
+		** best.
+		*/
+		public static long ApplyParam( byte p, long x )
+		{
+			int m = p & 0xF; // mantissa
+			int e = (p >> 4); // exponent
+			if( e > 0 ) // normalized?
+			{
+				e--; // correct exponent
+				m += 0x10; // correct mantissa; maximum value is 0x1F
+			}
+			e -= 7; // correct excess-7
+			if( e >= 0 )
+			{
+				if( x < (long.MaxValue / 0x1F) >> e ) // no overflow?
+					return (x * m) << e; // order doesn't matter here
+				else // real overflow
+					return long.MaxValue;
+			}
+			else // negative exponent
+			{
+				e = -e;
+				if( x < long.MaxValue / 0x1F ) // multiplication cannot overflow?
+					return (x * m) >> e; // multiplying first gives more precision
+				else if( (x >> e) < long.MaxValue / 0x1F ) // cannot overflow after shift?
+					return (x >> e) * m;
+				else // real overflow
+					return long.MaxValue;
+			}
+		}
+
+		public long Apply( LuaGCParam p, long x ) { return ApplyParam( Params[(int)p], x ); }
+
 		// Strings by identity. Not ReferenceEqualityComparer, an
 		// IEqualityComparer<object> that would take variant interface
 		// dispatch, which Cosmos's runtime does not resolve.
@@ -96,7 +182,7 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	// The sizes Lua 5.4 gives its objects on a 64-bit machine, which the
+	// The sizes Lua 5.4 gave its objects on a 64-bit machine, which the
 	// count of the memory in use adds up
 	internal static class LuaGCSize
 	{
@@ -302,14 +388,13 @@ namespace Cosmos.Executable.Lua
 		}
 
 		// setpause: the next cycle starts when the memory in use reaches
-		// 'pause' percent of what this one left, and not before a step
+		// 'pause' percent of what this one left, and, as each cycle is a
+		// whole one, not before the bytes of a step
 		private void C_SetPause( long estimate )
 		{
 			var gc = G.GC;
-			long threshold = (estimate / 100 < long.MaxValue / System.Math.Max( gc.Pause, 1 ))
-				? estimate / 100 * gc.Pause
-				: long.MaxValue;
-			long step = estimate + (1L << gc.StepSize);
+			long threshold = gc.Apply( LuaGCParam.LUA_GCPPAUSE, estimate );
+			long step = estimate + gc.Apply( LuaGCParam.LUA_GCPSTEPSIZE, 100 );
 			gc.Threshold = System.Math.Max( threshold, step );
 		}
 
@@ -729,7 +814,7 @@ namespace Cosmos.Executable.Lua
 
 		// lua_gc: -1 when the collector cannot be asked (inside a finalizer,
 		// or closing)
-		internal int C_GC( LuaGCOption what, int a = 0, int b = 0, int c = 0 )
+		internal int C_GC( LuaGCOption what, long a = 0, int b = 0 )
 		{
 			var gc = G.GC;
 			if( (gc.Stp & (GCState.GCSTPGC | GCState.GCSTPCLS)) != 0 ) // internal stop?
@@ -755,54 +840,44 @@ namespace Cosmos.Executable.Lua
 					return (int)(gc.TotalBytes & 0x3ff);
 				case LuaGCOption.LUA_GCSTEP:
 				{
-					// a step runs a whole cycle, once the debt it adds (all of
-					// it, for a basic step) is due
-					long debt = (a == 0) ? 1 : (long)a * 1024 + (gc.TotalBytes - gc.Threshold);
-					if( debt <= 0 )
+					// a step runs a whole cycle, once the debt (what is left
+					// before the next cycle) minus the 'a' bytes it adds is due,
+					// and at once for a basic step
+					long debt = gc.Threshold - gc.TotalBytes;
+					long newdebt = (a <= 0) ? 0 : debt - a;
+					if( newdebt > 0 )
 					{
-						gc.Threshold = gc.TotalBytes - debt;
+						gc.Threshold = gc.TotalBytes + newdebt;
 						return 0;
 					}
 					int oldstp = gc.Stp;
-					gc.Stp = 0; // allow GC to run
+					gc.Stp = 0; // allow GC to run (other bits must be zero here)
 					C_FullGC();
 					gc.Stp = oldstp; // restore previous state
 					return 1; // end of cycle
-				}
-				case LuaGCOption.LUA_GCSETPAUSE:
-				{
-					int res = gc.Pause;
-					gc.Pause = a;
-					return res;
-				}
-				case LuaGCOption.LUA_GCSETSTEPMUL:
-				{
-					int res = gc.StepMul;
-					gc.StepMul = a;
-					return res;
 				}
 				case LuaGCOption.LUA_GCISRUNNING:
 					return gc.Stp == 0 ? 1 : 0;
 				case LuaGCOption.LUA_GCGEN:
 				{
 					int res = gc.Generational ? (int)LuaGCOption.LUA_GCGEN : (int)LuaGCOption.LUA_GCINC;
-					if( a != 0 )
-						gc.GenMinorMul = a;
-					if( b != 0 )
-						gc.GenMajorMul = b;
 					gc.Generational = true;
 					return res;
 				}
 				case LuaGCOption.LUA_GCINC:
 				{
 					int res = gc.Generational ? (int)LuaGCOption.LUA_GCGEN : (int)LuaGCOption.LUA_GCINC;
-					if( a != 0 )
-						gc.Pause = a;
-					if( b != 0 )
-						gc.StepMul = b;
-					if( c != 0 )
-						gc.StepSize = c;
 					gc.Generational = false;
+					return res;
+				}
+				case LuaGCOption.LUA_GCPARAM:
+				{
+					int param = (int)a;
+					int value = b;
+					Utl.ApiCheck( 0 <= param && param < gc.Params.Length, "invalid parameter" );
+					int res = (int)GCState.ApplyParam( gc.Params[param], 100 );
+					if( value >= 0 )
+						gc.Params[param] = GCState.CodeParam( (uint)value );
 					return res;
 				}
 				default:

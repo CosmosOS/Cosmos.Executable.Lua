@@ -12,13 +12,18 @@ namespace Cosmos.Executable.Lua
 	{
 		public ThreadStatus ErrCode { get; private set; }
 
-		public LuaRuntimeException( ThreadStatus errCode )
+		// luaD_throwbaselevel: the error goes past the protected calls of the
+		// thread to the first one (that of its 'lua_resume')
+		public bool BaseLevel { get; private set; }
+
+		public LuaRuntimeException( ThreadStatus errCode, bool baseLevel = false )
 		{
 			ErrCode = errCode;
+			BaseLevel = baseLevel;
 		}
 	}
 
-	// ldo.c of Lua 5.4: stack and call structure
+	// ldo.c of Lua 5.5: stack and call structure
 	internal partial class LuaState
 	{
 		private static bool ErrorStatus( ThreadStatus s )
@@ -57,11 +62,19 @@ namespace Cosmos.Executable.Lua
 			throw new LuaRuntimeException( errCode );
 		}
 
+		// luaD_throwbaselevel: unroll the protected calls of the thread up to
+		// the first level
+		internal void D_ThrowBaseLevel( ThreadStatus errCode )
+		{
+			throw new LuaRuntimeException( errCode, baseLevel: true );
+		}
+
 		private ThreadStatus D_RawRunProtected<T>( PFuncDelegate<T> func, ref T ud )
 		{
 			int oldNumCSharpCalls = NumCSharpCalls;
 			int oldNumNonYieldable = NumNonYieldable;
 			ThreadStatus res = ThreadStatus.LUA_OK;
+			ProtectedLevel++;
 			try
 			{
 				func(ref ud);
@@ -74,6 +87,12 @@ namespace Cosmos.Executable.Lua
 				NumNonYieldable = oldNumNonYieldable;
 				if( e is LuaRuntimeException error )
 				{
+					if( error.BaseLevel && ProtectedLevel > 1 ) // not the first level?
+					{
+						// a new throw rather than a rethrow, as D_PropagateExit
+						ProtectedLevel--;
+						D_ThrowBaseLevel( error.ErrCode );
+					}
 					res = error.ErrCode;
 				}
 				else
@@ -87,6 +106,7 @@ namespace Cosmos.Executable.Lua
 					res = ThreadStatus.LUA_ERRRUN;
 				}
 			}
+			ProtectedLevel--;
 			NumCSharpCalls = oldNumCSharpCalls;
 			NumNonYieldable = oldNumNonYieldable;
 			return res;
@@ -260,7 +280,6 @@ namespace Cosmos.Executable.Lua
 			var hook = Hook;
 			if( hook != null && AllowHook ) // make sure there is a hook
 			{
-				CallStatus mask = CallStatus.CIST_HOOKED;
 				CallInfo ci = CI;
 				int top = Top.Index; // preserve original 'top'
 				int ciTop = ci.TopIndex; // idem for 'ci->top'
@@ -268,25 +287,21 @@ namespace Cosmos.Executable.Lua
 				ar.Event = ev;
 				ar.CurrentLine = line;
 				ar.ActiveCIIndex = ci.Index;
-				if( ntransfer != 0 )
-				{
-					mask |= CallStatus.CIST_TRAN; // 'ci' has transfer information
-					ci.FTransfer = ftransfer;
-					ci.NTransfer = ntransfer;
-				}
+				FTransfer = ftransfer;
+				NTransfer = ntransfer;
 				if( ci.IsLua && Top.Index < ci.TopIndex )
 					Top = Stack[ci.TopIndex]; // protect entire activation register
 				D_CheckStack( LuaDef.LUA_MINSTACK ); // ensure minimum stack size
 				if( ci.TopIndex < Top.Index + LuaDef.LUA_MINSTACK )
 					ci.TopIndex = Top.Index + LuaDef.LUA_MINSTACK;
 				AllowHook = false; // cannot call hooks inside a hook
-				ci.CallStatus |= mask;
+				ci.CallStatus |= CallStatus.CIST_HOOKED;
 				hook( this, ar );
 				Utl.Assert( !AllowHook );
 				AllowHook = true;
 				ci.TopIndex = ciTop;
 				Top = Stack[top];
-				ci.CallStatus &= ~mask;
+				ci.CallStatus &= ~CallStatus.CIST_HOOKED;
 			}
 		}
 
@@ -324,7 +339,7 @@ namespace Cosmos.Executable.Lua
 				if( ci.IsLua )
 				{
 					LuaProto p = Stack[ci.FuncIndex].V.ClLValue().Proto;
-					if( p.IsVarArg )
+					if( (p.Flag & LuaProto.PF_VAHID) != 0 )
 						delta = ci.NExtraArgs + p.NumParams + 1;
 				}
 				ci.FuncIndex += delta; // if vararg, back to virtual 'func'
@@ -337,12 +352,19 @@ namespace Cosmos.Executable.Lua
 				OldPc = ci.SavedPc.Index - 1; // set 'oldpc'
 		}
 
+		/* maximum number of '__call' metamethods in a chain (MAX_CCMT) */
+		private const int MAX_CCMT = 15;
+
 		/*
 		** Check whether 'func' has a '__call' metafield. If so, put it in the
-		** stack, below original 'func', so that 'luaD_precall' can call it. Raise
-		** an error if there is no '__call' metafield.
+		** stack, below original 'func', so that 'luaD_precall' can call it.
+		** Raise an error if there is no '__call' metafield.
+		** 'ncmt' counts how many _call metamethods were invoked and how many
+		** corresponding extra arguments were pushed. (This count will be saved
+		** in the call info of the call). Raise an error if this counter
+		** overflows.
 		*/
-		private StkId TryFuncTM( StkId func )
+		private StkId TryFuncTM( StkId func, ref int ncmt )
 		{
 			int funcIndex = func.Index;
 			D_CheckStack( 1 ); // space for metamethod
@@ -354,6 +376,9 @@ namespace Cosmos.Executable.Lua
 				Stack[p].V.SetObj( ref Stack[p-1].V );
 			StkId.inc( ref Top ); // stack space pre-allocated by the caller
 			func.V.SetObj( ref tm.V ); // metamethod is the new function to be called
+			if( ncmt == MAX_CCMT ) // is counter full?
+				G_RunError( "'__call' chain too long" );
+			ncmt++; // increment counter
 			return func;
 		}
 
@@ -430,7 +455,7 @@ namespace Cosmos.Executable.Lua
 			MoveResults( ci.FuncIndex, nres, wanted );
 			/* function cannot be in any of these cases when returning */
 			Utl.Assert( (ci.CallStatus & (CallStatus.CIST_HOOKED | CallStatus.CIST_YPCALL
-				| CallStatus.CIST_FIN | CallStatus.CIST_TRAN | CallStatus.CIST_CLSRET)) == 0 );
+				| CallStatus.CIST_FIN | CallStatus.CIST_CLSRET)) == 0 );
 			CI = ci.Previous; // back to caller (after closing variables)
 		}
 
@@ -460,12 +485,13 @@ namespace Cosmos.Executable.Lua
 			return BaseCI[newIndex];
 		}
 
-		private CallInfo PrepCallInfo( int func, int nret, CallStatus mask, int top )
+		private CallInfo PrepCallInfo( int func, int nret, CallStatus mask, int ncmt, int top )
 		{
 			CallInfo ci = CI = NextCI(); // new frame
 			ci.FuncIndex = func;
 			ci.NumResults = nret;
 			ci.CallStatus = mask;
+			ci.NCallMeta = ncmt;
 			ci.TopIndex = top;
 			return ci;
 		}
@@ -473,10 +499,10 @@ namespace Cosmos.Executable.Lua
 		/*
 		** precall for C functions
 		*/
-		private int PreCallC( int func, int nresults, CSharpFunctionDelegate f )
+		private int PreCallC( int func, int nresults, int ncmt, CSharpFunctionDelegate f )
 		{
 			D_CheckStack( LuaDef.LUA_MINSTACK ); // ensure minimum stack size
-			CallInfo ci = PrepCallInfo( func, nresults, CallStatus.CIST_C,
+			CallInfo ci = PrepCallInfo( func, nresults, CallStatus.CIST_C, ncmt,
 				Top.Index + LuaDef.LUA_MINSTACK );
 			Utl.Assert( ci.TopIndex <= StackLast );
 			if( (HookMask & LuaDef.LUA_MASKCALL) != 0 )
@@ -505,12 +531,13 @@ namespace Cosmos.Executable.Lua
 		*/
 		private int D_PreTailCall( CallInfo ci, StkId func, int narg1, int delta )
 		{
+			int ncmt = 0;
 			for( ;; )
 			{
 				if( func.V.TtIsFunction() )
 				{
 					if( !func.V.ClIsLuaClosure() ) // C# function
-						return PreCallC( func.Index, LuaDef.LUA_MULTRET, CSharpFunctionOf( ref func.V ) );
+						return PreCallC( func.Index, LuaDef.LUA_MULTRET, ncmt, CSharpFunctionOf( ref func.V ) );
 
 					/* Lua function */
 					LuaProto p = func.V.ClLValue().Proto;
@@ -532,7 +559,7 @@ namespace Cosmos.Executable.Lua
 					return -1;
 				}
 				/* not a function */
-				func = TryFuncTM( func ); // try to get '__call' metamethod
+				func = TryFuncTM( func, ref ncmt ); // try '__call' metamethod
 				narg1++;
 			}
 		}
@@ -547,13 +574,14 @@ namespace Cosmos.Executable.Lua
 		*/
 		private CallInfo D_PreCall( StkId func, int nresults )
 		{
+			int ncmt = 0;
 			for( ;; )
 			{
 				if( func.V.TtIsFunction() )
 				{
 					if( !func.V.ClIsLuaClosure() ) // C# function
 					{
-						PreCallC( func.Index, nresults, CSharpFunctionOf( ref func.V ) );
+						PreCallC( func.Index, nresults, ncmt, CSharpFunctionOf( ref func.V ) );
 						return null;
 					}
 
@@ -564,7 +592,7 @@ namespace Cosmos.Executable.Lua
 					int fsize = p.MaxStackSize; // frame size
 					int funcIndex = func.Index;
 					D_CheckStack( fsize );
-					CallInfo ci = PrepCallInfo( funcIndex, nresults, CallStatus.CIST_NONE,
+					CallInfo ci = PrepCallInfo( funcIndex, nresults, CallStatus.CIST_NONE, ncmt,
 						funcIndex + 1 + fsize );
 					ci.SavedPc = new InstructionPtr( p.Code, 0 ); // starting point
 					for( ; narg < nfixparams; narg++ )
@@ -573,7 +601,7 @@ namespace Cosmos.Executable.Lua
 					return ci;
 				}
 				/* not a function */
-				func = TryFuncTM( func ); // try to get '__call' metamethod
+				func = TryFuncTM( func, ref ncmt ); // try '__call' metamethod
 			}
 		}
 

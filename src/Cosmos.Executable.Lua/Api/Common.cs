@@ -36,11 +36,10 @@ namespace Cosmos.Executable.Lua
 	{
 		public const int MAX_INT 	= System.Int32.MaxValue - 2;
 		public const int MAXUPVAL 	= System.Byte.MaxValue;
-		// 150, not the reference 200: a nested C# call (a metamethod, a sort
-		// comparator, a parser level...) takes up to about 1 KB of the thread's
-		// stack, and a Cosmos session thread has 256 KB, which overflows
-		// without a fault
-		public const int LUAI_MAXCCALLS = 150;
+		// as the reference: a nested C# call (a metamethod, a sort comparator,
+		// a parser level...) takes up to about 1 KB of the thread's stack, and
+		// a Cosmos session thread has 256 KB
+		public const int LUAI_MAXCCALLS = 200;
 		public const int MAXSTACK	= 250;
 	}
 
@@ -58,13 +57,10 @@ namespace Cosmos.Executable.Lua
 
 		public const int LUA_REGISTRYINDEX		= LuaConf.LUAI_FIRSTPSEUDOIDX;
 
-		// number of list items accumulate before a SETLIST instruction
-		public const int LFIELDS_PER_FLUSH 		= 50;
-
 		public const int LUA_IDSIZE				= 60;
 
 		public const string LUA_VERSION_MAJOR	= "5";
-		public const string LUA_VERSION_MINOR	= "4";
+		public const string LUA_VERSION_MINOR	= "5";
 		public const string LUA_VERSION = "Lua " + LUA_VERSION_MAJOR + "." + LUA_VERSION_MINOR;
 
 		public const string LUA_ENV = "_ENV";

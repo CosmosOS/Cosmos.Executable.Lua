@@ -5,7 +5,7 @@
 
 namespace Cosmos.Executable.Lua
 {
-	// lopcodes.h of Lua 5.4: R[x] is a register, K[x] a constant,
+	// lopcodes.h of Lua 5.5: R[x] is a register, K[x] a constant,
 	// RK(x) is K[x] if k(i) else R[x]
 	internal enum OpCode
 	{
@@ -34,9 +34,9 @@ namespace Cosmos.Executable.Lua
 		OP_SETI,/*	A B C	R[A][B] := RK(C)				*/
 		OP_SETFIELD,/*	A B C	R[A][K[B]:shortstring] := RK(C)			*/
 
-		OP_NEWTABLE,/*	A B C k	R[A] := {}					*/
+		OP_NEWTABLE,/*	A vB vC k	R[A] := {}				*/
 
-		OP_SELF,/*	A B C	R[A+1] := R[B]; R[A] := R[B][RK(C):string]	*/
+		OP_SELF,/*	A B C	R[A+1] := R[B]; R[A] := R[B][K[C]:shortstring]	*/
 
 		OP_ADDI,/*	A B sC	R[A] := R[B] + sC				*/
 
@@ -52,8 +52,8 @@ namespace Cosmos.Executable.Lua
 		OP_BORK,/*	A B C	R[A] := R[B] | K[C]:integer			*/
 		OP_BXORK,/*	A B C	R[A] := R[B] ~ K[C]:integer			*/
 
-		OP_SHRI,/*	A B sC	R[A] := R[B] >> sC				*/
 		OP_SHLI,/*	A B sC	R[A] := sC << R[B]				*/
+		OP_SHRI,/*	A B sC	R[A] := R[B] >> sC				*/
 
 		OP_ADD,/*	A B C	R[A] := R[B] + R[C]				*/
 		OP_SUB,/*	A B C	R[A] := R[B] - R[C]				*/
@@ -112,13 +112,17 @@ namespace Cosmos.Executable.Lua
 		OP_TFORCALL,/*	A C	R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);	*/
 		OP_TFORLOOP,/*	A Bx	if R[A+2] ~= nil then { R[A]=R[A+2]; pc -= Bx }	*/
 
-		OP_SETLIST,/*	A B C k	R[A][C+i] := R[A+i], 1 <= i <= B		*/
+		OP_SETLIST,/*	A vB vC k	R[A][vC+i] := R[A+i], 1 <= i <= vB	*/
 
 		OP_CLOSURE,/*	A Bx	R[A] := closure(KPROTO[Bx])			*/
 
-		OP_VARARG,/*	A C	R[A], R[A+1], ..., R[A+C-2] = vararg		*/
+		OP_VARARG,/*	A B C k	R[A], ..., R[A+C-2] = varargs			*/
 
-		OP_VARARGPREP,/*A	(adjust vararg parameters)			*/
+		OP_GETVARG,/*	A B C	R[A] := R[B][R[C]], R[B] is vararg parameter	*/
+
+		OP_ERRNNIL,/*	A Bx	raise error if R[A] ~= nil (K[Bx - 1] is global name)*/
+
+		OP_VARARGPREP,/*	(adjust varargs)				*/
 
 		OP_EXTRAARG/*	Ax	extra (larger) argument for previous opcode	*/
 	}
@@ -142,20 +146,24 @@ namespace Cosmos.Executable.Lua
 	  OP_RETURN*, OP_SETLIST) may use 'top'.
 
 	  (*) In OP_VARARG, if (C == 0) then use actual number of varargs and
-	  set top (like in OP_CALL with C == 0).
+	  set top (like in OP_CALL with C == 0). 'k' means function has a
+	  vararg table, which is in R[B].
 
 	  (*) In OP_RETURN, if (B == 0) then return up to 'top'.
 
 	  (*) In OP_LOADKX and OP_NEWTABLE, the next instruction is always
 	  OP_EXTRAARG.
 
-	  (*) In OP_SETLIST, if (B == 0) then real B = 'top'; if k, then
-	  real C = EXTRAARG _ C (the bits of EXTRAARG concatenated with the
-	  bits of C).
+	  (*) In OP_SETLIST, if (vB == 0) then real vB = 'top'; if k, then
+	  real vC = EXTRAARG _ vC (the bits of EXTRAARG concatenated with the
+	  bits of vC).
 
-	  (*) In OP_NEWTABLE, B is log2 of the hash size (which is always a
+	  (*) In OP_NEWTABLE, vB is log2 of the hash size (which is always a
 	  power of 2) plus 1, or zero for size zero. If not k, the array size
-	  is C. Otherwise, the array size is EXTRAARG _ C.
+	  is vC. Otherwise, the array size is EXTRAARG _ vC.
+
+	  (*) In OP_ERRNNIL, (Bx == 0) means index of global name doesn't
+	  fit in Bx. (So, that name is not available for the error message.)
 
 	  (*) For comparisons, k specifies what condition the test should accept
 	  (true or false).
@@ -163,12 +171,14 @@ namespace Cosmos.Executable.Lua
 	  (*) In OP_MMBINI/OP_MMBINK, k means the arguments were flipped
 	   (the constant is the first operand).
 
-	  (*) All 'skips' (pc++) assume that next instruction is a jump.
+	  (*) All comparison and test instructions assume that the instruction
+	  being skipped (pc++) is a jump.
 
 	  (*) In instructions OP_RETURN/OP_TAILCALL, 'k' specifies that the
 	  function builds upvalues, which may need to be closed. C > 0 means
-	  the function is vararg, so that its 'func' must be corrected before
-	  returning; in this case, (C - 1) is its number of fixed parameters.
+	  the function has hidden vararg arguments, so that its 'func' must be
+	  corrected before returning; in this case, (C - 1) is its number of
+	  fixed parameters.
 
 	  (*) In comparisons with an immediate operand, C signals whether the
 	  original operand was a float. (It must be corrected in case of
@@ -182,6 +192,7 @@ namespace Cosmos.Executable.Lua
 	internal enum OpMode
 	{
 		iABC,
+		ivABC,
 		iABx,
 		iAsBx,
 		iAx,
@@ -195,8 +206,8 @@ namespace Cosmos.Executable.Lua
 		** bits 0-2: op mode
 		** bit 3: instruction set register A
 		** bit 4: operator is a test (next instruction must be a jump)
-		** bit 5: instruction uses 'L->top' set by previous instruction (when B == 0)
-		** bit 6: instruction sets 'L->top' for next instruction (when C == 0)
+		** bit 5: used by 'IsIT'
+		** bit 6: used by 'IsOT'
 		** bit 7: instruction is an MM instruction (call a metamethod)
 		*/
 		private static readonly byte[] OpModes =
@@ -221,7 +232,7 @@ namespace Cosmos.Executable.Lua
 			M(0, 0, 0, 0, 0, OpMode.iABC),		/* OP_SETTABLE */
 			M(0, 0, 0, 0, 0, OpMode.iABC),		/* OP_SETI */
 			M(0, 0, 0, 0, 0, OpMode.iABC),		/* OP_SETFIELD */
-			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_NEWTABLE */
+			M(0, 0, 0, 0, 1, OpMode.ivABC),		/* OP_NEWTABLE */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_SELF */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_ADDI */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_ADDK */
@@ -234,8 +245,8 @@ namespace Cosmos.Executable.Lua
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_BANDK */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_BORK */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_BXORK */
-			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_SHRI */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_SHLI */
+			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_SHRI */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_ADD */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_SUB */
 			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_MUL */
@@ -280,10 +291,12 @@ namespace Cosmos.Executable.Lua
 			M(0, 0, 0, 0, 0, OpMode.iABx),		/* OP_TFORPREP */
 			M(0, 0, 0, 0, 0, OpMode.iABC),		/* OP_TFORCALL */
 			M(0, 0, 0, 0, 1, OpMode.iABx),		/* OP_TFORLOOP */
-			M(0, 0, 1, 0, 0, OpMode.iABC),		/* OP_SETLIST */
+			M(0, 0, 1, 0, 0, OpMode.ivABC),		/* OP_SETLIST */
 			M(0, 0, 0, 0, 1, OpMode.iABx),		/* OP_CLOSURE */
 			M(0, 1, 0, 0, 1, OpMode.iABC),		/* OP_VARARG */
-			M(0, 0, 1, 0, 1, OpMode.iABC),		/* OP_VARARGPREP */
+			M(0, 0, 0, 0, 1, OpMode.iABC),		/* OP_GETVARG */
+			M(0, 0, 0, 0, 0, OpMode.iABx),		/* OP_ERRNNIL */
+			M(0, 0, 0, 0, 0, OpMode.iABC),		/* OP_VARARGPREP */
 			M(0, 0, 0, 0, 0, OpMode.iAx),		/* OP_EXTRAARG */
 		};
 
@@ -301,17 +314,32 @@ namespace Cosmos.Executable.Lua
 		public static bool TestOTMode( OpCode m ) { return (OpModes[(int)m] & (1 << 6)) != 0; }
 		public static bool TestMMMode( OpCode m ) { return (OpModes[(int)m] & (1 << 7)) != 0; }
 
-		/* "out top" (set top for next instruction) */
+		/* Check whether instruction sets top for next instruction, that is,
+		** it results in multiple values.
+		*/
 		public static bool IsOT( Instruction i )
 		{
-			return (TestOTMode( i.GET_OPCODE() ) && i.GETARG_C() == 0) ||
-				i.GET_OPCODE() == OpCode.OP_TAILCALL;
+			return i.GET_OPCODE() == OpCode.OP_TAILCALL ||
+				(TestOTMode( i.GET_OPCODE() ) && i.GETARG_C() == 0);
 		}
 
-		/* "in top" (uses top from previous instruction) */
+		/*
+		** Check whether instruction uses top. That happens for OP_VARARGPREP
+		** and for instructions that use multiple values set by the previous
+		** instruction.
+		*/
 		public static bool IsIT( Instruction i )
 		{
-			return TestITMode( i.GET_OPCODE() ) && i.GETARG_B() == 0;
+			OpCode op = i.GET_OPCODE();
+			switch( op )
+			{
+				case OpCode.OP_SETLIST:
+					return i.GETARG_vB() == 0;
+				case OpCode.OP_VARARGPREP:
+					return true;
+				default:
+					return TestITMode( op ) && i.GETARG_B() == 0;
+			}
 		}
 	}
 
@@ -323,14 +351,16 @@ namespace Cosmos.Executable.Lua
 	        3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0
 	        1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
 	iABC          C(8)     |      B(8)     |k|     A(8)      |   Op(7)     |
+	ivABC         vC(10)     |     vB(6)   |k|     A(8)      |   Op(7)     |
 	iABx                Bx(17)               |     A(8)      |   Op(7)     |
 	iAsBx              sBx (signed)(17)      |     A(8)      |   Op(7)     |
 	iAx                           Ax(25)                     |   Op(7)     |
 	isJ                           sJ (signed)(25)            |   Op(7)     |
 
-	  A signed argument is represented in excess K: the represented value is
-	  the written unsigned value minus K, where K is half the maximum for the
-	  corresponding unsigned argument.
+	  ('v' stands for "variant", 's' for "signed", 'x' for "extended".)
+	  A signed argument is represented in excess K: The represented value is
+	  the written unsigned value minus K, where K is half (rounded down) the
+	  maximum value for the corresponding unsigned argument.
 	===========================================================================*/
 	internal struct Instruction
 	{
@@ -359,6 +389,9 @@ namespace Cosmos.Executable.Lua
 				case OpMode.iABC:
 					return string.Format( "{0,-12} {1} {2} {3}{4}", op,
 						GETARG_A(), GETARG_B(), GETARG_C(), GETARG_k() != 0 ? "k" : "" );
+				case OpMode.ivABC:
+					return string.Format( "{0,-12} {1} {2} {3}{4}", op,
+						GETARG_A(), GETARG_vB(), GETARG_vC(), GETARG_k() != 0 ? "k" : "" );
 				case OpMode.iABx:
 					return string.Format( "{0,-12} {1} {2}", op, GETARG_A(), GETARG_Bx() );
 				case OpMode.iAsBx:
@@ -374,7 +407,9 @@ namespace Cosmos.Executable.Lua
 		** size and position of opcode arguments.
 		*/
 		public const int SIZE_C		= 8;
+		public const int SIZE_vC	= 10;
 		public const int SIZE_B		= 8;
+		public const int SIZE_vB	= 6;
 		public const int SIZE_Bx	= (SIZE_C + SIZE_B + 1);
 		public const int SIZE_A		= 8;
 		public const int SIZE_Ax	= (SIZE_Bx + SIZE_A);
@@ -387,7 +422,9 @@ namespace Cosmos.Executable.Lua
 		public const int POS_A		= (POS_OP + SIZE_OP);
 		public const int POS_k		= (POS_A + SIZE_A);
 		public const int POS_B		= (POS_k + 1);
+		public const int POS_vB		= (POS_k + 1);
 		public const int POS_C		= (POS_B + SIZE_B);
+		public const int POS_vC		= (POS_vB + SIZE_vB);
 
 		public const int POS_Bx		= POS_k;
 
@@ -408,7 +445,9 @@ namespace Cosmos.Executable.Lua
 
 		public const int MAXARG_A	= ((1<<SIZE_A)-1);
 		public const int MAXARG_B	= ((1<<SIZE_B)-1);
+		public const int MAXARG_vB	= ((1<<SIZE_vB)-1);
 		public const int MAXARG_C	= ((1<<SIZE_C)-1);
+		public const int MAXARG_vC	= ((1<<SIZE_vC)-1);
 		public const int OFFSET_sC	= (MAXARG_C >> 1);
 
 		public static int Int2sC( int i ) { return i + OFFSET_sC; }
@@ -417,9 +456,15 @@ namespace Cosmos.Executable.Lua
 		public const int MAXINDEXRK	= MAXARG_B;
 
 		/*
-		** invalid register that fits in 8 bits
+		** Maximum size for the stack of a Lua function. It must fit in 8 bits.
+		** The highest valid register is one less than this value.
 		*/
-		public const int NO_REG		= MAXARG_A;
+		public const int MAX_FSTACK	= MAXARG_A;
+
+		/*
+		** Invalid register (one more than last valid register).
+		*/
+		public const int NO_REG		= MAX_FSTACK;
 
 		/* creates a mask with 'n' 1 bits at position 'p' */
 		public static uint MASK1( int n, int p )
@@ -464,9 +509,15 @@ namespace Cosmos.Executable.Lua
 		public int GETARG_sB() { return SC2Int( GETARG_B() ); }
 		public Instruction SETARG_B( int v ) { return SETARG( v, POS_B, SIZE_B ); }
 
+		public int GETARG_vB() { return GETARG( POS_vB, SIZE_vB ); }
+		public Instruction SETARG_vB( int v ) { return SETARG( v, POS_vB, SIZE_vB ); }
+
 		public int GETARG_C() { return GETARG( POS_C, SIZE_C ); }
 		public int GETARG_sC() { return SC2Int( GETARG_C() ); }
 		public Instruction SETARG_C( int v ) { return SETARG( v, POS_C, SIZE_C ); }
+
+		public int GETARG_vC() { return GETARG( POS_vC, SIZE_vC ); }
+		public Instruction SETARG_vC( int v ) { return SETARG( v, POS_vC, SIZE_vC ); }
 
 		public bool TESTARG_k() { return (Value & (1u << POS_k)) != 0; }
 		public int GETARG_k() { return GETARG( POS_k, 1 ); }
@@ -490,6 +541,15 @@ namespace Cosmos.Executable.Lua
 				| ((uint)a << POS_A)
 				| ((uint)b << POS_B)
 				| ((uint)c << POS_C)
+				| ((uint)k << POS_k));
+		}
+
+		public static Instruction CreatevABCk( OpCode o, int a, int b, int c, int k )
+		{
+			return (Instruction)( (((uint)o) << POS_OP)
+				| ((uint)a << POS_A)
+				| ((uint)b << POS_vB)
+				| ((uint)c << POS_vC)
 				| ((uint)k << POS_k));
 		}
 

@@ -16,7 +16,7 @@ namespace Cosmos.Executable.Lua
 
 	public delegate DumpStatus LuaWriter( byte[] bytes, int start, int length );
 
-	// ldump.c: a function as the precompiled chunk of the reference Lua 5.4
+	// ldump.c: a function as the precompiled chunk of the reference Lua 5.5
 	// writes on a 64-bit machine, little endian
 	internal class DumpState
 	{
@@ -30,7 +30,7 @@ namespace Cosmos.Executable.Lua
 
 			d.DumpHeader();
 			d.DumpByte( proto.Upvalues.Count );
-			d.DumpFunction( proto, null );
+			d.DumpFunction( proto );
 
 			return d.Status;
 		}
@@ -38,14 +38,21 @@ namespace Cosmos.Executable.Lua
 		private LuaWriter 	Writer;
 		private bool		Strip;
 		private DumpStatus	Status;
+		private long		Offset;	// current position relative to beginning of dump
+		// the strings already saved, with their indices (the strings are
+		// equal by content, as the keys of the reference's table are)
+		private readonly Dictionary<string, ulong> Strings = new Dictionary<string, ulong>();
+		private ulong		NStr;	// counter for counting saved strings
 
 		public const string LUAC_DATA = "\u0019\u0093\r\n\u001a\n";
-		public const int LUAC_VERSION = 5 * 16 + 4;
+		public const int LUAC_VERSION = 5 * 16 + 5;
 		public const int LUAC_FORMAT = 0; // this is the official format
-		public const long LUAC_INT = 0x5678;
-		public const double LUAC_NUM = 370.5;
+		public const int LUAC_INT = -0x5678;
+		public const uint LUAC_INST = 0x12345678;
+		public const double LUAC_NUM = -370.5;
 
-		// the sizes of Instruction, lua_Integer and lua_Number
+		// the sizes of int, Instruction, lua_Integer and lua_Number
+		public const int SIZEOF_INT = 4;
 		public const int SIZEOF_INSTRUCTION = 4;
 		public const int SIZEOF_INTEGER = 8;
 		public const int SIZEOF_NUMBER = 8;
@@ -60,7 +67,7 @@ namespace Cosmos.Executable.Lua
 		public const int LUA_VLNGSTR = 4 | (1 << 4);
 
 		/* maximum size of a short string (LUAI_MAXSHORTLEN) */
-		private const int MAXSHORTLEN = 40;
+		public const int MAXSHORTLEN = 40;
 
 		private DumpState()
 		{
@@ -74,16 +81,31 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( bytes );
 		}
 
+		/*
+		** Dump enough zeros to ensure that current position is a multiple of
+		** 'align'.
+		*/
+		private void DumpAlign( int align )
+		{
+			int padding = align - (int)(Offset % align);
+			if( padding < align ) // padding == align means no padding
+				DumpBlock( new byte[padding] );
+			Utl.Assert( Status != DumpStatus.OK || Offset % align == 0 );
+		}
+
 		private void DumpHeader()
 		{
 			DumpLiteral( LuaConf.LUA_SIGNATURE );
 			DumpByte( LUAC_VERSION );
 			DumpByte( LUAC_FORMAT );
 			DumpLiteral( LUAC_DATA );
+			DumpByte( SIZEOF_INT );
+			DumpBlock( BitConverter.GetBytes( LUAC_INT ) );
 			DumpByte( SIZEOF_INSTRUCTION );
+			DumpBlock( BitConverter.GetBytes( LUAC_INST ) );
 			DumpByte( SIZEOF_INTEGER );
+			DumpBlock( BitConverter.GetBytes( (long)LUAC_INT ) );
 			DumpByte( SIZEOF_NUMBER );
-			DumpInteger( LUAC_INT );
 			DumpNumber( LUAC_NUM );
 		}
 
@@ -92,30 +114,30 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( new byte[] { (byte)value } );
 		}
 
-		/* dumpSize: 7 bits per byte, most significant first, the last byte
-		   marked with its high bit */
-		private void DumpSize( ulong x )
+		/*
+		** Dumps an unsigned integer using the MSB Varint encoding
+		*/
+		private void DumpVarint( ulong x )
 		{
 			var buff = new byte[10];
-			int n = 0;
-			do {
-				buff[buff.Length - (++n)] = (byte)(x & 0x7f); // fill buffer in reverse order
-				x >>= 7;
-			} while( x != 0 );
-			buff[buff.Length - 1] |= 0x80; // mark last byte
+			int n = 1;
+			buff[buff.Length - 1] = (byte)(x & 0x7f); // fill least-significant byte
+			while( (x >>= 7) != 0 ) // fill other bytes in reverse order
+				buff[buff.Length - (++n)] = (byte)((x & 0x7f) | 0x80);
 			var bytes = new byte[n];
 			Array.Copy( buff, buff.Length - n, bytes, 0, n );
 			DumpBlock( bytes );
 		}
 
-		private void DumpInt( int value )
+		private void DumpSize( ulong sz )
 		{
-			DumpSize( (ulong)value );
+			DumpVarint( sz );
 		}
 
-		private void DumpInteger( long value )
+		private void DumpInt( int x )
 		{
-			DumpBlock( BitConverter.GetBytes( value ) );
+			Utl.Assert( x >= 0 );
+			DumpVarint( (ulong)x );
 		}
 
 		private void DumpNumber( double value )
@@ -123,25 +145,59 @@ namespace Cosmos.Executable.Lua
 			DumpBlock( BitConverter.GetBytes( value ) );
 		}
 
-		// a string, one byte per character: its size plus one, then its bytes
-		private void DumpString( string value )
+		/*
+		** Signed integers are coded to keep small values small. (Coding -1 as
+		** 0xfff...fff would use too many bytes to save a quite common value.)
+		** A non-negative x is coded as 2x; a negative x is coded as -2x - 1.
+		** (0 => 0; -1 => 1; 1 => 2; -2 => 3; 2 => 4; ...)
+		*/
+		private void DumpInteger( long x )
 		{
-			if( value == null )
-			{
-				DumpSize( 0 );
-				return;
-			}
+			ulong cx = unchecked((x >= 0) ? 2u * (ulong)x : (2u * ~(ulong)x) + 1);
+			DumpVarint( cx );
+		}
 
-			DumpSize( (ulong)value.Length + 1 );
-			var bytes = new byte[value.Length];
-			for( int i=0; i<value.Length; ++i )
-				bytes[i] = (byte)value[i];
-			DumpBlock( bytes );
+		/*
+		** Dump a String. First dump its "size":
+		** size==0 is followed by an index and means "reuse saved string with
+		** that index"; index==0 means NULL.
+		** size>=1 is followed by the string contents with real size==size-1 and
+		** means that string, which will be saved with the next available index.
+		** The real size does not include the ending '\0' (which is not dumped),
+		** so adding 1 to it cannot overflow a size_t.
+		*/
+		private void DumpString( string ts )
+		{
+			if( ts == null )
+			{
+				DumpVarint( 0 ); // will "reuse" NULL
+				DumpVarint( 0 ); // special index for NULL
+			}
+			else
+			{
+				ulong idx;
+				if( Strings.TryGetValue( ts, out idx ) ) // string already saved?
+				{
+					DumpVarint( 0 ); // reuse a saved string
+					DumpVarint( idx ); // index of saved string
+				}
+				else // must write and save the string
+				{
+					DumpSize( (ulong)ts.Length + 1 );
+					var bytes = new byte[ts.Length + 1]; // include ending '\0'
+					for( int i=0; i<ts.Length; ++i )
+						bytes[i] = (byte)ts[i];
+					DumpBlock( bytes );
+					NStr++; // one more saved string
+					Strings.Add( ts, NStr ); // h[ts] = nstr
+				}
+			}
 		}
 
 		private void DumpCode( LuaProto proto )
 		{
 			DumpInt( proto.Code.Count );
+			DumpAlign( SIZEOF_INSTRUCTION );
 			foreach( var ins in proto.Code )
 				DumpBlock( BitConverter.GetBytes( (uint)ins ) );
 		}
@@ -182,7 +238,7 @@ namespace Cosmos.Executable.Lua
 		{
 			DumpInt( proto.P.Count );
 			foreach( var p in proto.P )
-				DumpFunction( p, proto.Source );
+				DumpFunction( p );
 		}
 
 		private void DumpUpvalues( LuaProto proto )
@@ -210,10 +266,15 @@ namespace Cosmos.Executable.Lua
 
 			n = Strip ? 0 : proto.AbsLineInfo.Count;
 			DumpInt( n );
-			for( int i=0; i<n; ++i )
+			if( n > 0 )
 			{
-				DumpInt( proto.AbsLineInfo[i].Pc );
-				DumpInt( proto.AbsLineInfo[i].Line );
+				/* 'abslineinfo' is an array of structures of int's */
+				DumpAlign( SIZEOF_INT );
+				for( int i=0; i<n; ++i )
+				{
+					DumpBlock( BitConverter.GetBytes( proto.AbsLineInfo[i].Pc ) );
+					DumpBlock( BitConverter.GetBytes( proto.AbsLineInfo[i].Line ) );
+				}
 			}
 
 			n = Strip ? 0 : proto.LocVars.Count;
@@ -231,29 +292,28 @@ namespace Cosmos.Executable.Lua
 				DumpString( proto.Upvalues[i].Name );
 		}
 
-		private void DumpFunction( LuaProto proto, string psource )
+		private void DumpFunction( LuaProto proto )
 		{
-			if( Strip || proto.Source == psource )
-				DumpString( null ); // no debug info or same source as its parent
-			else
-				DumpString( proto.Source );
 			DumpInt( proto.LineDefined );
 			DumpInt( proto.LastLineDefined );
 			DumpByte( proto.NumParams );
-			DumpByte( proto.IsVarArg ? 1 : 0 );
+			DumpByte( proto.Flag );
 			DumpByte( proto.MaxStackSize );
 			DumpCode( proto );
 			DumpConstants( proto );
 			DumpUpvalues( proto );
 			DumpProtos( proto );
+			DumpString( Strip ? null : proto.Source );
 			DumpDebug( proto );
 		}
 
 		private void DumpBlock( byte[] bytes )
 		{
-			if( Status == DumpStatus.OK && bytes.Length > 0 )
+			if( Status == DumpStatus.OK ) // do not write anything after an error
 			{
-				Status = Writer(bytes, 0, bytes.Length);
+				if( bytes.Length > 0 )
+					Status = Writer(bytes, 0, bytes.Length);
+				Offset += bytes.Length;
 			}
 		}
 	}

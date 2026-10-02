@@ -100,12 +100,18 @@ namespace Cosmos.Executable.Lua
 		}
 
 		private static readonly string[] GCOptionNames = new string[] { "stop", "restart", "collect",
-			"count", "step", "setpause", "setstepmul",
-			"isrunning", "generational", "incremental" };
+			"count", "step", "isrunning", "generational", "incremental",
+			"param" };
 		private static readonly LuaGCOption[] GCOptions = new LuaGCOption[] { LuaGCOption.LUA_GCSTOP,
 			LuaGCOption.LUA_GCRESTART, LuaGCOption.LUA_GCCOLLECT,
-			LuaGCOption.LUA_GCCOUNT, LuaGCOption.LUA_GCSTEP, LuaGCOption.LUA_GCSETPAUSE, LuaGCOption.LUA_GCSETSTEPMUL,
-			LuaGCOption.LUA_GCISRUNNING, LuaGCOption.LUA_GCGEN, LuaGCOption.LUA_GCINC };
+			LuaGCOption.LUA_GCCOUNT, LuaGCOption.LUA_GCSTEP, LuaGCOption.LUA_GCISRUNNING,
+			LuaGCOption.LUA_GCGEN, LuaGCOption.LUA_GCINC, LuaGCOption.LUA_GCPARAM };
+		private static readonly string[] GCParamNames = new string[] {
+			"minormul", "majorminor", "minormajor",
+			"pause", "stepmul", "stepsize" };
+		private static readonly LuaGCParam[] GCParams = new LuaGCParam[] {
+			LuaGCParam.LUA_GCPMINORMUL, LuaGCParam.LUA_GCPMAJORMINOR, LuaGCParam.LUA_GCPMINORMAJOR,
+			LuaGCParam.LUA_GCPPAUSE, LuaGCParam.LUA_GCPSTEPMUL, LuaGCParam.LUA_GCPSTEPSIZE };
 
 		public static int B_CollectGarbage( ILuaState lua )
 		{
@@ -123,19 +129,10 @@ namespace Cosmos.Executable.Lua
 				}
 				case LuaGCOption.LUA_GCSTEP:
 				{
-					int step = (int)lua.L_OptInteger( 2, 0 );
-					int res = L.C_GC( o, step );
+					long n = lua.L_OptInteger( 2, 0 );
+					int res = L.C_GC( o, n );
 					if( res == -1 ) break;
 					lua.PushBoolean( res != 0 );
-					return 1;
-				}
-				case LuaGCOption.LUA_GCSETPAUSE:
-				case LuaGCOption.LUA_GCSETSTEPMUL:
-				{
-					int p = (int)lua.L_OptInteger( 2, 0 );
-					int previous = L.C_GC( o, p );
-					if( previous == -1 ) break;
-					lua.PushInteger( previous );
 					return 1;
 				}
 				case LuaGCOption.LUA_GCISRUNNING:
@@ -146,17 +143,18 @@ namespace Cosmos.Executable.Lua
 					return 1;
 				}
 				case LuaGCOption.LUA_GCGEN:
-				{
-					int minormul = (int)lua.L_OptInteger( 2, 0 );
-					int majormul = (int)lua.L_OptInteger( 3, 0 );
-					return PushMode( lua, L.C_GC( o, minormul, majormul ) );
-				}
 				case LuaGCOption.LUA_GCINC:
 				{
-					int pause = (int)lua.L_OptInteger( 2, 0 );
-					int stepmul = (int)lua.L_OptInteger( 3, 0 );
-					int stepsize = (int)lua.L_OptInteger( 4, 0 );
-					return PushMode( lua, L.C_GC( o, pause, stepmul, stepsize ) );
+					return PushMode( lua, L.C_GC( o ) );
+				}
+				case LuaGCOption.LUA_GCPARAM:
+				{
+					var p = GCParams[lua.L_CheckOption( 2, null, GCParamNames )];
+					long value = lua.L_OptInteger( 3, -1 );
+					int res = L.C_GC( o, (long)p, (int)value );
+					if( res == -1 ) break;
+					lua.PushInteger( res );
+					return 1;
 				}
 				default:
 				{
@@ -179,7 +177,7 @@ namespace Cosmos.Executable.Lua
 		{
 			string filename = lua.L_OptString( 1, null );
 			lua.SetTop( 1 );
-			if( lua.L_LoadFile( filename ) != ThreadStatus.LUA_OK )
+			if( lua.L_LoadFileX( filename, "bt" ) != ThreadStatus.LUA_OK )
 				lua.Error();
 			lua.CallK( 0, LuaDef.LUA_MULTRET, 0, DoFileContinuation );
 			return DoFileContinuation( lua );
@@ -220,10 +218,21 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		private static string GetMode( ILuaState lua, int idx )
+		{
+			string mode = lua.L_OptString( idx, null );
+			if( mode != null && mode.IndexOf( 'B' ) >= 0 )
+			{
+				/* Lua code cannot use fixed buffers */
+				lua.L_ArgError( idx, "invalid mode" );
+			}
+			return mode;
+		}
+
 		public static int B_LoadFile( ILuaState lua )
 		{
 			string fname = lua.L_OptString( 1, null );
-			string mode  = lua.L_OptString( 2, null );
+			string mode  = GetMode( lua, 2 );
 			int env = (!lua.IsNone(3) ? 3 : 0); // `env' index or 0 if no `env'
 			var status = lua.L_LoadFileX( fname, mode );
 			return LoadAux(lua, status, env);
@@ -284,7 +293,7 @@ namespace Cosmos.Executable.Lua
 		{
 			ThreadStatus status;
 			string s = lua.ToString(1);
-			string mode = lua.L_OptString(3, "bt");
+			string mode = GetMode( lua, 3 );
 			int env = (! lua.IsNone(4) ? 4 : 0); // `env' index or 0 if no `env'
 			if( s != null )
 			{
@@ -521,7 +530,7 @@ namespace Cosmos.Executable.Lua
 
 		private static int PairsCont( ILuaState lua )
 		{
-			return 3;
+			return 4; // __pairs did all the work, just return its results
 		}
 		static CSharpFunctionDelegate DG_PairsCont = PairsCont;
 
@@ -530,16 +539,17 @@ namespace Cosmos.Executable.Lua
 			lua.L_CheckAny( 1 );
 			if( !lua.L_GetMetaField( 1, "__pairs" ) ) // no metamethod?
 			{
-				lua.PushCSharpFunction( DG_B_Next ); // will return generator,
-				lua.PushValue( 1 ); // state,
-				lua.PushNil(); // and initial value
+				lua.PushCSharpFunction( DG_B_Next ); // will return generator and
+				lua.PushValue( 1 ); // state
+				lua.PushNil(); // initial value
+				lua.PushNil(); // to-be-closed object
 			}
 			else
 			{
 				lua.PushValue( 1 ); // argument 'self' to metamethod
-				lua.CallK( 1, 3, 0, DG_PairsCont ); // get 3 values from metamethod
+				lua.CallK( 1, 4, 0, DG_PairsCont ); // get 4 values from metamethod
 			}
-			return 3;
+			return 4;
 		}
 
 		/*

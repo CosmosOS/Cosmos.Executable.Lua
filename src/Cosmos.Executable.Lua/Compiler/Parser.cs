@@ -8,7 +8,7 @@ using System.Collections.Generic;
 
 namespace Cosmos.Executable.Lua
 {
-	// lparser.h/lparser.c of Lua 5.4: the parser
+	// lparser.h/lparser.c of Lua 5.5: the parser
 
 	/* kinds of variables/expressions */
 	internal enum ExpKind
@@ -22,26 +22,36 @@ namespace Cosmos.Executable.Lua
 		VKFLT,	/* floating constant; nval = numerical float value */
 		VKINT,	/* integer constant; ival = numerical integer value */
 		VKSTR,	/* string constant; strval = string value;
-				   (string is fixed by the lexer) */
+				   (string is fixed by the scanner) */
 		VNONRELOC,	/* expression has its value in a fixed register;
 					   info = result register */
 		VLOCAL,	/* local variable; var.ridx = register index;
 				   var.vidx = relative index in 'actvar.arr'  */
+		VVARGVAR,	/* vararg parameter; var.ridx = register index;
+					   var.vidx = relative index in 'actvar.arr'  */
+		VGLOBAL,	/* global variable;
+					   info = relative index in 'actvar.arr' (or -1 for
+					   implicit declaration) */
 		VUPVAL,	/* upvalue variable; info = index of upvalue in 'upvalues' */
 		VCONST,	/* compile-time <const> variable;
 				   info = absolute index in 'actvar.arr'  */
 		VINDEXED,	/* indexed variable;
 					   ind.t = table register;
-					   ind.idx = key's R index */
+					   ind.idx = key's R index;
+					   ind.ro = true if it represents a read-only global;
+					   ind.keystr = if key is a string, index in 'k' of that string;
+					   -1 if key is not a string */
+		VVARGIND,	/* indexed vararg parameter;
+					   ind.* as in VINDEXED */
 		VINDEXUP,	/* indexed upvalue;
-					   ind.t = table upvalue;
-					   ind.idx = key's K index */
+					   ind.idx = key's K index;
+					   ind.* as in VINDEXED */
 		VINDEXI,	/* indexed variable with constant integer;
 					   ind.t = table register;
 					   ind.idx = key's value */
 		VINDEXSTR,	/* indexed variable with literal string;
-					   ind.t = table register;
-					   ind.idx = key's K index */
+					   ind.idx = key's K index;
+					   ind.* as in VINDEXED */
 		VJMP,	/* expression is a test/comparison;
 				   info = pc of corresponding jump instruction */
 		VRELOC,	/* expression can put result in any register;
@@ -102,13 +112,15 @@ namespace Cosmos.Executable.Lua
 		{
 			public int T;	/* table (register or upvalue) */
 			public int Idx;	/* index (R or "long" K) */
+			public bool Ro;	/* true if variable is read-only */
+			public int KeyStr;	/* index in 'k' of string key, or -1 if not a string */
 		}
 		public IndData Ind;
 
 		internal struct VarData	/* for local variables */
 		{
 			public int RIdx;	/* register holding the variable */
-			public int VIdx;	/* compiler index (in 'actvar.arr')  */
+			public int VIdx;	/* index in 'actvar.arr' */
 		}
 		public VarData Var;
 
@@ -133,20 +145,29 @@ namespace Cosmos.Executable.Lua
 		}
 	}
 
-	/* description of an active local variable */
+	/* description of an active variable */
 	internal class VarDesc
 	{
 		/* kinds of variables */
-		public const byte VDKREG		= 0;	/* regular */
-		public const byte RDKCONST		= 1;	/* constant */
-		public const byte RDKTOCLOSE	= 2;	/* to-be-closed */
-		public const byte RDKCTC		= 3;	/* compile-time constant */
+		public const byte VDKREG		= 0;	/* regular local */
+		public const byte RDKCONST		= 1;	/* local constant */
+		public const byte RDKVAVAR		= 2;	/* vararg parameter */
+		public const byte RDKTOCLOSE	= 3;	/* to-be-closed */
+		public const byte RDKCTC		= 4;	/* local compile-time constant */
+		public const byte GDKREG		= 5;	/* regular global */
+		public const byte GDKCONST		= 6;	/* global constant */
+
+		/* variables that live in registers */
+		public bool InReg { get { return Kind <= RDKTOCLOSE; } }
+
+		/* test for global variables */
+		public bool IsGlobal { get { return Kind >= GDKREG; } }
 
 		public TValue K;	/* constant value (if it is a compile-time constant) */
 		public byte Kind;
 		public int RIdx;	/* register holding the variable */
 		public int PIdx;	/* index of the variable in the Proto's 'locvars' array */
-		public string Name;	/* variable name */
+		public string Name;	/* variable name (null for a collective global declaration) */
 	}
 
 	/* description of pending goto statements and label statements */
@@ -156,7 +177,7 @@ namespace Cosmos.Executable.Lua
 		public int		Pc;			/* position in code */
 		public int		Line;		/* line where it appeared */
 		public int		NActVar;	/* number of active variables in that position */
-		public bool		Close;		/* goto that escapes upvalues */
+		public bool		Close;		/* true for goto that escapes upvalues */
 	}
 
 	/* dynamic structures used by the parser */
@@ -176,9 +197,9 @@ namespace Cosmos.Executable.Lua
 		public BlockCnt	Previous;	/* chain */
 		public int		FirstLabel;	/* index of first label in this block */
 		public int		FirstGoto;	/* index of first pending goto in this block */
-		public int		NActVar;	/* # active locals outside the block */
+		public int		NActVar;	/* number of active declarations at block entry */
 		public bool		Upval;		/* true if some variable in the block is an upvalue */
-		public bool		IsLoop;		/* true if 'block' is a loop */
+		public int		IsLoop;		/* 1 if 'block' is a loop; 2 if it has pending breaks */
 		public bool		InsideTbc;	/* true if inside the scope of a to-be-closed var. */
 	}
 
@@ -201,7 +222,7 @@ namespace Cosmos.Executable.Lua
 		public int NAbsLineInfo;	/* number of elements in 'abslineinfo' */
 		public int FirstLocal;		/* index of first local var (in Dyndata array) */
 		public int FirstLabel;		/* index of first label (in 'dyd->label->arr') */
-		public int NActVar;			/* number of active local variables */
+		public int NActVar;			/* number of active variable declarations */
 		public int FreeReg;			/* first free register */
 		public int IWthAbs;			/* instructions issued since last absolute line info */
 		public bool NeedClose;		/* function needs to close upvalues when returning */
@@ -226,7 +247,7 @@ namespace Cosmos.Executable.Lua
 			while( nvar-- > 0 )
 			{
 				var vd = GetLocalVarDesc( nvar ); // get previous variable
-				if( vd.Kind != VarDesc.RDKCTC ) // is in a register?
+				if( vd.InReg ) // is in a register?
 					return vd.RIdx + 1;
 			}
 			return 0; // no variables in registers
@@ -261,8 +282,8 @@ namespace Cosmos.Executable.Lua
 			return topFuncState.Proto;
 		}
 
-		/* maximum number of local variables per function (must be smaller
-		   than 250, due to the bytecode format) */
+		/* maximum number of variable declarations per function (must be
+		   smaller than 250, due to the bytecode format) */
 		private const int MAXVARS = 200;
 
 		private LLex		Lexer;
@@ -286,7 +307,7 @@ namespace Cosmos.Executable.Lua
 			Lexer.SyntaxError( string.Format( "{0} expected", Lexer.Token2Str( token ) ) );
 		}
 
-		private void ErrorLimit( FuncState fs, int limit, string what )
+		private static void ErrorLimit( FuncState fs, int limit, string what )
 		{
 			int line = fs.Proto.LineDefined;
 			string where = (line == 0)
@@ -294,10 +315,11 @@ namespace Cosmos.Executable.Lua
 				: string.Format( "function at line {0}", line );
 			string msg = string.Format( "too many {0} (limit is {1}) in {2}",
 				what, limit, where );
-			Lexer.SyntaxError( msg );
+			fs.Lexer.SyntaxError( msg );
 		}
 
-		private void CheckLimit( FuncState fs, int v, int l, string what )
+		// luaY_checklimit
+		public static void CheckLimit( FuncState fs, int v, int l, string what )
 		{
 			if( v > l ) ErrorLimit( fs, l, what );
 		}
@@ -400,16 +422,15 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Create a new local variable with the given 'name'. Return its index
-		** in the function.
+		** Create a new variable with the given 'name' and given 'kind'.
+		** Return its index in the function.
 		*/
-		private int NewLocalVar( string name )
+		private int NewVarKind( string name, byte kind )
 		{
 			var fs = CurFunc;
 			var dyd = Dyd;
-			CheckLimit( fs, dyd.NActVar + 1 - fs.FirstLocal, MAXVARS, "local variables" );
 			var v = new VarDesc();
-			v.Kind = VarDesc.VDKREG; // default
+			v.Kind = kind;
 			v.Name = name;
 			if( dyd.NActVar < dyd.ActVar.Count )
 				dyd.ActVar[dyd.NActVar] = v;
@@ -420,12 +441,20 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
+		** Create a new local variable with the given 'name' and regular kind.
+		*/
+		private int NewLocalVar( string name )
+		{
+			return NewVarKind( name, VarDesc.VDKREG );
+		}
+
+		/*
 		** Get the debug-information entry for current variable 'vidx'.
 		*/
 		private static LocVar LocalDebugInfo( FuncState fs, int vidx )
 		{
 			var vd = fs.GetLocalVarDesc( vidx );
-			if( vd.Kind == VarDesc.RDKCTC )
+			if( !vd.InReg )
 				return null; // no debug info. for constants
 			else
 			{
@@ -447,7 +476,9 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Raises an error if variable described by 'e' is read only
+		** Raises an error if variable described by 'e' is read only; moreover,
+		** if 'e' is t[exp] where t is the vararg parameter, change it to index
+		** a real table. (Virtual vararg tables cannot be changed.)
 		*/
 		private void CheckReadonly( ExpDesc e )
 		{
@@ -459,7 +490,7 @@ namespace Cosmos.Executable.Lua
 					varname = Dyd.ActVar[e.Info].Name;
 					break;
 				}
-				case ExpKind.VLOCAL: {
+				case ExpKind.VLOCAL: case ExpKind.VVARGVAR: {
 					var vardesc = fs.GetLocalVarDesc( e.Var.VIdx );
 					if( vardesc.Kind != VarDesc.VDKREG ) // not a regular variable?
 						varname = vardesc.Name;
@@ -471,8 +502,19 @@ namespace Cosmos.Executable.Lua
 						varname = up.Name;
 					break;
 				}
+				case ExpKind.VVARGIND: {
+					fs.Proto.NeedVaTab(); // function will need a vararg table
+					e.Kind = ExpKind.VINDEXED;
+					goto case ExpKind.VINDEXED;
+				}
+				case ExpKind.VINDEXUP: case ExpKind.VINDEXSTR: case ExpKind.VINDEXED: { // global variable
+					if( e.Ind.Ro ) // read-only?
+						varname = fs.Proto.K[e.Ind.KeyStr].V.SValue();
+					break;
+				}
 				default:
-					return; // other cases cannot be read-only
+					Utl.Assert( e.Kind == ExpKind.VINDEXI ); // this one doesn't need any check
+					return; // integer index cannot be read-only
 			}
 			if( varname != null )
 				Lexer.SemanticError( string.Format(
@@ -492,6 +534,7 @@ namespace Cosmos.Executable.Lua
 				var v = fs.GetLocalVarDesc( vidx );
 				v.RIdx = reglevel++;
 				v.PIdx = RegisterLocalVar( fs, v.Name );
+				CheckLimit( fs, reglevel, MAXVARS, "local variables" );
 			}
 		}
 
@@ -556,21 +599,49 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Look for an active local variable with the name 'n' in the
+		** Look for an active variable with the name 'n' in the
 		** function 'fs'. If found, initialize 'var' with it and return
-		** its expression kind; otherwise return -1.
+		** its expression kind; otherwise return -1. While searching,
+		** var->u.info==-1 means that the preambular global declaration is
+		** active (the default while there is no other global declaration);
+		** var->u.info==-2 means there is no active collective declaration
+		** (some previous global declaration but no collective declaration);
+		** and var->u.info>=0 points to the inner-most (the first one found)
+		** collective declaration, if there is one.
 		*/
 		private static int SearchVar( FuncState fs, string n, ExpDesc var )
 		{
 			for( int i = fs.NActVar - 1; i >= 0; i-- )
 			{
 				var vd = fs.GetLocalVarDesc( i );
-				if( n == vd.Name ) // found?
+				if( vd.IsGlobal ) // global declaration?
+				{
+					if( vd.Name == null ) // collective declaration?
+					{
+						if( var.Info < 0 ) // no previous collective declaration?
+							var.Info = fs.FirstLocal + i; // this is the first one
+					}
+					else // global name
+					{
+						if( n == vd.Name ) // found?
+						{
+							InitExp( var, ExpKind.VGLOBAL, fs.FirstLocal + i );
+							return (int)ExpKind.VGLOBAL;
+						}
+						else if( var.Info == -1 ) // active preambular declaration?
+							var.Info = -2; // invalidate preambular declaration
+					}
+				}
+				else if( n == vd.Name ) // found?
 				{
 					if( vd.Kind == VarDesc.RDKCTC ) // compile-time constant?
 						InitExp( var, ExpKind.VCONST, fs.FirstLocal + i );
-					else // real variable
+					else // local variable
+					{
 						InitVar( fs, var, i );
+						if( vd.Kind == VarDesc.RDKVAVAR ) // vararg parameter?
+							var.Kind = ExpKind.VVARGVAR;
+					}
 					return (int)var.Kind;
 				}
 			}
@@ -608,50 +679,74 @@ namespace Cosmos.Executable.Lua
 		*/
 		private void SingleVarAux( FuncState fs, string n, ExpDesc var, bool bas )
 		{
-			if( fs == null ) // no more levels?
-				InitExp( var, ExpKind.VVOID, 0 ); // default is global
-			else
+			int v = SearchVar( fs, n, var ); // look up variables at current level
+			if( v >= 0 ) // found?
 			{
-				int v = SearchVar( fs, n, var ); // look up locals at current level
-				if( v >= 0 ) // found?
+				if( !bas )
 				{
-					if( v == (int)ExpKind.VLOCAL && !bas )
-						MarkUpval( fs, var.Var.VIdx ); // local will be used as an upval
+					if( var.Kind == ExpKind.VVARGVAR ) // vararg parameter?
+						Coder.VaPar2Local( fs, var ); // change it to a regular local
+					if( var.Kind == ExpKind.VLOCAL )
+						MarkUpval( fs, var.Var.VIdx ); // will be used as an upvalue
 				}
-				else // not found as local at current level; try upvalues
-				{
-					int idx = SearchUpvalue( fs, n ); // try existing upvalues
-					if( idx < 0 ) // not found?
-					{
-						SingleVarAux( fs.Prev, n, var, false ); // try upper levels
-						if( var.Kind == ExpKind.VLOCAL || var.Kind == ExpKind.VUPVAL ) // local or upvalue?
-							idx = NewUpvalue( fs, n, var ); // will be a new upvalue
-						else // it is a global or a constant
-							return; // don't need to do anything at this level
-					}
-					InitExp( var, ExpKind.VUPVAL, idx ); // new or old upvalue
-				}
+				/* else nothing else to be done */
 			}
+			else // not found at current level; try upvalues
+			{
+				int idx = SearchUpvalue( fs, n ); // try existing upvalues
+				if( idx < 0 ) // not found?
+				{
+					if( fs.Prev != null ) // more levels?
+						SingleVarAux( fs.Prev, n, var, false ); // try upper levels
+					if( var.Kind == ExpKind.VLOCAL || var.Kind == ExpKind.VUPVAL ) // local or upvalue?
+						idx = NewUpvalue( fs, n, var ); // will be a new upvalue
+					else // it is a global or a constant
+						return; // don't need to do anything at this level
+				}
+				InitExp( var, ExpKind.VUPVAL, idx ); // new or old upvalue
+			}
+		}
+
+		private void BuildGlobal( string varname, ExpDesc var )
+		{
+			var fs = CurFunc;
+			var key = new ExpDesc();
+			InitExp( var, ExpKind.VGLOBAL, -1 ); // global by default
+			SingleVarAux( fs, LuaDef.LUA_ENV, var, true ); // get environment variable
+			if( var.Kind == ExpKind.VGLOBAL )
+				Lexer.SemanticError( string.Format(
+					"{0} is global when accessing variable '{1}'", LuaDef.LUA_ENV, varname ) );
+			Coder.Exp2AnyRegUp( fs, var ); // _ENV could be a constant
+			CodeString( key, varname ); // key is variable name
+			Coder.Indexed( fs, var, key ); // 'var' represents _ENV[varname]
 		}
 
 		/*
 		** Find a variable with the given name 'n', handling global variables
 		** too.
 		*/
+		private void BuildVar( string varname, ExpDesc var )
+		{
+			var fs = CurFunc;
+			InitExp( var, ExpKind.VGLOBAL, -1 ); // global by default
+			SingleVarAux( fs, varname, var, true );
+			if( var.Kind == ExpKind.VGLOBAL ) // global name?
+			{
+				int info = var.Info;
+				/* global by default in the scope of a global declaration? */
+				if( info == -2 )
+					Lexer.SemanticError( string.Format( "variable '{0}' not declared", varname ) );
+				BuildGlobal( varname, var );
+				if( info != -1 && Dyd.ActVar[info].Kind == VarDesc.GDKCONST )
+					var.Ind.Ro = true; // mark variable as read-only
+				else // anyway must be a global
+					Utl.Assert( info == -1 || Dyd.ActVar[info].Kind == VarDesc.GDKREG );
+			}
+		}
+
 		private void SingleVar( ExpDesc var )
 		{
-			string varname = StrCheckName();
-			var fs = CurFunc;
-			SingleVarAux( fs, varname, var, true );
-			if( var.Kind == ExpKind.VVOID ) // global name?
-			{
-				var key = new ExpDesc();
-				SingleVarAux( fs, LuaDef.LUA_ENV, var, true ); // get environment variable
-				Utl.Assert( var.Kind != ExpKind.VVOID ); // this one must exist
-				Coder.Exp2AnyRegUp( fs, var ); // but could be a constant
-				CodeString( key, varname ); // key is variable name
-				Coder.Indexed( fs, var, key ); // env[varname]
-			}
+			BuildVar( StrCheckName(), var );
 		}
 
 		/*
@@ -662,6 +757,7 @@ namespace Cosmos.Executable.Lua
 		{
 			var fs = CurFunc;
 			int needed = nvars - nexps; // extra values needed
+			Coder.CheckStack( fs, needed );
 			if( HasMultRet( e.Kind ) ) // last expression has multiple returns?
 			{
 				int extra = needed + 1; // discount last expression itself
@@ -694,41 +790,57 @@ namespace Cosmos.Executable.Lua
 
 		/*
 		** Generates an error that a goto jumps into the scope of some
-		** local variable.
+		** variable declaration.
 		*/
 		private void JumpScopeError( LabelDesc gt )
 		{
-			string varname = CurFunc.GetLocalVarDesc( gt.NActVar ).Name;
+			string tsname = CurFunc.GetLocalVarDesc( gt.NActVar ).Name;
+			string varname = (tsname != null) ? tsname : "*";
 			Lexer.SemanticError( string.Format(
-				"<goto {0}> at line {1} jumps into the scope of local '{2}'",
-				gt.Name, gt.Line, varname ) );
+				"<goto {0}> at line {1} jumps into the scope of '{2}'",
+				gt.Name, gt.Line, varname ) ); // raise the error
 		}
 
 		/*
-		** Solves the goto at index 'g' to given 'label' and removes it
+		** Closes the goto at index 'g' to given 'label' and removes it
 		** from the list of pending gotos.
 		** If it jumps into the scope of some variable, raises an error.
+		** The goto needs a CLOSE if it jumps out of a block with upvalues,
+		** or out of the scope of some variable and the block has upvalues
+		** (signaled by parameter 'bup').
 		*/
-		private void SolveGoto( int g, LabelDesc label )
+		private void CloseGoto( int g, LabelDesc label, bool bup )
 		{
+			var fs = CurFunc;
 			var gl = Dyd.Gt; // list of gotos
 			var gt = gl[g]; // goto to be resolved
 			Utl.Assert( gt.Name == label.Name );
 			if( gt.NActVar < label.NActVar ) // enter some scope?
 				JumpScopeError( gt );
-			Coder.PatchList( CurFunc, gt.Pc, label.Pc );
+			if( gt.Close ||
+				(label.NActVar < gt.NActVar && bup) ) // needs close?
+			{
+				int stklevel = fs.RegLevel( label.NActVar );
+				/* move jump to CLOSE position */
+				fs.Proto.Code[gt.Pc + 1] = fs.Proto.Code[gt.Pc];
+				/* put CLOSE instruction at original position */
+				fs.Proto.Code[gt.Pc] = Instruction.CreateABCk( OpCode.OP_CLOSE, stklevel, 0, 0, 0 );
+				gt.Pc++; // must point to jump instruction
+			}
+			Coder.PatchList( fs, gt.Pc, label.Pc ); // goto jumps to label
 			gl.RemoveAt( g ); // remove goto from pending list
 		}
 
 		/*
-		** Search for an active label with the given name.
+		** Search for an active label with the given name, starting at
+		** index 'ilb' (so that it can search for all labels in current block
+		** or all labels in current function).
 		*/
-		private LabelDesc FindLabel( string name )
+		private LabelDesc FindLabel( string name, int ilb )
 		{
-			/* check labels in current function for a match */
-			for( int i = CurFunc.FirstLabel; i < Dyd.Label.Count; i++ )
+			for( ; ilb < Dyd.Label.Count; ilb++ )
 			{
-				var lb = Dyd.Label[i];
+				var lb = Dyd.Label[ilb];
 				if( lb.Name == name ) // correct label?
 					return lb;
 			}
@@ -750,42 +862,28 @@ namespace Cosmos.Executable.Lua
 			return l.Count - 1;
 		}
 
-		private int NewGotoEntry( string name, int line, int pc )
-		{
-			return NewLabelEntry( Dyd.Gt, name, line, pc );
-		}
-
 		/*
-		** Solves forward jumps. Check whether new label 'lb' matches any
-		** pending gotos in current block and solves them. Return true
-		** if any of the gotos need to close upvalues.
+		** Create an entry for the goto and the code for it. As it is not known
+		** at this point whether the goto may need a CLOSE, the code has a jump
+		** followed by an CLOSE. (As the CLOSE comes after the jump, it is a
+		** dead instruction; it works as a placeholder.) When the goto is closed
+		** against a label, if it needs a CLOSE, the two instructions swap
+		** positions, so that the CLOSE comes before the jump.
 		*/
-		private bool SolveGotos( LabelDesc lb )
+		private int NewGotoEntry( string name, int line )
 		{
-			var gl = Dyd.Gt;
-			int i = CurFunc.Block.FirstGoto;
-			bool needsclose = false;
-			while( i < gl.Count )
-			{
-				if( gl[i].Name == lb.Name )
-				{
-					needsclose |= gl[i].Close;
-					SolveGoto( i, lb ); // will remove 'i' from the list
-				}
-				else
-					i++;
-			}
-			return needsclose;
+			var fs = CurFunc;
+			int pc = Coder.Jump( fs ); // create jump
+			Coder.CodeABC( fs, OpCode.OP_CLOSE, 0, 1, 0 ); // spaceholder, marked as dead
+			return NewLabelEntry( Dyd.Gt, name, line, pc );
 		}
 
 		/*
 		** Create a new label with the given 'name' at the given 'line'.
 		** 'last' tells whether label is the last non-op statement in its
-		** block. Solves all pending gotos to this new label and adds
-		** a close instruction if necessary.
-		** Returns true iff it added a close instruction.
+		** block.
 		*/
-		private bool CreateLabel( string name, int line, bool last )
+		private void CreateLabel( string name, int line, bool last )
 		{
 			var fs = CurFunc;
 			var ll = Dyd.Label;
@@ -795,40 +893,50 @@ namespace Cosmos.Executable.Lua
 				/* assume that locals are already out of scope */
 				ll[l].NActVar = fs.Block.NActVar;
 			}
-			if( SolveGotos( ll[l] ) ) // need close?
-			{
-				Coder.CodeABC( fs, OpCode.OP_CLOSE, fs.NVarStack(), 0, 0 );
-				return true;
-			}
-			return false;
 		}
 
 		/*
-		** Adjust pending gotos to outer level of a block.
+		** Traverse the pending gotos of the finishing block checking whether
+		** each match some label of that block. Those that do not match are
+		** "exported" to the outer block, to be solved there. In particular,
+		** its 'nactvar' is updated with the level of the inner block,
+		** as the variables of the inner block are now out of scope.
 		*/
-		private void MoveGotosOut( FuncState fs, BlockCnt bl )
+		private void SolveGotos( FuncState fs, BlockCnt bl )
 		{
 			var gl = Dyd.Gt;
-			/* correct pending gotos to current block */
-			for( int i = bl.FirstGoto; i < gl.Count; i++ ) // for each pending goto
+			int outlevel = fs.RegLevel( bl.NActVar ); // level outside the block
+			int igt = bl.FirstGoto; // first goto in the finishing block
+			while( igt < gl.Count ) // for each pending goto
 			{
-				var gt = gl[i];
-				/* leaving a variable scope? */
-				if( fs.RegLevel( gt.NActVar ) > fs.RegLevel( bl.NActVar ) )
-					gt.Close |= bl.Upval; // jump may need a close
-				gt.NActVar = bl.NActVar; // update goto level
+				var gt = gl[igt];
+				/* search for a matching label in the current block */
+				var lb = FindLabel( gt.Name, bl.FirstLabel );
+				if( lb != null ) // found a match?
+					CloseGoto( igt, lb, bl.Upval ); // close and remove goto
+				else // adjust 'goto' for outer block
+				{
+					/* block has variables to be closed and goto escapes the scope of
+					   some variable? */
+					if( bl.Upval && fs.RegLevel( gt.NActVar ) > outlevel )
+						gt.Close = true; // jump may need a close
+					gt.NActVar = bl.NActVar; // correct level for outer block
+					igt++; // go to next goto
+				}
 			}
+			Dyd.Label.RemoveRange( bl.FirstLabel, Dyd.Label.Count - bl.FirstLabel ); // remove local labels
 		}
 
-		private void EnterBlock( FuncState fs, BlockCnt bl, bool isloop )
+		private void EnterBlock( FuncState fs, BlockCnt bl, int isloop )
 		{
 			bl.IsLoop = isloop;
 			bl.NActVar = fs.NActVar;
 			bl.FirstLabel = Dyd.Label.Count;
 			bl.FirstGoto = Dyd.Gt.Count;
 			bl.Upval = false;
+			/* inherit 'insidetbc' from enclosing block */
 			bl.InsideTbc = (fs.Block != null && fs.Block.InsideTbc);
-			bl.Previous = fs.Block;
+			bl.Previous = fs.Block; // link block in function's block list
 			fs.Block = bl;
 			Utl.Assert( fs.FreeReg == fs.NVarStack() );
 		}
@@ -838,36 +946,30 @@ namespace Cosmos.Executable.Lua
 		*/
 		private void UndefGoto( LabelDesc gt )
 		{
-			string msg;
-			if( gt.Name == "break" )
-				msg = string.Format( "break outside loop at line {0}", gt.Line );
-			else
-				msg = string.Format( "no visible label '{0}' for <goto> at line {1}",
-					gt.Name, gt.Line );
-			Lexer.SemanticError( msg );
+			/* breaks are checked when created, cannot be undefined */
+			Utl.Assert( gt.Name != "break" );
+			Lexer.SemanticError( string.Format(
+				"no visible label '{0}' for <goto> at line {1}", gt.Name, gt.Line ) );
 		}
 
 		private void LeaveBlock( FuncState fs )
 		{
 			var bl = fs.Block;
-			bool hasclose = false;
-			int stklevel = fs.RegLevel( bl.NActVar ); // level outside the block
-			RemoveVars( fs, bl.NActVar ); // remove block locals
-			Utl.Assert( bl.NActVar == fs.NActVar ); // back to level on entry
-			if( bl.IsLoop ) // has to fix pending breaks?
-				hasclose = CreateLabel( "break", 0, false );
-			if( !hasclose && bl.Previous != null && bl.Upval ) // still need a 'close'?
+			int stklevel = fs.RegLevel( bl.NActVar ); // level outside block
+			if( bl.Previous != null && bl.Upval ) // need a 'close'?
 				Coder.CodeABC( fs, OpCode.OP_CLOSE, stklevel, 0, 0 );
 			fs.FreeReg = stklevel; // free registers
-			Dyd.Label.RemoveRange( bl.FirstLabel, Dyd.Label.Count - bl.FirstLabel ); // remove local labels
-			fs.Block = bl.Previous; // current block now is previous one
-			if( bl.Previous != null ) // was it a nested block?
-				MoveGotosOut( fs, bl ); // update pending gotos to enclosing block
-			else
+			RemoveVars( fs, bl.NActVar ); // remove block locals
+			Utl.Assert( bl.NActVar == fs.NActVar ); // back to level on entry
+			if( bl.IsLoop == 2 ) // has to fix pending breaks?
+				CreateLabel( "break", 0, false );
+			SolveGotos( fs, bl );
+			if( bl.Previous == null ) // was it the last block?
 			{
 				if( bl.FirstGoto < Dyd.Gt.Count ) // still pending gotos?
 					UndefGoto( Dyd.Gt[bl.FirstGoto] ); // error
 			}
+			fs.Block = bl.Previous; // current block now is previous one
 		}
 
 		/*
@@ -918,7 +1020,7 @@ namespace Cosmos.Executable.Lua
 			fs.Block = null;
 			f.Source = Lexer.Source;
 			f.MaxStackSize = 2; // registers 0/1 are always valid
-			EnterBlock( fs, bl, false );
+			EnterBlock( fs, bl, 0 );
 		}
 
 		// luaM_shrinkvector: drops the entries of 'list' past its first 'n'
@@ -1010,7 +1112,16 @@ namespace Cosmos.Executable.Lua
 			public int		NH;			/* total number of 'record' elements */
 			public int		NA;			/* number of array elements already stored */
 			public int		ToStore;	/* number of array elements pending to be stored */
+			public int		MaxToStore;	/* maximum number of pending elements */
 		}
+
+		/*
+		** Maximum number of elements in a constructor, to control the following:
+		** * counter overflows;
+		** * overflows in 'extra' for OP_NEWTABLE and OP_SETLIST;
+		** * overflows when adding multiple returns in OP_SETLIST.
+		*/
+		private const int MAX_CNST = int.MaxValue / 2; // (MAX_CNST/(MAXARG_vC + 1) <= MAXARG_Ax)
 
 		private void RecField( ConsControl cc )
 		{
@@ -1024,7 +1135,6 @@ namespace Cosmos.Executable.Lua
 				CodeName( key );
 			else // ls->t.token == '['
 				YIndex( key );
-			CheckLimit( fs, cc.NH, LuaLimits.MAX_INT, "items in a constructor" );
 			cc.NH++;
 			CheckNext( (int)'=' );
 			tab.CopyFrom( cc.T );
@@ -1036,10 +1146,10 @@ namespace Cosmos.Executable.Lua
 
 		private void CloseListField( FuncState fs, ConsControl cc )
 		{
-			if( cc.V.Kind == ExpKind.VVOID ) return; // there is no list item
+			Utl.Assert( cc.ToStore > 0 );
 			Coder.Exp2NextReg( fs, cc.V );
 			cc.V.Kind = ExpKind.VVOID;
-			if( cc.ToStore == LuaDef.LFIELDS_PER_FLUSH )
+			if( cc.ToStore >= cc.MaxToStore )
 			{
 				Coder.SetList( fs, cc.T.Info, cc.NA, cc.ToStore ); // flush
 				cc.NA += cc.ToStore;
@@ -1095,13 +1205,29 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		/*
+		** Compute a limit for how many registers a constructor can use before
+		** emitting a 'SETLIST' instruction, based on how many registers are
+		** available.
+		*/
+		private static int MaxToStore( FuncState fs )
+		{
+			int numfreeregs = Instruction.MAX_FSTACK - fs.FreeReg;
+			if( numfreeregs >= 160 ) // "lots" of registers?
+				return numfreeregs / 5; // use up to 1/5 of them
+			else if( numfreeregs >= 80 ) // still "enough" registers?
+				return 10; // one 'SETLIST' instruction for each 10 values
+			else // save registers for potential more nesting
+				return 1;
+		}
+
 		private void Constructor( ExpDesc t )
 		{
 			/* constructor -> '{' [ field { sep field } [sep] ] '}'
 			   sep -> ',' | ';' */
 			var fs = CurFunc;
 			int line = Lexer.LineNumber;
-			int pc = Coder.CodeABC( fs, OpCode.OP_NEWTABLE, 0, 0, 0 );
+			int pc = Coder.CodevABCk( fs, OpCode.OP_NEWTABLE, 0, 0, 0, 0 );
 			var cc = new ConsControl();
 			Coder.Code( fs, new Instruction( 0 ) ); // space for extra arg.
 			cc.NA = cc.NH = cc.ToStore = 0;
@@ -1110,12 +1236,13 @@ namespace Cosmos.Executable.Lua
 			Coder.ReserveRegs( fs, 1 );
 			InitExp( cc.V, ExpKind.VVOID, 0 ); // no value (yet)
 			CheckNext( (int)'{' );
+			cc.MaxToStore = MaxToStore( fs );
 			do {
-				Utl.Assert( cc.V.Kind == ExpKind.VVOID || cc.ToStore > 0 );
 				if( Lexer.Token.TokenType == (int)'}' ) break;
-				CloseListField( fs, cc );
+				if( cc.V.Kind != ExpKind.VVOID ) // is there a previous list item?
+					CloseListField( fs, cc ); // close it
 				Field( cc );
-				CheckLimit( fs, cc.ToStore + cc.NA + cc.NH, int.MaxValue / 2,
+				CheckLimit( fs, cc.ToStore + cc.NA + cc.NH, MAX_CNST,
 					"items in a constructor" );
 			} while( TestNext( (int)',' ) || TestNext( (int)';' ) );
 			CheckMatch( (int)'}', (int)'{', line );
@@ -1125,19 +1252,19 @@ namespace Cosmos.Executable.Lua
 
 		/* }====================================================================== */
 
-		private void SetVararg( FuncState fs, int nparams )
+		private void SetVararg( FuncState fs )
 		{
-			fs.Proto.IsVarArg = true;
-			Coder.CodeABC( fs, OpCode.OP_VARARGPREP, nparams, 0, 0 );
+			fs.Proto.Flag |= LuaProto.PF_VAHID; // by default, use hidden vararg arguments
+			Coder.CodeABC( fs, OpCode.OP_VARARGPREP, 0, 0, 0 );
 		}
 
 		private void ParList()
 		{
-			/* parlist -> [ {NAME ','} (NAME | '...') ] */
+			/* parlist -> [ {NAME ','} (NAME | '...' [NAME]) ] */
 			var fs = CurFunc;
 			var f = fs.Proto;
 			int nparams = 0;
-			bool isvararg = false;
+			bool varargk = false;
 			if( Lexer.Token.TokenType != (int)')' ) // is 'parlist' not empty?
 			{
 				do {
@@ -1149,19 +1276,27 @@ namespace Cosmos.Executable.Lua
 							break;
 						}
 						case (int)TK.DOTS: {
-							Lexer.Next();
-							isvararg = true;
+							varargk = true;
+							Lexer.Next(); // skip '...'
+							if( Lexer.Token.TokenType == (int)TK.NAME )
+								NewVarKind( StrCheckName(), VarDesc.RDKVAVAR );
+							else
+								NewLocalVar( "(vararg table)" );
 							break;
 						}
 						default: Lexer.SyntaxError( "<name> or '...' expected" ); break;
 					}
-				} while( !isvararg && TestNext( (int)',' ) );
+				} while( !varargk && TestNext( (int)',' ) );
 			}
 			AdjustLocalVars( nparams );
 			f.NumParams = fs.NActVar;
-			if( isvararg )
-				SetVararg( fs, f.NumParams ); // declared vararg
-			Coder.ReserveRegs( fs, fs.NActVar ); // reserve registers for parameters
+			if( varargk )
+			{
+				SetVararg( fs ); // declared vararg
+				AdjustLocalVars( 1 ); // vararg parameter
+			}
+			/* reserve registers for parameters (plus vararg parameter, if present) */
+			Coder.ReserveRegs( fs, fs.NActVar );
 		}
 
 		private void Body( ExpDesc e, bool ismethod, int line )
@@ -1357,7 +1492,7 @@ namespace Cosmos.Executable.Lua
 					var fs = CurFunc;
 					CheckCondition( fs.Proto.IsVarArg,
 						"cannot use '...' outside a vararg function" );
-					InitExp( v, ExpKind.VVARARG, Coder.CodeABC( fs, OpCode.OP_VARARG, 0, 0, 1 ) );
+					InitExp( v, ExpKind.VVARARG, Coder.CodeABC( fs, OpCode.OP_VARARG, 0, fs.Proto.NumParams, 1 ) );
 					break;
 				}
 				case (int)'{': { // constructor
@@ -1490,7 +1625,7 @@ namespace Cosmos.Executable.Lua
 			/* block -> statlist */
 			var fs = CurFunc;
 			var bl = new BlockCnt();
-			EnterBlock( fs, bl, false );
+			EnterBlock( fs, bl, 0 );
 			StatList();
 			LeaveBlock( fs );
 		}
@@ -1557,6 +1692,14 @@ namespace Cosmos.Executable.Lua
 			}
 		}
 
+		/* Create code to store the "top" register in 'var' */
+		private static void StoreVarTop( FuncState fs, ExpDesc var )
+		{
+			var e = new ExpDesc();
+			InitExp( e, ExpKind.VNONRELOC, fs.FreeReg - 1 );
+			Coder.StoreVar( fs, var, e ); // will also free the top register
+		}
+
 		/*
 		** Parse and compile a multiple assignment. The first "variable"
 		** (a 'suffixedexp') was already read by the caller.
@@ -1594,8 +1737,7 @@ namespace Cosmos.Executable.Lua
 					return; // avoid default
 				}
 			}
-			InitExp( e, ExpKind.VNONRELOC, CurFunc.FreeReg - 1 ); // default assignment
-			Coder.StoreVar( CurFunc, lh.V, e );
+			StoreVarTop( CurFunc, lh.V ); // default assignment
 		}
 
 		private int Cond()
@@ -1608,42 +1750,37 @@ namespace Cosmos.Executable.Lua
 			return v.ExitFalse;
 		}
 
-		private void GotoStat()
+		private void GotoStat( int line )
 		{
-			var fs = CurFunc;
-			int line = Lexer.LineNumber;
 			string name = StrCheckName(); // label's name
-			var lb = FindLabel( name );
-			if( lb == null ) // no label?
-				/* forward jump; will be resolved when the label is declared */
-				NewGotoEntry( name, line, Coder.Jump( fs ) );
-			else // found a label
-			{
-				/* backward jump; will be resolved here */
-				int lblevel = fs.RegLevel( lb.NActVar ); // label level
-				if( fs.NVarStack() > lblevel ) // leaving the scope of a variable?
-					Coder.CodeABC( fs, OpCode.OP_CLOSE, lblevel, 0, 0 );
-				/* create jump and link it to the label */
-				Coder.PatchList( fs, Coder.Jump( fs ), lb.Pc );
-			}
+			NewGotoEntry( name, line );
 		}
 
 		/*
 		** Break statement. Semantically equivalent to "goto break".
 		*/
-		private void BreakStat()
+		private void BreakStat( int line )
 		{
-			int line = Lexer.LineNumber;
+			BlockCnt bl; // to look for an enclosing loop
+			for( bl = CurFunc.Block; bl != null; bl = bl.Previous )
+			{
+				if( bl.IsLoop != 0 ) // found one?
+					break;
+			}
+			if( bl == null )
+				Lexer.SyntaxError( "break outside loop" );
+			bl.IsLoop = 2; // signal that block has pending breaks
 			Lexer.Next(); // skip break
-			NewGotoEntry( "break", line, Coder.Jump( CurFunc ) );
+			NewGotoEntry( "break", line );
 		}
 
 		/*
-		** Check whether there is already a label with the given 'name'.
+		** Check whether there is already a label with the given 'name' at
+		** current function.
 		*/
 		private void CheckRepeated( string name )
 		{
-			var lb = FindLabel( name );
+			var lb = FindLabel( name, CurFunc.FirstLabel );
 			if( lb != null ) // already defined?
 				Lexer.SemanticError( string.Format(
 					"label '{0}' already defined on line {1}", name, lb.Line ) );
@@ -1669,7 +1806,7 @@ namespace Cosmos.Executable.Lua
 			Lexer.Next(); // skip WHILE
 			whileinit = Coder.GetLabel( fs );
 			condexit = Cond();
-			EnterBlock( fs, bl, true );
+			EnterBlock( fs, bl, 1 );
 			CheckNext( (int)TK.DO );
 			Block();
 			Coder.JumpTo( fs, whileinit );
@@ -1686,13 +1823,12 @@ namespace Cosmos.Executable.Lua
 			int repeat_init = Coder.GetLabel( fs );
 			var bl1 = new BlockCnt();
 			var bl2 = new BlockCnt();
-			EnterBlock( fs, bl1, true ); // loop block
-			EnterBlock( fs, bl2, false ); // scope block
+			EnterBlock( fs, bl1, 1 ); // loop block
+			EnterBlock( fs, bl2, 0 ); // scope block
 			Lexer.Next(); // skip REPEAT
 			StatList();
 			CheckMatch( (int)TK.UNTIL, (int)TK.REPEAT, line );
 			condexit = Cond(); // read condition (inside scope block)
-			LeaveBlock( fs ); // finish scope
 			if( bl2.Upval ) // upvalues?
 			{
 				int exit = Coder.Jump( fs ); // normal exit must jump over fix
@@ -1702,6 +1838,7 @@ namespace Cosmos.Executable.Lua
 				Coder.PatchToHere( fs, exit ); // normal exit comes to here
 			}
 			Coder.PatchList( fs, condexit, repeat_init ); // close the loop
+			LeaveBlock( fs ); // finish scope
 			LeaveBlock( fs ); // finish loop
 		}
 
@@ -1746,7 +1883,8 @@ namespace Cosmos.Executable.Lua
 			int prep, endfor;
 			CheckNext( (int)TK.DO );
 			prep = Coder.CodeABx( fs, isgen ? OpCode.OP_TFORPREP : OpCode.OP_FORPREP, bas, 0 );
-			EnterBlock( fs, bl, false ); // scope for declared variables
+			fs.FreeReg--; // both 'forprep' remove one register from the stack
+			EnterBlock( fs, bl, 0 ); // scope for declared variables
 			AdjustLocalVars( nvars );
 			Coder.ReserveRegs( fs, nvars );
 			Block();
@@ -1769,8 +1907,7 @@ namespace Cosmos.Executable.Lua
 			int bas = fs.FreeReg;
 			NewLocalVar( "(for state)" );
 			NewLocalVar( "(for state)" );
-			NewLocalVar( "(for state)" );
-			NewLocalVar( varname );
+			NewVarKind( varname, VarDesc.RDKCONST ); // control variable
 			CheckNext( (int)'=' );
 			Exp1(); // initial value
 			CheckNext( (int)',' );
@@ -1782,7 +1919,7 @@ namespace Cosmos.Executable.Lua
 				Coder.Int( fs, fs.FreeReg, 1 );
 				Coder.ReserveRegs( fs, 1 );
 			}
-			AdjustLocalVars( 3 ); // control variables
+			AdjustLocalVars( 2 ); // start scope for internal variables
 			ForBody( bas, line, 1, false );
 		}
 
@@ -1791,16 +1928,15 @@ namespace Cosmos.Executable.Lua
 			/* forlist -> NAME {,NAME} IN explist forbody */
 			var fs = CurFunc;
 			var e = new ExpDesc();
-			int nvars = 5; // gen, state, control, toclose, 'indexname'
+			int nvars = 4; // function, state, closing, control
 			int line;
 			int bas = fs.FreeReg;
-			/* create control variables */
-			NewLocalVar( "(for state)" );
-			NewLocalVar( "(for state)" );
-			NewLocalVar( "(for state)" );
-			NewLocalVar( "(for state)" );
-			/* create declared variables */
-			NewLocalVar( indexname );
+			/* create internal variables */
+			NewLocalVar( "(for state)" ); // iterator function
+			NewLocalVar( "(for state)" ); // state
+			NewLocalVar( "(for state)" ); // closing var. (after swap)
+			NewVarKind( indexname, VarDesc.RDKCONST ); // control variable
+			/* other declared variables */
 			while( TestNext( (int)',' ) )
 			{
 				NewLocalVar( StrCheckName() );
@@ -1809,10 +1945,10 @@ namespace Cosmos.Executable.Lua
 			CheckNext( (int)TK.IN );
 			line = Lexer.LineNumber;
 			AdjustAssign( 4, ExpList( e ), e );
-			AdjustLocalVars( 4 ); // control variables
-			MarkToBeClosed( fs ); // last control var. must be closed
-			Coder.CheckStack( fs, 3 ); // extra space to call generator
-			ForBody( bas, line, nvars - 4, true );
+			AdjustLocalVars( 3 ); // start scope for internal variables
+			MarkToBeClosed( fs ); // last internal var. must be closed
+			Coder.CheckStack( fs, 2 ); // extra space to call iterator
+			ForBody( bas, line, nvars - 3, true );
 		}
 
 		private void ForStat( int line )
@@ -1821,7 +1957,7 @@ namespace Cosmos.Executable.Lua
 			var fs = CurFunc;
 			string varname;
 			var bl = new BlockCnt();
-			EnterBlock( fs, bl, true ); // scope for loop and control variables
+			EnterBlock( fs, bl, 1 ); // scope for loop and control variables
 			Lexer.Next(); // skip 'for'
 			varname = StrCheckName(); // first variable name
 			switch( Lexer.Token.TokenType )
@@ -1837,41 +1973,16 @@ namespace Cosmos.Executable.Lua
 		private void TestThenBlock( ref int escapelist )
 		{
 			/* test_then_block -> [IF | ELSEIF] cond THEN block */
-			var bl = new BlockCnt();
 			var fs = CurFunc;
-			var v = new ExpDesc();
-			int jf; // instruction to skip 'then' code (if condition is false)
+			int condtrue;
 			Lexer.Next(); // skip IF or ELSEIF
-			Expr( v ); // read condition
+			condtrue = Cond(); // read condition
 			CheckNext( (int)TK.THEN );
-			if( Lexer.Token.TokenType == (int)TK.BREAK ) // 'if x then break' ?
-			{
-				int line = Lexer.LineNumber;
-				Coder.GoIfFalse( fs, v ); // will jump if condition is true
-				Lexer.Next(); // skip 'break'
-				EnterBlock( fs, bl, false ); // must enter block before 'goto'
-				NewGotoEntry( "break", line, v.ExitTrue );
-				while( TestNext( (int)';' ) ) { } // skip semicolons
-				if( BlockFollow( false ) ) // jump is the entire block?
-				{
-					LeaveBlock( fs );
-					return; // and that is it
-				}
-				else // must skip over 'then' part if condition is false
-					jf = Coder.Jump( fs );
-			}
-			else // regular case (not a break)
-			{
-				Coder.GoIfTrue( fs, v ); // skip over block if condition is false
-				EnterBlock( fs, bl, false );
-				jf = v.ExitFalse;
-			}
-			StatList(); // 'then' part
-			LeaveBlock( fs );
+			Block(); // 'then' part
 			if( Lexer.Token.TokenType == (int)TK.ELSE ||
 				Lexer.Token.TokenType == (int)TK.ELSEIF ) // followed by 'else'/'elseif'?
 				Coder.Concat( fs, ref escapelist, Coder.Jump( fs ) ); // must jump over it
-			Coder.PatchToHere( fs, jf );
+			Coder.PatchToHere( fs, condtrue );
 		}
 
 		private void IfStat( int line )
@@ -1900,9 +2011,9 @@ namespace Cosmos.Executable.Lua
 			LocalDebugInfo( fs, fvar ).StartPc = fs.Pc;
 		}
 
-		private byte GetLocalAttribute()
+		private byte GetVarAttribute( byte df )
 		{
-			/* ATTRIB -> ['<' Name '>'] */
+			/* attrib -> ['<' NAME '>'] */
 			if( TestNext( (int)'<' ) )
 			{
 				string attr = StrCheckName();
@@ -1914,7 +2025,7 @@ namespace Cosmos.Executable.Lua
 				else
 					Lexer.SemanticError( string.Format( "unknown attribute '{0}'", attr ) );
 			}
-			return VarDesc.VDKREG; // regular variable
+			return df; // return default value
 		}
 
 		private void CheckToClose( FuncState fs, int level )
@@ -1928,19 +2039,20 @@ namespace Cosmos.Executable.Lua
 
 		private void LocalStat()
 		{
-			/* stat -> LOCAL NAME ATTRIB { ',' NAME ATTRIB } ['=' explist] */
+			/* stat -> LOCAL NAME attrib { ',' NAME attrib } ['=' explist] */
 			var fs = CurFunc;
 			int toclose = -1; // index of to-be-closed variable (if any)
 			VarDesc var; // last variable
 			int vidx; // index of last variable
-			byte kind; // kind of last variable
 			int nvars = 0;
 			int nexps;
 			var e = new ExpDesc();
-			do {
-				vidx = NewLocalVar( StrCheckName() );
-				kind = GetLocalAttribute();
-				fs.GetLocalVarDesc( vidx ).Kind = kind;
+			/* get prefixed attribute (if any); default is regular local variable */
+			byte defkind = GetVarAttribute( VarDesc.VDKREG );
+			do { // for each variable
+				string vname = StrCheckName(); // get its name
+				byte kind = GetVarAttribute( defkind ); // postfixed attribute
+				vidx = NewVarKind( vname, kind ); // predeclare it
 				if( kind == VarDesc.RDKTOCLOSE ) // to-be-closed?
 				{
 					if( toclose != -1 ) // one already present?
@@ -1949,14 +2061,14 @@ namespace Cosmos.Executable.Lua
 				}
 				nvars++;
 			} while( TestNext( (int)',' ) );
-			if( TestNext( (int)'=' ) )
+			if( TestNext( (int)'=' ) ) // initialization?
 				nexps = ExpList( e );
 			else
 			{
 				e.Kind = ExpKind.VVOID;
 				nexps = 0;
 			}
-			var = fs.GetLocalVarDesc( vidx ); // get last variable
+			var = fs.GetLocalVarDesc( vidx ); // retrieve last variable
 			if( nvars == nexps && // no adjustments?
 				var.Kind == VarDesc.RDKCONST && // last variable is const?
 				Coder.Exp2Const( fs, e, ref var.K ) ) // compile-time constant?
@@ -1971,6 +2083,120 @@ namespace Cosmos.Executable.Lua
 				AdjustLocalVars( nvars );
 			}
 			CheckToClose( fs, toclose );
+		}
+
+		private byte GetGlobalAttribute( byte df )
+		{
+			byte kind = GetVarAttribute( df );
+			switch( kind )
+			{
+				case VarDesc.RDKTOCLOSE:
+					Lexer.SemanticError( "global variables cannot be to-be-closed" );
+					return kind; // to avoid warnings
+				case VarDesc.RDKCONST:
+					return VarDesc.GDKCONST; // adjust kind for global variable
+				default:
+					return kind;
+			}
+		}
+
+		private void CheckGlobal( string varname, int line )
+		{
+			var fs = CurFunc;
+			var var = new ExpDesc();
+			int k;
+			BuildGlobal( varname, var ); // create global variable in 'var'
+			k = var.Ind.KeyStr; // index of global name in 'k'
+			Coder.CodeCheckGlobal( fs, var, k, line );
+		}
+
+		/*
+		** Recursively traverse list of globals to be initalized. When
+		** going, generate table description for the global. In the end,
+		** after all indices have been generated, read list of initializing
+		** expressions. When returning, generate the assignment of the value on
+		** the stack to the corresponding table description. 'n' is the variable
+		** being handled, range [0, nvars - 1].
+		*/
+		private void InitGlobal( int nvars, int firstidx, int n, int line )
+		{
+			if( n == nvars ) // traversed all variables?
+			{
+				var e = new ExpDesc();
+				int nexps = ExpList( e ); // read list of expressions
+				AdjustAssign( nvars, nexps, e );
+			}
+			else // handle variable 'n'
+			{
+				var fs = CurFunc;
+				var var = new ExpDesc();
+				string varname = fs.GetLocalVarDesc( firstidx + n ).Name;
+				BuildGlobal( varname, var ); // create global variable in 'var'
+				EnterLevel(); // control recursion depth
+				InitGlobal( nvars, firstidx, n + 1, line );
+				LeaveLevel();
+				CheckGlobal( varname, line );
+				StoreVarTop( fs, var );
+			}
+		}
+
+		private void GlobalNames( byte defkind )
+		{
+			var fs = CurFunc;
+			int nvars = 0;
+			int lastidx; // index of last registered variable
+			do { // for each name
+				string vname = StrCheckName();
+				byte kind = GetGlobalAttribute( defkind );
+				lastidx = NewVarKind( vname, kind );
+				nvars++;
+			} while( TestNext( (int)',' ) );
+			if( TestNext( (int)'=' ) ) // initialization?
+				InitGlobal( nvars, lastidx - nvars + 1, 0, Lexer.LineNumber );
+			fs.NActVar += nvars; // activate declaration
+		}
+
+		private void GlobalStat()
+		{
+			/* globalstat -> (GLOBAL) attrib '*'
+			   globalstat -> (GLOBAL) attrib NAME attrib {',' NAME attrib} */
+			var fs = CurFunc;
+			/* get prefixed attribute (if any); default is regular global variable */
+			byte defkind = GetGlobalAttribute( VarDesc.GDKREG );
+			if( !TestNext( (int)'*' ) )
+				GlobalNames( defkind );
+			else
+			{
+				/* use null as name to represent '*' entries */
+				NewVarKind( null, defkind );
+				fs.NActVar++; // activate declaration
+			}
+		}
+
+		private void GlobalFunc( int line )
+		{
+			/* globalfunc -> (GLOBAL FUNCTION) NAME body */
+			var var = new ExpDesc();
+			var b = new ExpDesc();
+			var fs = CurFunc;
+			string fname = StrCheckName();
+			NewVarKind( fname, VarDesc.GDKREG ); // declare global variable
+			fs.NActVar++; // enter its scope
+			BuildGlobal( fname, var );
+			Body( b, false, Lexer.LineNumber ); // compile and return closure in 'b'
+			CheckGlobal( fname, line );
+			Coder.StoreVar( fs, var, b );
+			Coder.FixLine( fs, line ); // definition "happens" in the first line
+		}
+
+		private void GlobalStatFunc( int line )
+		{
+			/* stat -> GLOBAL globalfunc | GLOBAL globalstat */
+			Lexer.Next(); // skip 'global'
+			if( TestNext( (int)TK.FUNCTION ) )
+				GlobalFunc( line );
+			else
+				GlobalStat();
 		}
 
 		private bool FuncName( ExpDesc v )
@@ -1996,8 +2222,8 @@ namespace Cosmos.Executable.Lua
 			var b = new ExpDesc();
 			Lexer.Next(); // skip FUNCTION
 			ismethod = FuncName( v );
-			Body( b, ismethod, line );
 			CheckReadonly( v );
+			Body( b, ismethod, line );
 			Coder.StoreVar( CurFunc, v, b );
 			Coder.FixLine( CurFunc, line ); // definition "happens" in the first line
 		}
@@ -2105,6 +2331,10 @@ namespace Cosmos.Executable.Lua
 						LocalStat();
 					break;
 				}
+				case (int)TK.GLOBAL: { // stat -> globalstatfunc
+					GlobalStatFunc( line );
+					break;
+				}
 				case (int)TK.DBCOLON: { // stat -> label
 					Lexer.Next(); // skip double colon
 					LabelStat( StrCheckName(), line );
@@ -2116,13 +2346,29 @@ namespace Cosmos.Executable.Lua
 					break;
 				}
 				case (int)TK.BREAK: { // stat -> breakstat
-					BreakStat();
+					BreakStat( line );
 					break;
 				}
 				case (int)TK.GOTO: { // stat -> 'goto' NAME
 					Lexer.Next(); // skip 'goto'
-					GotoStat();
+					GotoStat( line );
 					break;
+				}
+				case (int)TK.NAME: {
+					/* compatibility code to parse global keyword when "global"
+					   is not reserved */
+					if( ((NameToken)Lexer.Token).SemInfo == "global" ) // current = "global"?
+					{
+						int lk = Lexer.GetLookAhead().TokenType;
+						if( lk == (int)'<' || lk == (int)TK.NAME || lk == (int)'*' || lk == (int)TK.FUNCTION )
+						{
+							/* 'global <attrib>' or 'global name' or 'global *' or
+							   'global function' */
+							GlobalStatFunc( line );
+							break;
+						}
+					} // else...
+					goto default;
 				}
 				default: { // stat -> func | assignment
 					ExprStat();
@@ -2145,7 +2391,7 @@ namespace Cosmos.Executable.Lua
 		{
 			var bl = new BlockCnt();
 			OpenFunc( fs, bl );
-			SetVararg( fs, 0 ); // main function is always declared vararg
+			SetVararg( fs ); // main function is always vararg
 			var env = AllocUpvalue( fs ); // ...set environment upvalue
 			env.InStack = true;
 			env.Index = 0;

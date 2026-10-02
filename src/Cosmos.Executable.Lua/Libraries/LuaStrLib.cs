@@ -13,7 +13,7 @@ namespace Cosmos.Executable.Lua
 	using CultureInfo = System.Globalization.CultureInfo;
 	using RuntimeHelpers = System.Runtime.CompilerServices.RuntimeHelpers;
 
-	// lstrlib.c of Lua 5.4. A string holds bytes, one per character, and
+	// lstrlib.c of Lua 5.5. A string holds bytes, one per character, and
 	// character classes are those of the "C" locale (ASCII).
 	internal static class LuaStrLib
 	{
@@ -160,8 +160,8 @@ namespace Cosmos.Executable.Lua
 			string s = lua.L_CheckString(1);
 			long n = lua.L_CheckInteger(2);
 			string sep = lua.L_OptString(3, "");
-			if( n <= 0 )
-				lua.PushString( "" );
+			if( n <= 0 || (s.Length | sep.Length) == 0 )
+				lua.PushString( "" ); // no repetitions or both strings empty
 			else if( (long)s.Length + sep.Length > MAXSIZE / n ) // may overflow?
 				return lua.L_Error( "resulting string too large" );
 			else
@@ -211,7 +211,8 @@ namespace Cosmos.Executable.Lua
 		private static int Str_Dump( ILuaState lua )
 		{
 			bool strip = lua.ToBoolean( 2 );
-			lua.L_CheckType( 1, LuaType.LUA_TFUNCTION );
+			lua.L_ArgCheck( lua.Type( 1 ) == LuaType.LUA_TFUNCTION && !lua.IsCSharpFunction( 1 ),
+				1, "Lua function expected" );
 			lua.SetTop( 1 );
 			var bsb = new ByteStringBuilder();
 			LuaWriter writeFunc =
@@ -1507,9 +1508,9 @@ namespace Cosmos.Executable.Lua
 		private const int SZINT = 8; // size of a lua_Integer
 		private const int MAXALIGN = 8; // native alignment requirements
 
-		// the MAXSIZE of C, for the sizes formats give: a string here holds
-		// less, as .NET's do
-		private const int PACK_MAXSIZE = int.MaxValue;
+		// MAX_SIZE of C, limited both by size_t and lua_Integer, for the sizes
+		// formats give: a string here holds less, as .NET's do
+		private const long PACK_MAXSIZE = long.MaxValue;
 
 		// the sizes of C's types on the 64-bit machines the reference runs on
 		private const int SIZEOF_SHORT = 2;
@@ -1546,11 +1547,11 @@ namespace Cosmos.Executable.Lua
 		}
 
 		// getnum: an integer numeral from the format, or 'df' if there is none
-		private static int GetNum( PackHeader h, int df )
+		private static long GetNum( PackHeader h, long df )
 		{
 			if( !Utl.IsDigit( h.Current ) ) // no number?
 				return df; // return default value
-			int a = 0;
+			long a = 0;
 			do {
 				a = a*10 + (h.Fmt[h.Pos++] - '0');
 			} while( Utl.IsDigit( h.Current ) && a <= (PACK_MAXSIZE - 9)/10 );
@@ -1558,16 +1559,16 @@ namespace Cosmos.Executable.Lua
 		}
 
 		// getnumlimit: a numeral, which must be a size of integers
-		private static int GetNumLimit( PackHeader h, int df )
+		private static int GetNumLimit( PackHeader h, long df )
 		{
-			int sz = GetNum( h, df );
-			if( sz > MAXINTSIZE || sz <= 0 )
+			long sz = GetNum( h, df );
+			if( unchecked( (ulong)sz - 1u ) >= MAXINTSIZE )
 				return h.L.L_Error( "integral size ({0}) out of limits [1,{1}]", sz, MAXINTSIZE );
-			return sz;
+			return (int)sz;
 		}
 
 		// getoption: reads and classifies the next option, and its size
-		private static KOption GetOption( PackHeader h, out int size )
+		private static KOption GetOption( PackHeader h, out long size )
 		{
 			char opt = h.Fmt[h.Pos++];
 			size = 0; // default
@@ -1608,10 +1609,10 @@ namespace Cosmos.Executable.Lua
 
 		// getdetails: the next option, its size and the padding it needs to
 		// be aligned
-		private static KOption GetDetails( PackHeader h, long totalsize, out int size, out int ntoalign )
+		private static KOption GetDetails( PackHeader h, long totalsize, out long size, out int ntoalign )
 		{
 			KOption opt = GetOption( h, out size );
-			int align = size; // usually, alignment follows size
+			long align = size; // usually, alignment follows size
 			if( opt == KOption.Kpaddalign ) // 'X' gets alignment from following option
 			{
 				if( h.Current == '\0' || GetOption( h, out align ) == KOption.Kchar || align == 0 )
@@ -1624,8 +1625,16 @@ namespace Cosmos.Executable.Lua
 				if( align > h.MaxAlign ) // enforce maximum alignment
 					align = h.MaxAlign;
 				if( (align & (align - 1)) != 0 ) // is 'align' not a power of 2?
+				{
+					ntoalign = 0; // to avoid warnings
 					h.L.L_ArgError( 1, "format asks for alignment not power of 2" );
-				ntoalign = (align - (int)(totalsize & (align - 1))) & (align - 1);
+				}
+				else
+				{
+					/* 'szmoda' = totalsize % align */
+					long szmoda = totalsize & (align - 1);
+					ntoalign = (int)((align - szmoda) & (align - 1));
+				}
 			}
 			return opt;
 		}
@@ -1677,8 +1686,10 @@ namespace Cosmos.Executable.Lua
 			long totalsize = 0; // accumulate total size of result
 			while( h.Current != '\0' )
 			{
-				int size, ntoalign;
+				long size; int ntoalign;
 				KOption opt = GetDetails( h, totalsize, out size, out ntoalign );
+				lua.L_ArgCheck( (ulong)size + (ulong)ntoalign <= (ulong)(PACK_MAXSIZE - totalsize), arg,
+					"result too long" );
 				totalsize += ntoalign + size;
 				while( ntoalign-- > 0 )
 					b.Append( LUAL_PACKPADBYTE ); // fill alignment
@@ -1690,19 +1701,19 @@ namespace Cosmos.Executable.Lua
 						long n = lua.L_CheckInteger( arg );
 						if( size < SZINT ) // need overflow check?
 						{
-							long lim = 1L << ((size * NB) - 1);
+							long lim = 1L << (int)((size * NB) - 1);
 							lua.L_ArgCheck( -lim <= n && n < lim, arg, "integer overflow" );
 						}
-						PackInt( b, unchecked( (ulong)n ), h.IsLittle, size, n < 0 );
+						PackInt( b, unchecked( (ulong)n ), h.IsLittle, (int)size, n < 0 );
 						break;
 					}
 					case KOption.Kuint: // unsigned integers
 					{
 						long n = lua.L_CheckInteger( arg );
 						if( size < SZINT ) // need overflow check?
-							lua.L_ArgCheck( unchecked( (ulong)n ) < (1UL << (size * NB)),
+							lua.L_ArgCheck( unchecked( (ulong)n ) < (1UL << (int)(size * NB)),
 								arg, "unsigned overflow" );
-						PackInt( b, unchecked( (ulong)n ), h.IsLittle, size, false );
+						PackInt( b, unchecked( (ulong)n ), h.IsLittle, (int)size, false );
 						break;
 					}
 					case KOption.Kfloat: // C float
@@ -1732,17 +1743,17 @@ namespace Cosmos.Executable.Lua
 						int len = str.Length;
 						lua.L_ArgCheck( len <= size, arg, "string longer than given size" );
 						b.Append( str ); // add string
-						while( len++ < size ) // pad extra space
-							b.Append( LUAL_PACKPADBYTE );
+						if( len < size ) // does it need padding?
+							b.Append( LUAL_PACKPADBYTE, (int)(size - len) ); // pad extra space
 						break;
 					}
 					case KOption.Kstring: // strings with length count
 					{
 						string str = lua.L_CheckString( arg );
 						int len = str.Length;
-						lua.L_ArgCheck( size >= SIZEOF_SIZET || (ulong)len < (1UL << (size * NB)),
+						lua.L_ArgCheck( size >= SZINT || (ulong)len < (1UL << (int)(size * NB)),
 							arg, "string length does not fit in given size" );
-						PackInt( b, (ulong)len, h.IsLittle, size, false ); // pack length
+						PackInt( b, (ulong)len, h.IsLittle, (int)size, false ); // pack length
 						b.Append( str );
 						totalsize += len;
 						break;
@@ -1775,7 +1786,7 @@ namespace Cosmos.Executable.Lua
 			long totalsize = 0; // accumulate total size of result
 			while( h.Current != '\0' )
 			{
-				int size, ntoalign;
+				long size; int ntoalign;
 				KOption opt = GetDetails( h, totalsize, out size, out ntoalign );
 				lua.L_ArgCheck( opt != KOption.Kstring && opt != KOption.Kzstr, 1,
 					"variable-length format" );
@@ -1828,10 +1839,11 @@ namespace Cosmos.Executable.Lua
 			int pos = (int)lpos;
 			while( h.Current != '\0' )
 			{
-				int size, ntoalign;
-				KOption opt = GetDetails( h, pos, out size, out ntoalign );
-				lua.L_ArgCheck( (long)ntoalign + size <= ld - pos, 2,
+				long lsize; int ntoalign;
+				KOption opt = GetDetails( h, pos, out lsize, out ntoalign );
+				lua.L_ArgCheck( (ulong)ntoalign + (ulong)lsize <= (ulong)(ld - pos), 2,
 					"data string too short" );
+				int size = (int)lsize;
 				pos += ntoalign; // skip alignment
 				// stack space for item + next position
 				lua.L_CheckStack( 2, "too many results" );

@@ -8,7 +8,7 @@
   </a>
 </p>
 
-> Cosmos.Executable.Lua is a Lua 5.4 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
+> Cosmos.Executable.Lua is a Lua 5.5 interpreter, based on [UniLua](https://github.com/xebecnan/UniLua), made in C# for the Cosmos operating system construction kit.
 
 ## Usage
 
@@ -16,7 +16,7 @@ Add the package to your kernel .csproj:
 
 ```xml
 <ItemGroup>
-    <PackageReference Include="Cosmos.Executable.Lua" Version="3.0.0" />
+    <PackageReference Include="Cosmos.Executable.Lua" Version="4.0.0" />
 </ItemGroup>
 ```
 
@@ -60,11 +60,11 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 ### Limitations
 
-The standard libraries are those of Lua 5.4 built with `LUA_COMPAT_5_3`, as the reference one is, so `math.pow` and the others are there, except `io.popen`. A write reaches a file at once, unless `file:setvbuf` asks for a buffer. C calls and the parser nest 150 levels deep, not 200, for the small stacks of a kernel's threads. On a Cosmos kernel the local time is UTC and `os.getenv` returns nil.
+The language and the standard libraries are those of Lua 5.5 as the reference build makes them, except `io.popen`: `global` is a reserved word only where it starts a declaration (`LUA_COMPAT_GLOBAL`), and `math.pow` and the other deprecated functions are gone. Files are buffered as C's are: a write reaches the file when the buffer fills, on `flush`, or when the script, the collector or the end of the interpreter closes the file. On a Cosmos kernel the local time is UTC, `os.getenv` returns nil, and `os.tmpname` fails, as the kernel has no `/tmp` yet.
 
-The state runs the collector of Lua 5.4 over its own objects, so weak tables, `__gc` finalizers and `collectgarbage("count")` behave as in the reference implementation, and the .NET collector, the kernel's on Cosmos, frees what it lets go. Each cycle is a whole one: the incremental and generational modes only pace the cycles.
+The state runs the collector of Lua 5.5 over its own objects, so weak tables, `__gc` finalizers and `collectgarbage("count")` behave as in the reference implementation, and the .NET collector, the kernel's on Cosmos, frees what it lets go. Each cycle is a whole one: the incremental and generational modes, and the parameters `collectgarbage("param")` sets, only pace the cycles.
 
-The tests run the official [Lua 5.4 test suite](https://www.lua.org/tests/) (lua-5.4.9-tests), as its authors wrote it, each file alone and then all together through its `all.lua`, which loads them again from `string.dump`.
+The tests run the official [Lua 5.5 test suite](https://www.lua.org/tests/) (lua-5.5.1-tests), as its authors wrote it, each file alone and then all together through its `all.lua`, which loads them again from `string.dump`.
 
 ## Authors
 
@@ -82,4 +82,4 @@ Feel free to check [issues page](https://github.com/CosmosOS/Cosmos.Executable.L
 
 Copyright © 2026 [CosmosOS](https://github.com/CosmosOS).
 
-This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, and code ported from Lua 5.3 and Lua 5.4, Copyright © 1994–2026 Lua.org, PUC-Rio, both under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).
+This project is [BSD Clause 3](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/LICENSE.txt) licensed. It includes UniLua, Copyright © 2013 Sheng Lunan, and code ported from Lua 5.3, Lua 5.4 and Lua 5.5, Copyright © 1994–2026 Lua.org, PUC-Rio, both under the MIT license: see [THIRD-PARTY-NOTICES.txt](https://github.com/CosmosOS/Cosmos.Executable.Lua/blob/main/THIRD-PARTY-NOTICES.txt).

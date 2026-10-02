@@ -9,12 +9,13 @@ using System.Text;
 namespace Cosmos.Executable.Lua;
 
 /// <summary>
-/// The <c>os</c> library of Lua 5.4, where UniLua had <c>os.clock</c> only,
+/// The <c>os</c> library of Lua 5.5, where UniLua had <c>os.clock</c> only,
 /// on <see cref="Process"/>, which a kernel does not have.
 /// </summary>
 /// <remarks>
 /// On a Cosmos kernel the local time is UTC, there are no environment
-/// variables (<c>os.getenv</c> gives nil), and <c>os.execute</c> runs a
+/// variables (<c>os.getenv</c> gives nil) nor a <c>/tmp</c> to make the
+/// files of <c>os.tmpname</c> in (it fails), and <c>os.execute</c> runs a
 /// command only if the host gave the interpreter a way to
 /// (<see cref="LuaInterpreter.ExecuteCommand"/>). Times are counted as a
 /// 64-bit time_t counts them, with years in an <c>int</c>, and the local

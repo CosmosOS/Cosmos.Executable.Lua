@@ -7,11 +7,9 @@ namespace Cosmos.Executable.Lua
 {
 	using Math = System.Math;
 	using Double = System.Double;
-	using DateTimeOffset = System.DateTimeOffset;
-	using Stopwatch = System.Diagnostics.Stopwatch;
 
-	// lmathlib.c of Lua 5.4, with the functions it keeps for Lua 5.3 code
-	// (LUA_COMPAT_MATHLIB)
+	// lmathlib.c of Lua 5.5, without the deprecated functions it keeps for
+	// LUA_COMPAT_MATHLIB, which the reference build does not define
 	internal class LuaMathLib
 	{
 		public const string LIB_NAME = "math";
@@ -31,6 +29,8 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "tointeger", 	Math_ToInt ),
 				new NameFuncPair( "floor", 		Math_Floor ),
 				new NameFuncPair( "fmod",  		Math_Fmod ),
+				new NameFuncPair( "frexp", 		Math_Frexp ),
+				new NameFuncPair( "ldexp", 		Math_Ldexp ),
 				new NameFuncPair( "ult",  		Math_Ult ),
 				new NameFuncPair( "log",   		Math_Log ),
 				new NameFuncPair( "max",   		Math_Max ),
@@ -41,15 +41,6 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "sqrt",  		Math_Sqrt ),
 				new NameFuncPair( "tan",   		Math_Tan ),
 				new NameFuncPair( "type",   	Math_Type ),
-				// deprecated functions, for compatibility only
-				new NameFuncPair( "atan2", 		Math_Atan ),
-				new NameFuncPair( "cosh",  		Math_Cosh ),
-				new NameFuncPair( "sinh", 		Math_Sinh ),
-				new NameFuncPair( "tanh",   	Math_Tanh ),
-				new NameFuncPair( "pow",   		Math_Pow ),
-				new NameFuncPair( "frexp", 		Math_Frexp ),
-				new NameFuncPair( "ldexp", 		Math_Ldexp ),
-				new NameFuncPair( "log10", 		Math_Log10 ),
 			};
 
 			lua.L_NewLib( define );
@@ -346,29 +337,21 @@ namespace Cosmos.Executable.Lua
 		// Project the random integer 'ran' into the interval [0, n].
 		// Because 'ran' has 2^B possible values, the projection can only be
 		// uniform when the size of the interval is a power of 2 (exact
-		// division). Otherwise, to get a uniform projection into [0, n], we
+		// division). So, to get a uniform projection into [0, n], we
 		// first compute 'lim', the smallest Mersenne number not smaller than
 		// 'n'. We then project 'ran' into the interval [0, lim].  If the result
 		// is inside [0, n], we are done. Otherwise, we try with another 'ran',
 		// until we have a result inside the interval.
 		private static ulong Project( ulong ran, ulong n, RanState state )
 		{
-			if( (n & unchecked( n + 1 )) == 0 ) // is 'n + 1' a power of 2?
-				return ran & n; // no bias
-			else
-			{
-				ulong lim = n;
-				// compute the smallest (2^b - 1) not smaller than 'n'
-				lim |= (lim >> 1);
-				lim |= (lim >> 2);
-				lim |= (lim >> 4);
-				lim |= (lim >> 8);
-				lim |= (lim >> 16);
-				lim |= (lim >> 32); // integer type has more than 32 bits
-				while( (ran &= lim) > n ) // project 'ran' into [0..lim]
-					ran = NextRand( state.s ); // not inside [0..n]? try again
-				return ran;
-			}
+			ulong lim = n; // to compute the Mersenne number
+			int sh; // how much to spread bits to the right in 'lim'
+			// spread '1' bits in 'lim' until it becomes a Mersenne number
+			for( sh = 1; (lim & unchecked( lim + 1 )) != 0; sh *= 2 )
+				lim |= (lim >> sh); // spread '1's to the right
+			while( (ran &= lim) > n ) // project 'ran' into [0..lim] and test
+				ran = NextRand( state.s ); // not inside [0..n]? try again
+			return ran;
 		}
 
 		private static int Math_Random( ILuaState lua )
@@ -418,28 +401,21 @@ namespace Cosmos.Executable.Lua
 			lua.PushInteger( unchecked( (long)n2 ) );
 		}
 
-		// Set a "random" seed. To get some randomness, use the current time
-		// and, where the reference implementation takes the address of 'L'
-		// (in case the machine does address space layout randomization), the
-		// ticks of the high-resolution clock.
-		private static void RandSeed( ILuaState lua, RanState state )
-		{
-			ulong seed1 = unchecked( (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() );
-			ulong seed2 = unchecked( (ulong)Stopwatch.GetTimestamp() );
-			SetSeed( lua, state.s, seed1, seed2 );
-		}
-
 		private static int Math_RandomSeed( ILuaState lua )
 		{
 			RanState state = (RanState)lua.ToUserData( lua.UpvalueIndex( 1 ) );
+			ulong n1, n2;
 			if( lua.IsNone( 1 ) )
-				RandSeed( lua, state );
+			{
+				n1 = lua.L_MakeSeed(); // "random" seed
+				n2 = NextRand( state.s ); // in case seed is not that random...
+			}
 			else
 			{
-				long n1 = lua.L_CheckInteger( 1 );
-				long n2 = lua.L_OptInteger( 2, 0 );
-				SetSeed( lua, state.s, unchecked( (ulong)n1 ), unchecked( (ulong)n2 ) );
+				n1 = unchecked( (ulong)lua.L_CheckInteger( 1 ) );
+				n2 = unchecked( (ulong)lua.L_OptInteger( 2, 0 ) );
 			}
+			SetSeed( lua, state.s, n1, n2 );
 			return 2; // return seeds
 		}
 
@@ -453,35 +429,9 @@ namespace Cosmos.Executable.Lua
 			};
 			RanState state = new RanState();
 			lua.NewUserDataUV( state, 0 );
-			RandSeed( lua, state ); // initialize with a "random" seed
+			SetSeed( lua, state.s, lua.L_MakeSeed(), 0 ); // initialize with random seed
 			lua.Pop( 2 ); // remove pushed seeds
 			lua.L_SetFuncs( randfuncs, 1 );
-		}
-
-		private static int Math_Cosh( ILuaState lua )
-		{
-			lua.PushNumber( Math.Cosh( lua.L_CheckNumber( 1 ) ) );
-			return 1;
-		}
-
-		private static int Math_Sinh( ILuaState lua )
-		{
-			lua.PushNumber( Math.Sinh( lua.L_CheckNumber( 1 ) ) );
-			return 1;
-		}
-
-		private static int Math_Tanh( ILuaState lua )
-		{
-			lua.PushNumber( Math.Tanh( lua.L_CheckNumber( 1 ) ) );
-			return 1;
-		}
-
-		private static int Math_Pow( ILuaState lua )
-		{
-			double x = lua.L_CheckNumber( 1 );
-			double y = lua.L_CheckNumber( 2 );
-			lua.PushNumber( Math.Pow( x, y ) );
-			return 1;
 		}
 
 		private static int Math_Frexp( ILuaState lua )
@@ -503,12 +453,6 @@ namespace Cosmos.Executable.Lua
 			double x = lua.L_CheckNumber( 1 );
 			int ep = unchecked( (int)lua.L_CheckInteger( 2 ) );
 			lua.PushNumber( Math.ScaleB( x, ep ) );
-			return 1;
-		}
-
-		private static int Math_Log10( ILuaState lua )
-		{
-			lua.PushNumber( Math.Log10( lua.L_CheckNumber( 1 ) ) );
 			return 1;
 		}
 	}

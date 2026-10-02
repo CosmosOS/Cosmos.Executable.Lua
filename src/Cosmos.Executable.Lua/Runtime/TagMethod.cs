@@ -39,7 +39,7 @@ namespace Cosmos.Executable.Lua
 		TM_N		/* number of elements in the enum */
 	}
 
-	// ltm.c of Lua 5.4: tag methods
+	// ltm.c of Lua 5.5: tag methods
 	internal partial class LuaState
 	{
 		// luaT_eventname, ORDER TM
@@ -213,28 +213,11 @@ namespace Cosmos.Executable.Lua
 
 		/*
 		** Calls an order tag method.
-		** For lessequal, LUA_COMPAT_LT_LE keeps compatibility with old
-		** behavior: if there is no '__le', try '__lt', based on l <= r iff
-		** !(r < l) (assuming a total order). If the metamethod yields during
-		** this substitution, the continuation has to know about it (to negate
-		** the result of r<l); bit CIST_LEQ in the call status keeps that
-		** information.
 		*/
 		private bool T_CallOrderTM( ref TValue p1, ref TValue p2, TMS ev )
 		{
 			if( CallBinTM( ref p1, ref p2, Top.Index, ev ) ) // try original event
 				return !IsFalse( ref Top.V );
-			else if( ev == TMS.TM_LE )
-			{
-				/* try '!(p2 < p1)' for '(p1 <= p2)' */
-				CI.CallStatus |= CallStatus.CIST_LEQ; // mark it is doing 'lt' for 'le'
-				if( CallBinTM( ref p2, ref p1, Top.Index, TMS.TM_LT ) )
-				{
-					CI.CallStatus ^= CallStatus.CIST_LEQ; // clear mark
-					return IsFalse( ref Top.V );
-				}
-				/* else error will remove this 'ci'; no need to clear mark */
-			}
 			G_OrderError( ref p1, ref p2 ); // no metamethod found
 			return false; // to avoid warnings
 		}
@@ -252,37 +235,142 @@ namespace Cosmos.Executable.Lua
 				return T_CallOrderTM( ref p1, ref aux, ev );
 		}
 
-		private void T_AdjustVarargs( int nfixparams, CallInfo ci, LuaProto p )
+		/*
+		** Create a vararg table at the top of the stack, with 'n' elements
+		** starting at 'f'.
+		*/
+		private void CreateVarargTab( int f, int n )
 		{
-			int actual = Top.Index - ci.FuncIndex - 1; // number of arguments
-			int nextra = actual - nfixparams; // number of extra arguments
+			var t = new LuaTable( this );
+			Top.V.SetHValue( t );
+			StkId.inc( ref Top );
+			t.Resize( n, 1 );
+			var value = new TValue();
+			value.SetIValue( n ); // value is n
+			var key = new TValue();
+			key.SetSValue( "n" ); // key is "n"
+			t.Set( ref key, ref value ); // t.n = n
+			for( int i = 0; i < n; i++ )
+				t.SetInt( i + 1, ref Stack[f + i].V );
+			C_CheckGC();
+		}
+
+		/*
+		** initial stack:  func arg1 ... argn extra1 ...
+		**                 ^ ci->func                    ^ L->top
+		** final stack: func nil ... nil extra1 ... func arg1 ... argn
+		**                                          ^ ci->func
+		*/
+		private void BuildHiddenArgs( CallInfo ci, LuaProto p,
+			int totalargs, int nfixparams, int nextra )
+		{
 			ci.NExtraArgs = nextra;
 			D_CheckStack( p.MaxStackSize + 1 );
-			/* copy function to the top of the stack */
+			/* copy function to the top of the stack, after extra arguments */
 			StkId.inc( ref Top ).V.SetObj( ref Stack[ci.FuncIndex].V );
-			/* move fixed parameters to the top of the stack */
+			/* move fixed parameters to after the copied function */
 			for( int i = 1; i <= nfixparams; i++ )
 			{
 				StkId.inc( ref Top ).V.SetObj( ref Stack[ci.FuncIndex + i].V );
 				Stack[ci.FuncIndex + i].V.SetNilValue(); // erase original parameter (for GC)
 			}
-			ci.FuncIndex += actual + 1;
-			ci.TopIndex += actual + 1;
-			Utl.Assert( Top.Index <= ci.TopIndex && ci.TopIndex <= StackLast );
+			ci.FuncIndex += totalargs + 1; // 'func' now lives after hidden arguments
+			ci.TopIndex += totalargs + 1;
 		}
 
-		private void T_GetVarargs( CallInfo ci, int where, int wanted )
+		private void T_AdjustVarargs( CallInfo ci, LuaProto p )
 		{
-			int i;
+			int totalargs = Top.Index - ci.FuncIndex - 1;
+			int nfixparams = p.NumParams;
+			int nextra = totalargs - nfixparams; // number of extra arguments
+			if( (p.Flag & LuaProto.PF_VATAB) != 0 ) // does it need a vararg table?
+			{
+				Utl.Assert( (p.Flag & LuaProto.PF_VAHID) == 0 );
+				CreateVarargTab( ci.FuncIndex + nfixparams + 1, nextra );
+				/* move table to proper place (last parameter) */
+				Stack[ci.FuncIndex + nfixparams + 1].V.SetObj( ref Stack[Top.Index - 1].V );
+			}
+			else // no table
+			{
+				Utl.Assert( (p.Flag & LuaProto.PF_VAHID) != 0 );
+				BuildHiddenArgs( ci, p, totalargs, nfixparams, nextra );
+				/* set vararg parameter to nil */
+				Stack[ci.FuncIndex + nfixparams + 1].V.SetNilValue();
+				Utl.Assert( Top.Index <= ci.TopIndex && ci.TopIndex <= StackLast );
+			}
+		}
+
+		private void T_GetVararg( CallInfo ci, StkId ra, ref TValue rc )
+		{
 			int nextra = ci.NExtraArgs;
+			long n;
+			if( V_ToIntegerNS( ref rc, out n, F2Imod.F2Ieq ) ) // integral value?
+			{
+				if( unchecked((ulong)n - 1) < (ulong)nextra )
+				{
+					ra.V.SetObj( ref Stack[ci.FuncIndex - nextra + (int)n - 1].V );
+					return;
+				}
+			}
+			else if( rc.TtIsString() ) // string value?
+			{
+				if( rc.SValue() == "n" ) // key is "n"?
+				{
+					ra.V.SetIValue( nextra );
+					return;
+				}
+			}
+			ra.V.SetNilValue(); // else produce nil
+		}
+
+		/*
+		** Get the number of extra arguments in a vararg function. If vararg
+		** table has been optimized away, that number is in the call info.
+		** Otherwise, get the field 'n' from the vararg table and check that it
+		** has a proper value (non-negative integer not larger than the stack
+		** limit).
+		*/
+		private int GetNumArgs( CallInfo ci, LuaTable h )
+		{
+			if( h == null ) // no vararg table?
+				return ci.NExtraArgs;
+			else
+			{
+				StkId res = h.GetStr( "n" );
+				if( res.V.Tt != TValue.LUA_TNUMINT ||
+					unchecked((ulong)res.V.IValue()) > (ulong)(int.MaxValue / 2) )
+					G_RunError( "vararg table has no proper 'n'" );
+				return (int)res.V.IValue();
+			}
+		}
+
+		/*
+		** Get 'wanted' vararg arguments and put them in 'where'. 'vatab' is
+		** the register of the vararg table or -1 if there is no vararg table.
+		*/
+		private void T_GetVarargs( CallInfo ci, int where, int wanted, int vatab )
+		{
+			LuaTable h = (vatab < 0) ? null : Stack[ci.FuncIndex + vatab + 1].V.HValue();
+			int nargs = GetNumArgs( ci, h ); // number of available vararg args.
+			int i, touse; // 'touse' is minimum between 'wanted' and 'nargs'
 			if( wanted < 0 )
 			{
-				wanted = nextra; // get all extra arguments available
-				D_CheckStack( nextra ); // ensure stack space
-				Top = Stack[where + nextra]; // next instruction will need top
+				touse = wanted = nargs; // get all extra arguments available
+				D_CheckStack( nargs ); // ensure stack space
+				Top = Stack[where + nargs]; // next instruction will need top
 			}
-			for( i = 0; i < wanted && i < nextra; i++ )
-				Stack[where + i].V.SetObj( ref Stack[ci.FuncIndex - nextra + i].V );
+			else
+				touse = (nargs > wanted) ? wanted : nargs;
+			if( h == null ) // no vararg table?
+			{
+				for( i = 0; i < touse; i++ ) // get vararg values from the stack
+					Stack[where + i].V.SetObj( ref Stack[ci.FuncIndex - nargs + i].V );
+			}
+			else // get vararg values from vararg table
+			{
+				for( i = 0; i < touse; i++ )
+					Stack[where + i].V.SetObj( ref h.GetInt( i + 1 ).V );
+			}
 			for( ; i < wanted; i++ ) // complete required results with nil
 				Stack[where + i].V.SetNilValue();
 		}

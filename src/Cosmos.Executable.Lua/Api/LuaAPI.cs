@@ -87,6 +87,7 @@ namespace Cosmos.Executable.Lua
 		bool IsInteger( int index );
 		bool IsTable( int index );
 		bool IsFunction( int index );
+		bool IsCSharpFunction( int index );
 
 		bool Compare( int index1, int index2, LuaEq op );
 		bool RawEqual( int index1, int index2 );
@@ -144,7 +145,7 @@ namespace Cosmos.Executable.Lua
 
 	internal delegate void PFuncDelegate<T>(ref T ud);
 
-	// lapi.c of Lua 5.4: the C# API
+	// lapi.c of Lua 5.5: the C# API
 	internal partial class LuaState : ILuaState
 	{
 		/* test for upvalues */
@@ -468,6 +469,13 @@ namespace Cosmos.Executable.Lua
 		bool ILuaAPI.IsFunction( int index )
 		{
 			return API.Type( index ) == LuaType.LUA_TFUNCTION;
+		}
+
+		// lua_iscfunction
+		bool ILuaAPI.IsCSharpFunction( int index )
+		{
+			StkId addr;
+			return Index2Addr( index, out addr ) && addr.V.TtIsFunction() && !addr.V.ClIsLuaClosure();
 		}
 
 		bool ILuaAPI.RawEqual( int index1, int index2 )
@@ -1155,7 +1163,9 @@ namespace Cosmos.Executable.Lua
 			var c = param.LoadInfo.PeekByte();
 			if( c == LuaConf.LUA_SIGNATURE[0] )
 			{
-				L.CheckMode( param.Mode, "binary" );
+				// mode 'B' (a binary chunk in a fixed buffer) allows binary chunks
+				if( param.Mode == null || param.Mode.IndexOf( 'B' ) < 0 )
+					L.CheckMode( param.Mode, "binary" );
 				proto = Undump.LoadBinary( L, param.LoadInfo, param.Name );
 			}
 			else
@@ -1448,7 +1458,10 @@ namespace Cosmos.Executable.Lua
 			var fromState = from as LuaState;
 			NumCSharpCalls = (fromState != null) ? fromState.NumCSharpCalls : 0;
 			NumNonYieldable = 0;
-			return E_ResetThread( Status );
+			ThreadStatus status = E_ResetThread( Status );
+			if( this == fromState ) // closing itself?
+				D_ThrowBaseLevel( status );
+			return status;
 		}
 
 		// luaE_warning

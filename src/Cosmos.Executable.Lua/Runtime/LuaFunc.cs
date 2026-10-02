@@ -8,7 +8,7 @@ using System.Collections.Generic;
 
 namespace Cosmos.Executable.Lua
 {
-	// lfunc.c of Lua 5.4: upvalues and to-be-closed variables
+	// lfunc.c of Lua 5.5: upvalues and to-be-closed variables
 	internal partial class LuaState
 	{
 		/* special status to close upvalues preserving the top of the stack */
@@ -42,22 +42,24 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Call closing method for object 'obj' with error message 'err'. The
-		** boolean 'yy' controls whether the call is yieldable.
+		** Call closing method for object 'obj' with error object 'err' (if
+		** 'haserr'). The boolean 'yy' controls whether the call is yieldable.
 		** (This function assumes EXTRA_STACK.)
 		*/
-		private void CallCloseMethod( ref TValue obj, ref TValue err, bool yy )
+		private void CallCloseMethod( ref TValue obj, bool haserr, ref TValue err, bool yy )
 		{
-			StkId top = Top;
+			StkId func = Top;
+			int top = func.Index;
 			var tm = T_GetTMByObj( ref obj, TMS.TM_CLOSE );
-			top.V.SetObj( ref tm.V ); // will call metamethod...
-			Stack[top.Index + 1].V.SetObj( ref obj ); // with 'self' as the 1st argument
-			Stack[top.Index + 2].V.SetObj( ref err ); // and error msg. as 2nd argument
-			Top = Stack[top.Index + 3]; // add function and arguments
+			Stack[top++].V.SetObj( ref tm.V ); // will call metamethod...
+			Stack[top++].V.SetObj( ref obj ); // with 'self' as the 1st argument
+			if( haserr ) // if there was an error...
+				Stack[top++].V.SetObj( ref err ); // then error object will be 2nd argument
+			Top = Stack[top]; // add function and arguments
 			if( yy )
-				D_Call( top, 0 );
+				D_Call( func, 0 );
 			else
-				D_CallNoYield( top, 0 );
+				D_CallNoYield( func, 0 );
 		}
 
 		/*
@@ -87,15 +89,24 @@ namespace Cosmos.Executable.Lua
 		private void PrepCallCloseMth( int level, ThreadStatus status, bool yy )
 		{
 			TValue uv = Stack[level].V; // value being closed
-			TValue errobj;
-			if( status == CLOSEKTOP )
-				errobj = TheNilValue.V; // error object is nil
-			else // 'D_SetErrorObj' will set top to level + 2
+			TValue errobj = new TValue();
+			bool haserr;
+			switch( status )
 			{
-				D_SetErrorObj( status, Stack[level + 1] ); // set error object
-				errobj = Stack[level + 1].V; // error object goes after 'uv'
+				case ThreadStatus.LUA_OK:
+					Top = Stack[level + 1]; // call will be at this level
+					haserr = false; // no error object
+					break;
+				case CLOSEKTOP: // don't need to change top
+					haserr = false; // no error object
+					break;
+				default: // 'D_SetErrorObj' will set top to level + 2
+					D_SetErrorObj( status, Stack[level + 1] ); // set error object
+					errobj = Stack[level + 1].V; // error object goes after 'uv'
+					haserr = true;
+					break;
 			}
-			CallCloseMethod( ref uv, ref errobj, yy );
+			CallCloseMethod( ref uv, haserr, ref errobj, yy );
 		}
 
 		/*

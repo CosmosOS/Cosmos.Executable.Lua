@@ -6,7 +6,7 @@
 namespace Cosmos.Executable.Lua
 {
 
-	// lcorolib.c of Lua 5.4: the coroutine library
+	// lcorolib.c of Lua 5.5: the coroutine library
 	internal class LuaCoroLib
 	{
 		public const string LIB_NAME = "coroutine";
@@ -190,7 +190,7 @@ namespace Cosmos.Executable.Lua
 
 		private static int CO_Close( ILuaState lua )
 		{
-			ILuaState co = GetCo( lua );
+			ILuaState co = lua.IsNone( 1 ) ? lua : GetCo( lua );
 			int status = AuxStatus( lua, co );
 			switch( status )
 			{
@@ -209,8 +209,18 @@ namespace Cosmos.Executable.Lua
 						return 2;
 					}
 				}
-				default: // normal or running coroutine
+				case COS_NORM:
 					return lua.L_Error( "cannot close a {0} coroutine", StatName[status] );
+				default: // running coroutine
+				{
+					lua.RawGetI( LuaDef.LUA_REGISTRYINDEX, LuaDef.LUA_RIDX_MAINTHREAD ); // get main
+					if( lua.ToThread( -1 ) == co )
+						return lua.L_Error( "cannot close main thread" );
+					co.CloseThread( lua ); // close itself
+					/* previous call does not return */
+					Utl.Assert( false );
+					return 0;
+				}
 			}
 		}
 

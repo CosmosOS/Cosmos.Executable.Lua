@@ -1,4 +1,4 @@
-// A port of lutf8lib.c of Lua 5.4 (see THIRD-PARTY-NOTICES.txt for its license), adapted for Cosmos.
+// A port of lutf8lib.c of Lua 5.5 (see THIRD-PARTY-NOTICES.txt for its license), adapted for Cosmos.
 #nullable disable
 #pragma warning disable CS1570, CS1587, CS1591 // UniLua documents its API on its wiki, not in XML
 
@@ -244,11 +244,23 @@ namespace Cosmos.Executable.Lua
 					}
 				}
 			}
-			if( n == 0 ) // did it find given character?
-				lua.PushInteger( posi + 1 );
-			else // no such character
+			if( n != 0 ) // did not find given character?
+			{
 				lua.PushNil(); // fail
-			return 1;
+				return 1;
+			}
+			lua.PushInteger( posi + 1 ); // initial position
+			int c = (posi < len) ? s[(int)posi] : 0;
+			if( (c & 0x80) != 0 ) // multi-byte character?
+			{
+				if( IsCont( s, posi ) )
+					return lua.L_Error( "initial position is a continuation byte" );
+				while( IsCont( s, posi + 1 ) )
+					posi++; // skip to last continuation byte
+			}
+			/* else one-byte character: final position is the initial one */
+			lua.PushInteger( posi + 1 ); // 'posi' now is the final position
+			return 2;
 		}
 
 		private static int IterAux( ILuaState lua, bool strict )

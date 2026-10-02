@@ -7,13 +7,10 @@ using System.Collections.Generic;
 
 namespace Cosmos.Executable.Lua
 {
-	// lcode.c of Lua 5.4: code generator
+	// lcode.c of Lua 5.5: code generator
 	internal static class Coder
 	{
 		public const int NO_JUMP = -1;
-
-		/* Maximum number of registers in a Lua function (must fit in 8 bits) */
-		private const int MAXREGS = 255;
 
 		/* limit for difference between lines in relative line info. */
 		private const int LIMLINEDIFF = 0x80;
@@ -210,6 +207,7 @@ namespace Cosmos.Executable.Lua
 				case 1: op = OpCode.OP_RETURN1; break;
 				default: op = OpCode.OP_RETURN; break;
 			}
+			Parser.CheckLimit( fs, nret + 1, Instruction.MAXARG_B, "returns" );
 			CodeABC( fs, op, first, nret + 1, 0 );
 		}
 
@@ -420,6 +418,14 @@ namespace Cosmos.Executable.Lua
 			return CodeABCk( fs, o, a, b, c, 0 );
 		}
 
+		public static int CodevABCk( FuncState fs, OpCode o, int a, int b, int c, int k )
+		{
+			Utl.Assert( OpCodeInfo.GetOpMode( o ) == OpMode.ivABC );
+			Utl.Assert( a <= Instruction.MAXARG_A && b <= Instruction.MAXARG_vB &&
+						c <= Instruction.MAXARG_vC && (k & ~1) == 0 );
+			return Code( fs, Instruction.CreatevABCk( o, a, b, c, k ) );
+		}
+
 		/*
 		** Format and emit an 'iABx' instruction.
 		*/
@@ -487,8 +493,7 @@ namespace Cosmos.Executable.Lua
 			int newstack = fs.FreeReg + n;
 			if( newstack > fs.Proto.MaxStackSize )
 			{
-				if( newstack >= MAXREGS )
-					fs.Lexer.SyntaxError( "function or expression needs too many registers" );
+				Parser.CheckLimit( fs, newstack, Instruction.MAX_FSTACK, "registers" );
 				fs.Proto.MaxStackSize = (byte)newstack;
 			}
 		}
@@ -675,6 +680,22 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
+		** Get the value of 'var' in a register and generate an opcode to check
+		** whether that register is nil. 'k' is the index of the variable name
+		** in the list of constants. If its value cannot be encoded in Bx, a 0
+		** will use '?' for the name.
+		*/
+		public static void CodeCheckGlobal( FuncState fs, ExpDesc var, int k, int line )
+		{
+			Exp2AnyReg( fs, var );
+			FixLine( fs, line );
+			k = (k >= Instruction.MAXARG_Bx) ? 0 : k + 1;
+			CodeABx( fs, OpCode.OP_ERRNNIL, var.Info, (uint)k );
+			FixLine( fs, line );
+			FreeExp( fs, var );
+		}
+
+		/*
 		** Convert a constant in 'v' into an expression description 'e'
 		*/
 		private static void Const2Exp( ref TValue v, ExpDesc e )
@@ -707,6 +728,7 @@ namespace Cosmos.Executable.Lua
 		public static void SetReturns( FuncState fs, ExpDesc e, int nresults )
 		{
 			var pc = fs.Proto.Code[e.Info];
+			Parser.CheckLimit( fs, nresults + 1, Instruction.MAXARG_C, "multiple results" );
 			if( e.Kind == ExpKind.VCALL ) // expression is an open function call?
 				pc.SETARG_C( nresults + 1 );
 			else
@@ -728,11 +750,12 @@ namespace Cosmos.Executable.Lua
 		/*
 		** Convert a VKSTR to a VK
 		*/
-		private static void Str2K( FuncState fs, ExpDesc e )
+		private static int Str2K( FuncState fs, ExpDesc e )
 		{
 			Utl.Assert( e.Kind == ExpKind.VKSTR );
 			e.Info = StringK( fs, e.StrValue );
 			e.Kind = ExpKind.VK;
+			return e.Info;
 		}
 
 		/*
@@ -764,6 +787,16 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
+		** Change a vararg parameter into a regular local variable
+		*/
+		public static void VaPar2Local( FuncState fs, ExpDesc var )
+		{
+			fs.Proto.NeedVaTab(); // function will need a vararg table
+			/* now a vararg parameter is equivalent to a regular local variable */
+			var.Kind = ExpKind.VLOCAL;
+		}
+
+		/*
 		** Ensure that expression 'e' is not a variable (nor a <const>).
 		** (Expression still may have jump lists.)
 		*/
@@ -774,6 +807,10 @@ namespace Cosmos.Executable.Lua
 				case ExpKind.VCONST: {
 					Const2Exp( ref Const2Val( fs, e ).K, e );
 					break;
+				}
+				case ExpKind.VVARGVAR: {
+					VaPar2Local( fs, e ); // turn it into a local variable
+					goto case ExpKind.VLOCAL;
 				}
 				case ExpKind.VLOCAL: { // already in a register
 					e.Info = e.Var.RIdx;
@@ -805,6 +842,12 @@ namespace Cosmos.Executable.Lua
 				case ExpKind.VINDEXED: {
 					FreeRegs( fs, e.Ind.T, e.Ind.Idx );
 					e.Info = CodeABC( fs, OpCode.OP_GETTABLE, 0, e.Ind.T, e.Ind.Idx );
+					e.Kind = ExpKind.VRELOC;
+					break;
+				}
+				case ExpKind.VVARGIND: {
+					FreeRegs( fs, e.Ind.T, e.Ind.Idx );
+					e.Info = CodeABC( fs, OpCode.OP_GETVARG, 0, e.Ind.T, e.Ind.Idx );
 					e.Kind = ExpKind.VRELOC;
 					break;
 				}
@@ -979,12 +1022,12 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
-		** Ensures final expression result is either in a register
-		** or in an upvalue.
+		** Ensures final expression result is either in a register,
+		** in an upvalue, or it is the vararg parameter.
 		*/
 		public static void Exp2AnyRegUp( FuncState fs, ExpDesc e )
 		{
-			if( e.Kind != ExpKind.VUPVAL || HasJumps( e ) )
+			if( (e.Kind != ExpKind.VUPVAL && e.Kind != ExpKind.VVARGVAR) || HasJumps( e ) )
 				Exp2AnyReg( fs, e );
 		}
 
@@ -1004,7 +1047,7 @@ namespace Cosmos.Executable.Lua
 		** Try to make 'e' a K expression with an index in the range of R/K
 		** indices. Return true iff succeeded.
 		*/
-		private static bool Exp2K( FuncState fs, ExpDesc e )
+		public static bool Exp2K( FuncState fs, ExpDesc e )
 		{
 			if( !HasJumps( e ) )
 			{
@@ -1083,6 +1126,11 @@ namespace Cosmos.Executable.Lua
 					CodeABRK( fs, OpCode.OP_SETFIELD, var.Ind.T, var.Ind.Idx, ex );
 					break;
 				}
+				case ExpKind.VVARGIND: {
+					fs.Proto.NeedVaTab(); // function will need a vararg table
+					/* now, assignment is to a regular table */
+					goto case ExpKind.VINDEXED;
+				}
 				case ExpKind.VINDEXED: {
 					CodeABRK( fs, OpCode.OP_SETTABLE, var.Ind.T, var.Ind.Idx, ex );
 					break;
@@ -1090,22 +1138,6 @@ namespace Cosmos.Executable.Lua
 				default: Utl.Assert( false ); break; // invalid var kind to store
 			}
 			FreeExp( fs, ex );
-		}
-
-		/*
-		** Emit SELF instruction (convert expression 'e' into 'e:key(e,').
-		*/
-		public static void Self( FuncState fs, ExpDesc e, ExpDesc key )
-		{
-			int ereg;
-			Exp2AnyReg( fs, e );
-			ereg = e.Info; // register where 'e' was placed
-			FreeExp( fs, e );
-			e.Info = fs.FreeReg; // base register for op_self
-			e.Kind = ExpKind.VNONRELOC; // self expression has a fixed register
-			ReserveRegs( fs, 2 ); // function and 'self' produced by op_self
-			CodeABRK( fs, OpCode.OP_SELF, e.Info, ereg, key );
-			FreeExp( fs, key );
 		}
 
 		/*
@@ -1177,7 +1209,7 @@ namespace Cosmos.Executable.Lua
 		/*
 		** Emit code to go through if 'e' is false, jump otherwise.
 		*/
-		public static void GoIfFalse( FuncState fs, ExpDesc e )
+		private static void GoIfFalse( FuncState fs, ExpDesc e )
 		{
 			int pc; // pc of new jump
 			DischargeVars( fs, e );
@@ -1242,7 +1274,7 @@ namespace Cosmos.Executable.Lua
 		*/
 		private static bool IsKstr( FuncState fs, ExpDesc e )
 		{
-			return e.Kind == ExpKind.VK && !HasJumps( e ) && e.Info <= Instruction.MAXARG_B &&
+			return e.Kind == ExpKind.VK && !HasJumps( e ) && e.Info <= Instruction.MAXINDEXRK &&
 				fs.Proto.K[e.Info].V.TtIsString() &&
 				fs.Proto.K[e.Info].V.SValue().Length <= MAXSHORTLEN;
 		}
@@ -1297,6 +1329,35 @@ namespace Cosmos.Executable.Lua
 		}
 
 		/*
+		** Emit SELF instruction or equivalent: the code will convert
+		** expression 'e' into 'e.key(e,'.
+		*/
+		public static void Self( FuncState fs, ExpDesc e, ExpDesc key )
+		{
+			int ereg, bas;
+			Exp2AnyReg( fs, e );
+			ereg = e.Info; // register where 'e' (the receiver) was placed
+			FreeExp( fs, e );
+			bas = e.Info = fs.FreeReg; // base register for op_self
+			e.Kind = ExpKind.VNONRELOC; // self expression has a fixed register
+			ReserveRegs( fs, 2 ); // method and 'self' produced by op_self
+			Utl.Assert( key.Kind == ExpKind.VKSTR );
+			/* is method name a short string in a valid K index? */
+			if( key.StrValue.Length <= MAXSHORTLEN && Exp2K( fs, key ) )
+			{
+				/* can use 'self' opcode */
+				CodeABCk( fs, OpCode.OP_SELF, bas, ereg, key.Info, 0 );
+			}
+			else // cannot use 'self' opcode; use move+gettable
+			{
+				Exp2AnyReg( fs, key ); // put method name in a register
+				CodeABC( fs, OpCode.OP_MOVE, bas + 1, ereg, 0 ); // copy self to base+1
+				CodeABC( fs, OpCode.OP_GETTABLE, bas, ereg, key.Info ); // get method
+			}
+			FreeExp( fs, key );
+		}
+
+		/*
 		** Create expression 't[k]'. 't' must have its final result already in a
 		** register or upvalue. Upvalues can only be indexed by literal strings.
 		** Keys can be literal strings in the constant table or arbitrary
@@ -1304,10 +1365,12 @@ namespace Cosmos.Executable.Lua
 		*/
 		public static void Indexed( FuncState fs, ExpDesc t, ExpDesc k )
 		{
+			int keystr = -1;
 			if( k.Kind == ExpKind.VKSTR )
-				Str2K( fs, k );
+				keystr = Str2K( fs, k );
 			Utl.Assert( !HasJumps( t ) &&
-				(t.Kind == ExpKind.VLOCAL || t.Kind == ExpKind.VNONRELOC || t.Kind == ExpKind.VUPVAL) );
+				(t.Kind == ExpKind.VLOCAL || t.Kind == ExpKind.VVARGVAR ||
+				 t.Kind == ExpKind.VNONRELOC || t.Kind == ExpKind.VUPVAL) );
 			if( t.Kind == ExpKind.VUPVAL && !IsKstr( fs, k ) ) // upvalue indexed by non 'Kstr'?
 				Exp2AnyReg( fs, t ); // put it in a register
 			if( t.Kind == ExpKind.VUPVAL )
@@ -1316,6 +1379,15 @@ namespace Cosmos.Executable.Lua
 				t.Ind.T = t.Info; // upvalue index
 				t.Ind.Idx = k.Info; // literal short string
 				t.Kind = ExpKind.VINDEXUP;
+			}
+			else if( t.Kind == ExpKind.VVARGVAR ) // indexing the vararg parameter?
+			{
+				int kreg = Exp2AnyReg( fs, k ); // put key in some register
+				int vreg = t.Var.RIdx; // register with vararg param.
+				Utl.Assert( vreg == fs.Proto.NumParams );
+				t.Ind.T = vreg;
+				t.Ind.Idx = kreg;
+				t.Kind = ExpKind.VVARGIND; // 't' represents 'vararg[k]'
 			}
 			else
 			{
@@ -1337,6 +1409,8 @@ namespace Cosmos.Executable.Lua
 					t.Kind = ExpKind.VINDEXED;
 				}
 			}
+			t.Ind.KeyStr = keystr; // string index in 'k'
+			t.Ind.Ro = false; // by default, not read-only
 		}
 
 		/*
@@ -1854,11 +1928,11 @@ namespace Cosmos.Executable.Lua
 
 		public static void SetTableSize( FuncState fs, int pc, int ra, int asize, int hsize )
 		{
-			int rb = (hsize != 0) ? LuaTable.CeilLog2( hsize ) + 1 : 0; // hash size
-			int extra = asize / (Instruction.MAXARG_C + 1); // higher bits of array size
-			int rc = asize % (Instruction.MAXARG_C + 1); // lower bits of array size
+			int extra = asize / (Instruction.MAXARG_vC + 1); // higher bits of array size
+			int rc = asize % (Instruction.MAXARG_vC + 1); // lower bits of array size
 			int k = (extra > 0) ? 1 : 0; // true iff needs extra argument
-			fs.Proto.Code[pc] = Instruction.CreateABCk( OpCode.OP_NEWTABLE, ra, rb, rc, k );
+			hsize = (hsize != 0) ? LuaTable.CeilLog2( hsize ) + 1 : 0;
+			fs.Proto.Code[pc] = Instruction.CreatevABCk( OpCode.OP_NEWTABLE, ra, hsize, rc, k );
 			fs.Proto.Code[pc + 1] = Instruction.CreateAx( OpCode.OP_EXTRAARG, extra );
 		}
 
@@ -1871,16 +1945,16 @@ namespace Cosmos.Executable.Lua
 		*/
 		public static void SetList( FuncState fs, int bas, int nelems, int tostore )
 		{
-			Utl.Assert( tostore != 0 && tostore <= LuaDef.LFIELDS_PER_FLUSH );
+			Utl.Assert( tostore != 0 );
 			if( tostore == LuaDef.LUA_MULTRET )
 				tostore = 0;
-			if( nelems <= Instruction.MAXARG_C )
-				CodeABC( fs, OpCode.OP_SETLIST, bas, tostore, nelems );
+			if( nelems <= Instruction.MAXARG_vC )
+				CodevABCk( fs, OpCode.OP_SETLIST, bas, tostore, nelems, 0 );
 			else
 			{
-				int extra = nelems / (Instruction.MAXARG_C + 1);
-				nelems %= (Instruction.MAXARG_C + 1);
-				CodeABCk( fs, OpCode.OP_SETLIST, bas, tostore, nelems, 1 );
+				int extra = nelems / (Instruction.MAXARG_vC + 1);
+				nelems %= (Instruction.MAXARG_vC + 1);
+				CodevABCk( fs, OpCode.OP_SETLIST, bas, tostore, nelems, 1 );
 				CodeExtraArg( fs, extra );
 			}
 			fs.FreeReg = bas + 1; // free registers with list values
@@ -1911,6 +1985,8 @@ namespace Cosmos.Executable.Lua
 		{
 			int i;
 			var p = fs.Proto;
+			if( (p.Flag & LuaProto.PF_VATAB) != 0 ) // will it use a vararg table?
+				p.Flag &= unchecked((byte)~LuaProto.PF_VAHID); // then it will not use hidden args.
 			for( i = 0; i < fs.Pc; i++ )
 			{
 				var pc = p.Code[i];
@@ -1921,21 +1997,37 @@ namespace Cosmos.Executable.Lua
 					case OpCode.OP_RETURN: case OpCode.OP_TAILCALL: {
 						if( pc.GET_OPCODE() == OpCode.OP_RETURN0 || pc.GET_OPCODE() == OpCode.OP_RETURN1 )
 						{
-							if( !(fs.NeedClose || p.IsVarArg) )
+							if( !(fs.NeedClose || (p.Flag & LuaProto.PF_VAHID) != 0) )
 								break; // no extra work
 							/* else use OP_RETURN to do the extra work */
 							pc.SET_OPCODE( OpCode.OP_RETURN );
 						}
 						if( fs.NeedClose )
 							pc.SETARG_k( 1 ); // signal that it needs to close
-						if( p.IsVarArg )
-							pc.SETARG_C( p.NumParams + 1 ); // signal that it is vararg
+						if( (p.Flag & LuaProto.PF_VAHID) != 0 ) // does it use hidden arguments?
+							pc.SETARG_C( p.NumParams + 1 ); // signal that
 						p.Code[i] = pc;
 						break;
 					}
-					case OpCode.OP_JMP: {
+					case OpCode.OP_GETVARG: {
+						if( (p.Flag & LuaProto.PF_VATAB) != 0 ) // function has a vararg table?
+						{
+							pc.SET_OPCODE( OpCode.OP_GETTABLE ); // must get vararg there
+							p.Code[i] = pc;
+						}
+						break;
+					}
+					case OpCode.OP_VARARG: {
+						if( (p.Flag & LuaProto.PF_VATAB) != 0 ) // function has a vararg table?
+						{
+							pc.SETARG_k( 1 ); // must get vararg there
+							p.Code[i] = pc;
+						}
+						break;
+					}
+					case OpCode.OP_JMP: { // to optimize jumps to jumps
 						int target = FinalTarget( p.Code, i );
-						FixJump( fs, i, target );
+						FixJump( fs, i, target ); // jump directly to final target
 						break;
 					}
 					default: break;

@@ -5,7 +5,7 @@
 
 namespace Cosmos.Executable.Lua
 {
-	// ldblib.c of Lua 5.4: the debug library
+	// ldblib.c of Lua 5.5: the debug library
 	internal class LuaDebugLib
 	{
 		public const string LIB_NAME = "debug";
@@ -36,7 +36,6 @@ namespace Cosmos.Executable.Lua
 				new NameFuncPair( "setmetatable", 	DBG_SetMetaTable	),
 				new NameFuncPair( "setupvalue", 	DBG_SetUpvalue		),
 				new NameFuncPair( "traceback", 		DBG_Traceback		),
-				new NameFuncPair( "setcstacklimit", DBG_SetCStackLimit	),
 			};
 
 			lua.L_NewLib( define );
@@ -218,7 +217,10 @@ namespace Cosmos.Executable.Lua
 				SetTabSI( lua, "ntransfer", ar.NTransfer );
 			}
 			if( options.IndexOf( 't' ) >= 0 )
+			{
 				SetTabSB( lua, "istailcall", ar.IsTailCall );
+				SetTabSI( lua, "extraargs", ar.ExtraArgs );
+			}
 			if( options.IndexOf( 'L' ) >= 0 )
 				TreatStackOption( lua, L1, "activelines" );
 			if( options.IndexOf( 'f' ) >= 0 )
@@ -458,7 +460,7 @@ namespace Cosmos.Executable.Lua
 				string buffer = host.ReadInLine();
 				if( buffer == null || buffer == "cont\n" )
 					return 0;
-				if( lua.L_LoadBuffer( buffer, "=(debug command)" ) != ThreadStatus.LUA_OK ||
+				if( lua.L_LoadBufferX( buffer, "=(debug command)", "t" ) != ThreadStatus.LUA_OK ||
 					lua.PCall( 0, 0, 0 ) != ThreadStatus.LUA_OK )
 					host.WriteErr( lua.L_ToString( -1 ) + "\n" );
 				lua.SetTop( 0 ); // remove eventual returns
@@ -477,14 +479,6 @@ namespace Cosmos.Executable.Lua
 				int level = (int)lua.L_OptInteger( arg + 2, (lua == L1) ? 1 : 0 );
 				lua.L_Traceback( L1, msg, level );
 			}
-			return 1;
-		}
-
-		// lua_setcstacklimit is deprecated in Lua 5.4: it only gives the limit
-		private static int DBG_SetCStackLimit( ILuaState lua )
-		{
-			lua.L_CheckInteger( 1 );
-			lua.PushInteger( LuaLimits.LUAI_MAXCCALLS );
 			return 1;
 		}
 	}
