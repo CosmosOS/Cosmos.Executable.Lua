@@ -64,7 +64,7 @@ string text = LuaText.Decode(state.ToString(-1)); // "héllo" again
 
 ### Limitations
 
-The interpreter behaves like the reference build of Lua 5.5 and passes the official [Lua 5.5 test suite](https://www.lua.org/tests/) (lua-5.5.1-tests), unmodified. Like the reference build, it treats `global` as a keyword only at the start of a declaration, and drops `math.pow` and the other deprecated functions.
+The interpreter behaves like the reference build of Lua 5.5 and passes the official [Lua 5.5 test suite](https://www.lua.org/tests/) (lua-5.5.1-tests), unmodified.
 
 What is different:
 
